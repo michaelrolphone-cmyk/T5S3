@@ -3,6 +3,7 @@
 #include "nvs_param.h"
 
 Preferences prefs;
+static String nvs_str_cache;
 
 /* clang-format off */
 nvs_param nvs_default[NVS_ID_MAX] = {
@@ -74,7 +75,11 @@ void nvs_param_set(NVSDataID id, NVSType type, union nvs_data data)
     // Serial.printf("[SET] ID=%d, Type=%d, key=%s, data=%d\n", id, type, nvs_default[id].key, data.u8);
 
     int i = nvs_param_id_is_find(id);
-    if(i == -1) return;
+    if(i == -1)
+    {
+        prefs.end();
+        return;
+    }
 
     switch (nvs_default[i].type)
     {
@@ -102,7 +107,11 @@ union nvs_data nvs_param_get(NVSDataID id, NVSType type)
     prefs.begin("system");
 
     int i = nvs_param_id_is_find(id);
-    if(i == -1) return t;
+    if(i == -1)
+    {
+        prefs.end();
+        return t;
+    }
 
     switch (nvs_default[i].type)
     {
@@ -117,7 +126,7 @@ union nvs_data nvs_param_get(NVSDataID id, NVSType type)
     case NVS_FLOAT:  t.ff = prefs.getFloat(nvs_default[i].key);    break;
     case NVS_DOUBLE: t.dd = prefs.getDouble(nvs_default[i].key);   break;
     case NVS_BLOB:   t.bb = prefs.getBool(nvs_default[i].key);     break;
-    case NVS_STR:    t.str = (prefs.getString(nvs_default[i].key)).c_str();  break;
+    case NVS_STR:    nvs_str_cache = prefs.getString(nvs_default[i].key); t.str = nvs_str_cache.c_str(); break;
     default:
         break;
     }
