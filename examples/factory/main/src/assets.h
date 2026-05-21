@@ -17,6 +17,7 @@ LV_IMG_DECLARE(img_shutdown)
 LV_IMG_DECLARE(img_sleep)
 LV_IMG_DECLARE(img_start)
 LV_IMG_DECLARE(img_test)
+LV_IMG_DECLARE(img_markdown)
 LV_IMG_DECLARE(img_wifi)
 
 LV_FONT_DECLARE(Font_Mono_Bold_20);

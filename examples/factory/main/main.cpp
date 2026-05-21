@@ -75,6 +75,8 @@ void btn_task(void *param)
 {
     bool boot_btn_pressed = false;
     bool ioext_btn_pressed = false;
+    bool ioext_btn_long_handled = false;
+    uint32_t ioext_btn_press_ms = 0;
 
     while(1)
     {
@@ -94,19 +96,33 @@ void btn_task(void *param)
         if (digitalRead(BOARD_PCA9535_INT) == LOW)
         {
             if(button_read()) {
-                // Extended IO button press (power key): enter sleep
+                // Extended IO button press:
+                // short press -> refresh screen
+                // long press (>=3s) -> toggle backlight
                 if (!ioext_btn_pressed) {
                     ioext_btn_pressed = true;
-                    scr_mgr_switch(0, false);
-                    ui_sleep();
+                    ioext_btn_long_handled = false;
+                    ioext_btn_press_ms = millis();
+                }
+
+                if(!ioext_btn_long_handled && (millis() - ioext_btn_press_ms >= 3000)) {
+                    int bl = 0;
+                    ui_setting_get_backlight(&bl);
+                    ui_setting_set_backlight(bl == 0 ? 3 : 0);
+                    ioext_btn_long_handled = true;
                 }
             }
             else {
+                if(ioext_btn_pressed && !ioext_btn_long_handled) {
+                    disp_refresh_screen();
+                }
                 ioext_btn_pressed = false;
+                ioext_btn_long_handled = false;
             }
         }
         else {
             ioext_btn_pressed = false;
+            ioext_btn_long_handled = false;
         }
         delay(80);
     }
@@ -403,15 +419,6 @@ static bool rtc_pcf8563_init(void)
         // }
         return false;
     }
-
-    uint16_t year = 2024;
-    uint8_t month = 12;
-    uint8_t day = 18;
-    uint8_t hour = 10;
-    uint8_t minute = 19;
-    uint8_t second = 00;
-
-    rtc.setDateTime(year, month, day, hour, minute, second);
 
     return true;
 }

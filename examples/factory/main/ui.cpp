@@ -1404,14 +1404,17 @@ static void read_img_btn_event(lv_event_t * e)
         return;
     }
 
-    if(strstr(&full_path[1], ".md") || strstr(&full_path[1], ".markdown")) {
-        lv_snprintf(md_open_path, sizeof(md_open_path), "%s", &full_path[1]);
+    if(strncmp(full_path, "FS:", 3) == 0 &&
+       (strstr(&full_path[3], ".md") || strstr(&full_path[3], ".markdown"))) {
+        lv_snprintf(md_open_path, sizeof(md_open_path), "%s", &full_path[3]);
         scr_mgr_push(SCREEN11_ID, false);
         return;
     }
 
-    lv_img_set_src(ui_photos_img, &full_path[1]);
-    printf("event [%s]\n", &full_path[1]);
+    if(strncmp(full_path, "FS:", 3) == 0) {
+        lv_img_set_src(ui_photos_img, &full_path[3]);
+        printf("event [%s]\n", &full_path[3]);
+    }
 }
 
 static void scr3_btn_event_cb(lv_event_t * e)
@@ -1428,6 +1431,7 @@ static void scr3_add_img_btn(const char *text, int text_len, int type)
     (void)type;
     lv_obj_t *obj = lv_list_add_btn(scr3_cont_file, NULL, text);
     lv_obj_set_width(obj, lv_pct(100));
+    lv_obj_set_height(obj, 120);
     lv_obj_set_style_text_font(obj, &Font_Mono_Bold_20, LV_PART_MAIN);
     lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN);
     lv_obj_set_style_text_color(obj, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN);
@@ -1436,6 +1440,12 @@ static void scr3_add_img_btn(const char *text, int text_len, int type)
     lv_label_set_text(lab1, text);
     lv_obj_add_flag(lab1, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(obj, read_img_btn_event, LV_EVENT_CLICKED, lab1);
+
+    uint32_t child_cnt = lv_obj_get_child_cnt(obj);
+    for(uint32_t i = 0; i < child_cnt; i++) {
+        lv_obj_t *child = lv_obj_get_child(obj, i);
+        lv_obj_add_event_cb(child, read_img_btn_event, LV_EVENT_CLICKED, lab1);
+    }
 }
 
 static void sd_go_parent(void)
@@ -1514,23 +1524,24 @@ static void sd_file_list_populate(void)
 static void create3(lv_obj_t *parent) {
     lv_snprintf(sd_curr_path, sizeof(sd_curr_path), "/");
     scr3_cont_file = lv_list_create(parent);
-    lv_obj_set_size(scr3_cont_file, lv_pct(49), lv_pct(85));
+    lv_obj_set_size(scr3_cont_file, lv_pct(100), lv_pct(85));
     lv_obj_set_style_bg_color(scr3_cont_file, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN);
     lv_obj_set_scrollbar_mode(scr3_cont_file, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scroll_dir(scr3_cont_file, LV_DIR_VER);
     lv_obj_set_style_border_width(scr3_cont_file, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(scr3_cont_file, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_hor(scr3_cont_file, 5, LV_PART_MAIN);
     lv_obj_set_style_pad_row(scr3_cont_file, 6, LV_PART_MAIN);
     lv_obj_set_style_pad_column(scr3_cont_file, 0, LV_PART_MAIN);
-    lv_obj_set_align(scr3_cont_file, LV_ALIGN_BOTTOM_LEFT);
+    lv_obj_set_align(scr3_cont_file, LV_ALIGN_BOTTOM_MID);
 
     scr3_cont_img = lv_obj_create(parent);
-    lv_obj_set_size(scr3_cont_img, lv_pct(49), lv_pct(85));
+    lv_obj_set_size(scr3_cont_img, 1, 1);
     lv_obj_set_style_bg_color(scr3_cont_img, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN);
     lv_obj_set_scrollbar_mode(scr3_cont_img, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_border_width(scr3_cont_img, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(scr3_cont_img, 0, LV_PART_MAIN);
-    lv_obj_set_align(scr3_cont_img, LV_ALIGN_BOTTOM_RIGHT);
+    lv_obj_add_flag(scr3_cont_img, LV_OBJ_FLAG_HIDDEN);
 
     //---------------------
     ui_photos_img = lv_img_create(scr3_cont_img);
