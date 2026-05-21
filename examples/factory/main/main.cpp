@@ -71,19 +71,34 @@ bool disp_refr_is_busy = false;
  * *******************************************************************************/
 void btn_task(void *param)
 {
+    bool boot_btn_pressed = false;
+
     while(1)
     {
+        if (digitalRead(BOARD_BOOT_BTN) == LOW)
+        {
+            if (!boot_btn_pressed) {
+                boot_btn_pressed = true;
+                // Use the same button GPIO as deep-sleep wake source
+                scr_mgr_switch(0, false);
+                ui_sleep();
+            }
+        }
+        else {
+            boot_btn_pressed = false;
+        }
+
         if (digitalRead(BOARD_PCA9535_INT) == LOW)
         {
             if(button_read()) {
-                // Serial.printf("Button Press\n");
+                // Extended IO button press
                 disp_refresh_screen();
             }
             else{
                 // Serial.printf("io_extend end\n");
             }
         }
-        delay(300);
+        delay(80);
     }
 }
 
@@ -560,6 +575,7 @@ void idf_setup()
     Wire.begin(BOARD_SDA, BOARD_SCL);
 
     pinMode(BOARD_BL_EN, OUTPUT);
+    pinMode(BOARD_BOOT_BTN, INPUT_PULLUP);
 
     // Init system
     ui_nvs_set_defaulat_param();
