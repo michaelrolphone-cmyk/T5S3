@@ -75,8 +75,6 @@ void btn_task(void *param)
 {
     bool boot_btn_pressed = false;
     bool ioext_btn_pressed = false;
-    bool ioext_btn_long_handled = false;
-    uint32_t ioext_btn_press_ms = 0;
 
     while(1)
     {
@@ -96,33 +94,19 @@ void btn_task(void *param)
         if (digitalRead(BOARD_PCA9535_INT) == LOW)
         {
             if(button_read()) {
-                // Extended IO button press:
-                // short press -> refresh screen
-                // long press (>=3s) -> toggle backlight
-                if (!ioext_btn_pressed) {
-                    ioext_btn_pressed = true;
-                    ioext_btn_long_handled = false;
-                    ioext_btn_press_ms = millis();
-                }
-
-                if(!ioext_btn_long_handled && (millis() - ioext_btn_press_ms >= 3000)) {
-                    int bl = 0;
-                    ui_setting_get_backlight(&bl);
-                    ui_setting_set_backlight(bl == 0 ? 3 : 0);
-                    ioext_btn_long_handled = true;
-                }
+                ioext_btn_pressed = true;
             }
             else {
-                if(ioext_btn_pressed && !ioext_btn_long_handled) {
-                    disp_refresh_screen();
+                if(ioext_btn_pressed) {
+                    int bl = 0;
+                    ui_setting_get_backlight(&bl);
+                    ui_setting_set_backlight(bl == 0 ? 1 : 0);
                 }
                 ioext_btn_pressed = false;
-                ioext_btn_long_handled = false;
             }
         }
         else {
             ioext_btn_pressed = false;
-            ioext_btn_long_handled = false;
         }
         delay(80);
     }
@@ -342,12 +326,13 @@ static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
 {
     static int16_t x=0, y=0;
 
-    if(touch.isPressed() && indev_touch_enabled) {
-        // if(touch.getPoint(x, y)){
-        if(touch.getPoint(&x, &y, 1)){
-            data->state = LV_INDEV_STATE_PRESSED;
-        }
-    } 
+    (void)drv;
+    if(indev_touch_enabled && touch.isPressed()) {
+        data->state = LV_INDEV_STATE_PRESSED;
+        // Keep PRESSED state even if one coordinate sample is missed.
+        // Update coordinates whenever a new point is available.
+        touch.getPoint(&x, &y, 1);
+    }
     else{
         data->state = LV_INDEV_STATE_RELEASED;
     }

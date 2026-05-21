@@ -253,17 +253,17 @@ const struct menu_icon icon_buf[] = {
     {&img_clock,    "clock"   , 45,   45  }, 
     {&img_lora,     "lora"    , 210,  45  },
     {&img_sd_card,  "sd card" , 375,  45  },
-    {&img_test,     "test"    , 210,  250 },
+    {&img_gps,      "gps"     , 45,   250 },
+    {&img_test,     "Reader"  , 210,  250 },
     {&img_wifi,     "wifi"    , 375,  250 },
     {&img_battery,  "battery" , 45,   455 },
-    {&img_gps,      "gps",      210,  455 },
-    {&img_test,     "Reader",   375,  455 },
 };
 
 const struct menu_icon icon_buf2[] = {
-    {&img_setting,  "setting", 45,  45 },
-    {&img_shutdown, "shutdown", 210,  45 },
-    {&img_sleep,    "sleep" ,   375, 45 },
+    {&img_setting,  "setting" , 45,   45  },
+    {&img_shutdown, "shutdown", 210,  45  },
+    {&img_sleep,    "sleep"   , 375,  45  },
+    {&img_test,     "test"    , 45,   250 },
 };
 
 static lv_obj_t *ui_Panel4;
@@ -346,34 +346,34 @@ static void menu_btn_event(lv_event_t *e)
             printf("[%d] %s is clicked.\n", data, icon_buf[data].icon_str);
         }
         else{
-            printf("[%d] %s is clicked.\n", data, icon_buf2[data].icon_str);
+            printf("[%d] %s is clicked.\n", data, icon_buf2[data - ARRAY_LEN(icon_buf)].icon_str);
         }
         /************* page1 ************
          * 0 --- SCREEN1_ID  --- clock
          * 1 --- SCREEN2_ID  --- lora
          * 2 --- SCREEN3_ID  --- sd card
-         * 3 --- SCREEN5_ID  --- test
-         * 4 --- SCREEN6_ID  --- wifi
-         * 5 --- SCREEN7_ID  --- battery
-         * 6 --- SCREEN10_ID --- gps
-         * 7 --- SCREEN11_ID --- markdown
+         * 3 --- SCREEN10_ID --- gps
+         * 4 --- SCREEN11_ID --- markdown
+         * 5 --- SCREEN6_ID  --- wifi
+         * 6 --- SCREEN7_ID  --- battery
          ************ page2 ************
-         * 8 --- SCREEN4_ID  --- setting
-         * 9 --- SCREEN8_ID  --- shutdown
-         * 10 -- SCREEN9_ID  --- sleep
+         * 7 --- SCREEN4_ID  --- setting
+         * 8 --- SCREEN8_ID  --- shutdown
+         * 9 --- SCREEN9_ID  --- sleep
+         * 10 -- SCREEN5_ID  --- test
         */
         switch (data) {
             case 0: scr_mgr_push(SCREEN1_ID, false); break;
             case 1: scr_mgr_push(SCREEN2_ID, false); break;
             case 2: scr_mgr_push(SCREEN3_ID, false); break;
-            case 3: scr_mgr_push(SCREEN5_ID, false); break;
-            case 4: scr_mgr_push(SCREEN6_ID, false); break;
-            case 5: scr_mgr_push(SCREEN7_ID, false); break;
-            case 6: scr_mgr_push(SCREEN10_ID, false); break;
-            case 7: scr_mgr_push(SCREEN11_ID, false); break;
-            case 8: scr_mgr_push(SCREEN4_ID, false); break;
-            case 9: scr_mgr_push(SCREEN8_ID, false); break;
-            case 10: scr_mgr_push(SCREEN9_ID, false); break;
+            case 3: scr_mgr_push(SCREEN10_ID, false); break;
+            case 4: scr_mgr_push(SCREEN11_ID, false); break;
+            case 5: scr_mgr_push(SCREEN6_ID, false); break;
+            case 6: scr_mgr_push(SCREEN7_ID, false); break;
+            case 7: scr_mgr_push(SCREEN4_ID, false); break;
+            case 8: scr_mgr_push(SCREEN8_ID, false); break;
+            case 9: scr_mgr_push(SCREEN9_ID, false); break;
+            case 10: scr_mgr_push(SCREEN5_ID, false); break;
             default: break;
         }
     }
@@ -551,8 +551,10 @@ static void entry0(void) {
     lv_obj_add_event_cb(scr_mgr_get_top_obj(), menu_gesture_event, LV_EVENT_GESTURE, NULL);
 
     uint8_t h, m, s;
+    char time_buf[16] = {0};
     ui_clock_get_time(&h, &m, &s);
-    lv_label_set_text_fmt(menu_taskbar_time, "%02d:%02d", h, m);
+    format_time_12h(h, m, time_buf, sizeof(time_buf), NULL);
+    lv_label_set_text_fmt(menu_taskbar_time, "%s", time_buf);
 
     lv_label_set_text_fmt(menu_taskbar_battery, "%s", ui_battert_27220_get_percent_level());
 
@@ -584,6 +586,14 @@ static lv_obj_t *clock_ap;
 static lv_obj_t *clock_month;
 static const char *week_list_en[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 static const char * month_names_def[12] = LV_CALENDAR_DEFAULT_MONTH_NAMES;
+static void format_time_12h(uint8_t h24, uint8_t m, char *buf, size_t len, const char **ampm)
+{
+    uint8_t h12 = h24 % 12;
+    if(h12 == 0) h12 = 12;
+    if(ampm) *ampm = (h24 >= 12) ? "P.M." : "A.M.";
+    lv_snprintf(buf, len, "%02d:%02d", h12, m);
+}
+
 static bool get_refresh_data(void)
 {
     uint8_t h, m, s;
@@ -592,17 +602,16 @@ static bool get_refresh_data(void)
     ui_clock_get_time(&h, &m, &s);
     ui_clock_get_data(&year, &mont, &day, &week);
 
-    if(h > 12) {
-        lv_label_set_text_fmt(clock_ap, "%s", "P.M.");
-    }  else {
-        lv_label_set_text_fmt(clock_ap, "%s", "A.M.");
-    }
+    char time_buf[16] = {0};
+    const char *ampm = NULL;
+    format_time_12h(h, m, time_buf, sizeof(time_buf), &ampm);
+    lv_label_set_text_fmt(clock_ap, "%s", ampm);
 
     lv_calendar_set_today_date(calendar, 2000+year, mont, day);
     lv_calendar_set_showed_date(calendar, 2000+year, mont);
     lv_label_set_text_fmt(clock_month, "%s", month_names_def[mont-1]);
 
-    lv_label_set_text_fmt(clock_time, "%02d:%02d", h%12, m);
+    lv_label_set_text_fmt(clock_time, "%s", time_buf);
     lv_label_set_text_fmt(clock_data, "20%02d-%02d-%02d  %s", year, mont, day, week_list_en[week]);
 
     printf("%2d:%2d:%02d-%d/%d/%d\n", h, m, s, year, mont, day);
@@ -1391,11 +1400,39 @@ static lv_obj_t *sd_info;
 static lv_obj_t *ui_photos_img;
 static char sd_curr_path[128] = "/";
 static char md_open_path[128] = {0};
+static lv_point_t scr3_press_point = {0, 0};
+static bool scr3_drag_detected = false;
 static void sd_file_list_populate(void);
 
 static void read_img_btn_event(lv_event_t * e)
 {
+    if(e->code == LV_EVENT_PRESSED) {
+        lv_indev_t *indev = lv_indev_get_act();
+        if(indev) {
+            lv_indev_get_point(indev, &scr3_press_point);
+        }
+        scr3_drag_detected = false;
+        return;
+    }
+
+    if(e->code == LV_EVENT_PRESSING) {
+        lv_indev_t *indev = lv_indev_get_act();
+        if(indev) {
+            lv_point_t curr = {0, 0};
+            lv_indev_get_point(indev, &curr);
+            if(LV_ABS(curr.x - scr3_press_point.x) > 12 || LV_ABS(curr.y - scr3_press_point.y) > 12) {
+                scr3_drag_detected = true;
+            }
+        }
+        return;
+    }
+
     if(e->code != LV_EVENT_CLICKED) return;
+    if(scr3_drag_detected) {
+        scr3_drag_detected = false;
+        return;
+    }
+
     lv_obj_t *path_lab = (lv_obj_t *)e->user_data;
     const char *full_path = lv_label_get_text(path_lab);
     if(full_path[0] == 'D') {
@@ -1439,11 +1476,15 @@ static void scr3_add_img_btn(const char *text, int text_len, int type)
     lv_obj_t *lab1 = lv_label_create(obj);
     lv_label_set_text(lab1, text);
     lv_obj_add_flag(lab1, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(obj, read_img_btn_event, LV_EVENT_PRESSED, lab1);
+    lv_obj_add_event_cb(obj, read_img_btn_event, LV_EVENT_PRESSING, lab1);
     lv_obj_add_event_cb(obj, read_img_btn_event, LV_EVENT_CLICKED, lab1);
 
     uint32_t child_cnt = lv_obj_get_child_cnt(obj);
     for(uint32_t i = 0; i < child_cnt; i++) {
         lv_obj_t *child = lv_obj_get_child(obj, i);
+        lv_obj_add_event_cb(child, read_img_btn_event, LV_EVENT_PRESSED, lab1);
+        lv_obj_add_event_cb(child, read_img_btn_event, LV_EVENT_PRESSING, lab1);
         lv_obj_add_event_cb(child, read_img_btn_event, LV_EVENT_CLICKED, lab1);
     }
 }
@@ -3055,7 +3096,9 @@ void menu_taskbar_update_timer_cb(lv_timer_t *t)
 
         if(taskbar_statue[TASKBAR_ID_TIME_MINUTE] != m)
         {
-            lv_label_set_text_fmt(menu_taskbar_time, "%02d:%02d", h, m);
+            char time_buf[16] = {0};
+            format_time_12h(h, m, time_buf, sizeof(time_buf), NULL);
+            lv_label_set_text_fmt(menu_taskbar_time, "%s", time_buf);
             taskbar_statue[TASKBAR_ID_TIME_HOUR] = h;
             taskbar_statue[TASKBAR_ID_TIME_MINUTE] = m;
         }
