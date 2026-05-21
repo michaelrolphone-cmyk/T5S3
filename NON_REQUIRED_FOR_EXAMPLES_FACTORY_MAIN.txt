@@ -1,0 +1,8 @@
+Static list of repo paths not required to build `examples/factory/main` (PlatformIO `src_dir`).
+Basis: `platformio.ini` selects `examples/factory/main`; this build pulls only transitive dependencies used by that target.
+
+examples/display_test/
+lib/AnimatedGIF/
+lib/FastEPD/
+lib/JPEGDEC/
+lib/lv_conf.h
