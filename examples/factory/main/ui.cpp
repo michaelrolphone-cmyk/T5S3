@@ -2922,13 +2922,11 @@ static const lv_font_t *md_header_font_from_level(int level)
 
 static void md_render_to_spangroup(const char *text)
 {
-    lv_spangroup_refr_mode_t mode = LV_SPAN_MODE_BREAK;
+    lv_spangroup_refr_mode mode = LV_SPAN_MODE_BREAK;
     lv_spangroup_set_mode(md_span, mode);
     lv_spangroup_set_overflow(md_span, LV_SPAN_OVERFLOW_CLIP);
     lv_spangroup_set_indent(md_span, 0);
     lv_spangroup_set_align(md_span, LV_TEXT_ALIGN_LEFT);
-    lv_spangroup_set_span_refresh(md_span, true);
-    lv_spangroup_set_new_line_mode(md_span, LV_SPAN_GROUP_NEW_LINE_CLIP);
     lv_spangroup_del_span(md_span, NULL);
 
     if(text == NULL) return;
@@ -2957,7 +2955,9 @@ static void md_render_to_spangroup(const char *text)
             lv_style_set_text_font(&sp->style, &Font_Geist_Light_20);
         }
         lv_style_set_text_color(&sp->style, lv_color_hex(EPD_COLOR_FG));
-        lv_span_set_text(sp, "%.*s\n", (int)content_len, content);
+        char span_line[512];
+        lv_snprintf(span_line, sizeof(span_line), "%.*s\n", (int)content_len, content);
+        lv_span_set_text(sp, span_line);
 
         if(!line_end) break;
         line = line_end + 1;
