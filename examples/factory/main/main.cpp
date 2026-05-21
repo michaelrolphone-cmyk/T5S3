@@ -12,6 +12,7 @@
 #include <esp_types.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -62,11 +63,14 @@ SensorPCF8563 rtc;
 #define DISP_BUF_SIZE (epd_rotated_display_width() * epd_rotated_display_height())
 #define EPD_IMAGE_BUF_SIZE (((epd_rotated_display_width() + 1) / 2) * epd_rotated_display_height())
 uint8_t *decodebuffer = NULL;
+uint8_t *displaybuffer = NULL;
 volatile bool disp_flush_enabled = true;
 volatile bool indev_touch_enabled = true;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
+static volatile bool framebuffer_dirty = false;
 static TaskHandle_t disp_flush_handle = NULL;
+static SemaphoreHandle_t framebuffer_mutex = NULL;
 
 /*********************************************************************************
  *                                   TASK
@@ -210,6 +214,7 @@ static void disp_flush_task(void *param)
     while (1) {
         if (disp_flush_pending) {
             disp_flush_pending = false;
+            framebuffer_dirty = false;
 
             EpdRect rener_area = {
                 .x = 0,
@@ -218,16 +223,26 @@ static void disp_flush_task(void *param)
                 .height = epd_rotated_display_height(),
             };
 
+            if (framebuffer_mutex && decodebuffer && displaybuffer) {
+                if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
+                    xSemaphoreGive(framebuffer_mutex);
+                } else {
+                    vTaskDelay(pdMS_TO_TICKS(1));
+                    continue;
+                }
+            }
+
             if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
             {
-                epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
+                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
                 checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
                 epd_poweroff();
             }
             else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
             {
-                epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
+                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
                 checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
                 epd_poweroff();
@@ -235,10 +250,14 @@ static void disp_flush_task(void *param)
             else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
             {
                 disp_full_refresh();
-                epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
+                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
                 checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
                 epd_poweroff();
+            }
+
+            if (framebuffer_dirty) {
+                disp_flush_pending = true;
             }
         }
         vTaskDelay(pdMS_TO_TICKS(2));
@@ -278,6 +297,10 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
     }
 
     if(disp_flush_enabled) {
+        if (framebuffer_mutex && xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+            lv_disp_flush_ready(disp);
+            return;
+        }
         int32_t w = lv_area_get_width(area);
         int32_t h = lv_area_get_height(area);
         int32_t screen_w = epd_rotated_display_width();
@@ -304,6 +327,10 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
                 epd_image_set_pixel_4bpp(decodebuffer, screen_w, dst_x, dst_y, gray4);
             }
         }
+        if (framebuffer_mutex) {
+            xSemaphoreGive(framebuffer_mutex);
+        }
+        framebuffer_dirty = true;
         // printf("[disp_flush] x1:%d, y1:%d, w:%d, h:%d\n", area->x1, area->y1, w, h);
     }
     if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) 
@@ -349,6 +376,8 @@ static void lv_port_disp_init(void)
     lv_color_t *lv_disp_buf_1 = (lv_color_t *)ps_calloc(sizeof(lv_color_t), DISP_BUF_SIZE);
     lv_color_t *lv_disp_buf_2 = (lv_color_t *)ps_calloc(sizeof(lv_color_t), DISP_BUF_SIZE);
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
+    displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
+    framebuffer_mutex = xSemaphoreCreateMutex();
     lv_disp_draw_buf_init(&draw_buf, lv_disp_buf_1, lv_disp_buf_2, DISP_BUF_SIZE);
 
     static lv_disp_drv_t disp_drv;
@@ -653,7 +682,7 @@ void idf_setup()
 
     printf("LVGL Init\n");
     lv_port_disp_init();
-    xTaskCreate(disp_flush_task, "disp_flush_task", 1024 * 6, NULL, 2, &disp_flush_handle);
+    xTaskCreatePinnedToCore(disp_flush_task, "disp_flush_task", 1024 * 6, NULL, 2, &disp_flush_handle, 0);
 
     printf("LVGL UI Entry\n");
     ui_entry();
