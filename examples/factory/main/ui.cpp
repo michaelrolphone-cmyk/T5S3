@@ -2922,8 +2922,7 @@ static const lv_font_t *md_header_font_from_level(int level)
 
 static void md_render_to_spangroup(const char *text)
 {
-    lv_spangroup_refr_mode mode = LV_SPAN_MODE_BREAK;
-    lv_spangroup_set_mode(md_span, mode);
+    lv_spangroup_set_mode(md_span, LV_SPAN_MODE_BREAK);
     lv_spangroup_set_overflow(md_span, LV_SPAN_OVERFLOW_CLIP);
     lv_spangroup_set_indent(md_span, 0);
     lv_spangroup_set_align(md_span, LV_TEXT_ALIGN_LEFT);
