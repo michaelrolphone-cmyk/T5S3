@@ -12,11 +12,11 @@ static bool GPS_Recovery();
 bool setupGPS();
 void displayInfo();
 
-static TaskHandle_t gps_handle = NULL;
-static double gps_lat=0, gps_lng=0, gps_altitude=0, gps_speed=0;
-static uint16_t gps_year=0;
-static uint8_t gps_month=0, gps_day=0;
-static uint8_t gps_hour=0, gps_minute=0, gps_second=0;
+TaskHandle_t gps_handle = NULL;
+double gps_lat=0, gps_lng=0, gps_altitude=0, gps_speed=0;
+uint16_t gps_year=0;
+uint8_t gps_month=0, gps_day=0;
+uint8_t gps_hour=0, gps_minute=0, gps_second=0;
 static uint32_t gps_vsat=0;
 static bool gps_ready = false;
 static int gps_last_sync_minute = -1;
