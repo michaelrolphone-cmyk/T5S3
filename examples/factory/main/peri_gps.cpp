@@ -1,7 +1,9 @@
 
 #include "utilities.h"
 #include "peripheral.h"
+#include "main.h"
 #include <TinyGPS++.h>
+#include <time.h>
 
 /* clang-format off */
 
@@ -17,6 +19,7 @@ static uint8_t gps_month=0, gps_day=0;
 static uint8_t gps_hour=0, gps_minute=0, gps_second=0;
 static uint32_t gps_vsat=0;
 static bool gps_ready = false;
+static int gps_last_sync_minute = -1;
 
 uint8_t buffer[256];
 
@@ -220,6 +223,39 @@ void displayInfo()
     }
 
     Serial.println();
+
+    if (peri_buf[E_PERI_RTC] && gps.date.isValid() && gps.time.isValid()) {
+        if (gps_second != 0 || gps_minute == gps_last_sync_minute) {
+            return;
+        }
+
+        setenv("TZ", "UTC0", 1);
+        tzset();
+        struct tm tm_utc = {0};
+        tm_utc.tm_year = gps_year - 1900;
+        tm_utc.tm_mon = gps_month - 1;
+        tm_utc.tm_mday = gps_day;
+        tm_utc.tm_hour = gps_hour;
+        tm_utc.tm_min = gps_minute;
+        tm_utc.tm_sec = gps_second;
+
+        time_t utc_epoch = mktime(&tm_utc);
+        if (utc_epoch <= 0) {
+            return;
+        }
+
+        setenv("TZ", "MST7MDT,M3.2.0/2,M11.1.0/2", 1);
+        tzset();
+        struct tm tm_mt;
+        localtime_r(&utc_epoch, &tm_mt);
+
+        rtc.setDateTime(tm_mt.tm_year + 1900, tm_mt.tm_mon + 1, tm_mt.tm_mday,
+                        tm_mt.tm_hour, tm_mt.tm_min, tm_mt.tm_sec);
+        gps_last_sync_minute = gps_minute;
+        Serial.printf("RTC synced from GPS (Mountain): %04d-%02d-%02d %02d:%02d:%02d\n",
+                      tm_mt.tm_year + 1900, tm_mt.tm_mon + 1, tm_mt.tm_mday,
+                      tm_mt.tm_hour, tm_mt.tm_min, tm_mt.tm_sec);
+    }
 }
 /* clang-format off */
 

@@ -19,6 +19,7 @@ void ui_set_rotation(lv_disp_rot_t rot);
 // clock
 void ui_clock_get_time(uint8_t *h, uint8_t *m, uint8_t *s);
 void ui_clock_get_data(uint8_t *year, uint8_t *month, uint8_t *day, uint8_t *week);
+bool ui_clock_set_data_time(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second);
 
 // lora
 #define LORA_MODE_SEND 0
@@ -120,7 +121,6 @@ void ui_shutdown_vcom(int v);
 void ui_shutdown(void);
 
 void ui_sleep(void);
-
 
 
 
