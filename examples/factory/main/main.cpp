@@ -64,6 +64,7 @@ SensorPCF8563 rtc;
 uint8_t *decodebuffer = NULL;
 volatile bool disp_flush_enabled = true;
 volatile bool indev_touch_enabled = true;
+static volatile bool touch_ignore_until_release = false;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static TaskHandle_t disp_flush_handle = NULL;
@@ -91,21 +92,17 @@ void btn_task(void *param)
             boot_btn_pressed = false;
         }
 
-        if (digitalRead(BOARD_PCA9535_INT) == LOW)
-        {
-            if(button_read()) {
-                ioext_btn_pressed = true;
-            }
-            else {
-                if(ioext_btn_pressed) {
-                    int bl = 0;
-                    ui_setting_get_backlight(&bl);
-                    ui_setting_set_backlight(bl == 0 ? 1 : 0);
-                }
-                ioext_btn_pressed = false;
-            }
+        // Read the IO expander key level every cycle and toggle on release edge.
+        // Relying solely on INT can miss transitions once the line returns high.
+        if(button_read()) {
+            ioext_btn_pressed = true;
         }
         else {
+            if(ioext_btn_pressed) {
+                int bl = 0;
+                ui_setting_get_backlight(&bl);
+                ui_setting_set_backlight(bl == 0 ? 1 : 0);
+            }
             ioext_btn_pressed = false;
         }
         delay(80);
@@ -325,9 +322,16 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
 static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
 {
     static int16_t x=0, y=0;
+    bool pressed = indev_touch_enabled && touch.isPressed();
 
     (void)drv;
-    if(indev_touch_enabled && touch.isPressed()) {
+    if(touch_ignore_until_release) {
+        if(!pressed) {
+            touch_ignore_until_release = false;
+        }
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+    else if(pressed) {
         data->state = LV_INDEV_STATE_PRESSED;
         // Keep PRESSED state even if one coordinate sample is missed.
         // Update coordinates whenever a new point is available.
@@ -386,6 +390,8 @@ static bool touch_gt911_init(void)
     // Set the center button to trigger the callback , Only for specific devices, e.g LilyGo-EPD47 S3 GT911
     touch.setHomeButtonCallback([](void *user_data) {
         Serial.println("Home button pressed!");
+        // Prevent the remaining touch-release sequence from re-triggering app clicks.
+        touch_ignore_until_release = true;
         scr_mgr_switch(0, false); // Return to the main screen
     }, NULL);
 

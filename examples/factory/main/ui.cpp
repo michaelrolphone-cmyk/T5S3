@@ -1469,8 +1469,8 @@ static void scr3_add_img_btn(const char *text, int text_len, int type)
     (void)type;
     lv_obj_t *obj = lv_list_add_btn(scr3_cont_file, NULL, text);
     lv_obj_set_width(obj, lv_pct(100));
-    lv_obj_set_height(obj, 120);
-    lv_obj_set_style_text_font(obj, &Font_Mono_Bold_20, LV_PART_MAIN);
+    lv_obj_set_height(obj, 60);
+    lv_obj_set_style_text_font(obj, &Font_Mono_Bold_30, LV_PART_MAIN);
     lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN);
     lv_obj_set_style_text_color(obj, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN);
 
@@ -2906,7 +2906,63 @@ static scr_lifecycle_t screen10 = {
 #if 1
 static lv_obj_t *md_cont = NULL;
 static lv_obj_t *md_label = NULL;
+static lv_obj_t *md_span = NULL;
 static char md_text_buf[4096] = {0};
+
+static const lv_font_t *md_header_font_from_level(int level)
+{
+    switch(level) {
+        case 1: return &Font_Mono_Bold_90;
+        case 2: return &Font_Mono_Bold_30;
+        case 3: return &Font_Mono_Bold_25;
+        case 4: return &Font_Mono_Bold_20;
+        default: return &Font_Geist_Bold_20; // ##### same size as content, bold
+    }
+}
+
+static void md_render_to_spangroup(const char *text)
+{
+    lv_spangroup_refr_mode_t mode = LV_SPAN_MODE_BREAK;
+    lv_spangroup_set_mode(md_span, mode);
+    lv_spangroup_set_overflow(md_span, LV_SPAN_OVERFLOW_CLIP);
+    lv_spangroup_set_indent(md_span, 0);
+    lv_spangroup_set_align(md_span, LV_TEXT_ALIGN_LEFT);
+    lv_spangroup_set_span_refresh(md_span, true);
+    lv_spangroup_set_new_line_mode(md_span, LV_SPAN_GROUP_NEW_LINE_CLIP);
+    lv_spangroup_del_span(md_span, NULL);
+
+    if(text == NULL) return;
+
+    const char *line = text;
+    while(*line) {
+        const char *line_end = strchr(line, '\n');
+        size_t line_len = line_end ? (size_t)(line_end - line) : strlen(line);
+
+        int hashes = 0;
+        while(hashes < (int)line_len && hashes < 5 && line[hashes] == '#') hashes++;
+        bool header = false;
+        const char *content = line;
+        size_t content_len = line_len;
+        if(hashes > 0 && hashes < (int)line_len && line[hashes] == ' ') {
+            header = true;
+            content = &line[hashes + 1];
+            content_len = line_len - (size_t)hashes - 1;
+        }
+
+        lv_span_t *sp = lv_spangroup_new_span(md_span);
+        if(header) {
+            lv_span_set_text_static(sp, "");
+            lv_style_set_text_font(&sp->style, md_header_font_from_level(hashes));
+        } else {
+            lv_style_set_text_font(&sp->style, &Font_Geist_Light_20);
+        }
+        lv_style_set_text_color(&sp->style, lv_color_hex(EPD_COLOR_FG));
+        lv_span_set_text(sp, "%.*s\n", (int)content_len, content);
+
+        if(!line_end) break;
+        line = line_end + 1;
+    }
+}
 
 static void scr11_btn_event_cb(lv_event_t * e)
 {
@@ -2947,11 +3003,13 @@ static void create11(lv_obj_t *parent)
     lv_obj_set_scrollbar_mode(md_cont, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_scroll_dir(md_cont, LV_DIR_VER);
 
-    md_label = lv_label_create(md_cont);
-    lv_obj_set_width(md_label, lv_pct(100));
-    lv_obj_set_style_text_font(md_label, &Font_Mono_Bold_20, LV_PART_MAIN);
-    lv_label_set_long_mode(md_label, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(md_label, "Open a markdown file from SD.");
+    md_span = lv_spangroup_create(md_cont);
+    lv_obj_set_width(md_span, lv_pct(100));
+    lv_obj_set_style_text_color(md_span, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(md_span, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(md_span, 4, LV_PART_MAIN);
+    md_label = NULL;
+    md_render_to_spangroup("Open a markdown file from SD.");
 
     scr_back_btn_create(parent, "Markdown Reader", scr11_btn_event_cb);
 }
@@ -2959,7 +3017,7 @@ static void create11(lv_obj_t *parent)
 static void entry11(void)
 {
     md_load_file(md_open_path);
-    lv_label_set_text(md_label, md_text_buf);
+    md_render_to_spangroup(md_text_buf);
     lv_obj_scroll_to_y(md_cont, 0, LV_ANIM_OFF);
 }
 static void exit11(void) { }
