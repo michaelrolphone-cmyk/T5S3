@@ -257,7 +257,7 @@ const struct menu_icon icon_buf[] = {
     {&img_wifi,     "wifi"    , 375,  250 },
     {&img_battery,  "battery" , 45,   455 },
     {&img_gps,      "gps",      210,  455 },
-    {&img_markdown, "Reader",   375,  455 },
+    {&img_test,     "Reader",   375,  455 },
 };
 
 const struct menu_icon icon_buf2[] = {
