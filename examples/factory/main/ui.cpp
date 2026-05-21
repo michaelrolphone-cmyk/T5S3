@@ -258,7 +258,7 @@ const struct menu_icon icon_buf[] = {
     {&img_wifi,     "wifi"    , 375,  250 },
     {&img_battery,  "battery" , 45,   455 },
     {&img_gps,      "gps",      210,  455 },
-    // {&img_refresh,  "refresh" , 375,  455 },
+    {&img_test,     "md",       375,  455 },
 };
 
 const struct menu_icon icon_buf2[] = {
@@ -357,9 +357,10 @@ static void menu_btn_event(lv_event_t *e)
          * 5 --- SCREEN6_ID  --- wifi
          * 6 --- SCREEN7_ID  --- battery
          * 7 --- SCREEN10_ID --- gps
+         * 8 --- SCREEN11_ID --- markdown
          ************ page2 ************
-         * 8 --- SCREEN8_ID  --- shutdown
-         * 9 --- SCREEN9_ID  --- sleep
+         * 9 --- SCREEN8_ID  --- shutdown
+         * 10 -- SCREEN9_ID  --- sleep
         */
         switch (data) {
             case 0: scr_mgr_push(SCREEN1_ID, false); break;
@@ -370,8 +371,9 @@ static void menu_btn_event(lv_event_t *e)
             case 5: scr_mgr_push(SCREEN6_ID, false); break;
             case 6: scr_mgr_push(SCREEN7_ID, false); break;
             case 7: scr_mgr_push(SCREEN10_ID, false); break;
-            case 8: scr_mgr_push(SCREEN8_ID, false); break;
-            case 9: scr_mgr_push(SCREEN9_ID, false); break;
+            case 8: scr_mgr_push(SCREEN11_ID, false); break;
+            case 9: scr_mgr_push(SCREEN8_ID, false); break;
+            case 10: scr_mgr_push(SCREEN9_ID, false); break;
             default: break;
         }
     }
@@ -1043,6 +1045,7 @@ static void ta_event_cb(lv_event_t * e)
     if(code == LV_EVENT_VALUE_CHANGED)
     {
         printf("LV_EVENT_VALUE_CHANGED\n");
+        return;
     }
 
     // if(code == LV_EVENT_READY)
@@ -1386,20 +1389,29 @@ static lv_obj_t *scr3_cont_file;
 static lv_obj_t *scr3_cont_img;
 static lv_obj_t *sd_info;
 static lv_obj_t *ui_photos_img;
+static char sd_curr_path[128] = "/";
+static char md_open_path[128] = {0};
+static void sd_file_list_populate(void);
 
 static void read_img_btn_event(lv_event_t * e)
 {
-    char *file_name = lv_label_get_text((lv_obj_t *)e->user_data);
-
-    if(e->code = LV_EVENT_CLICKED) {
-        
-        static char path[32];
-        lv_snprintf(path, 32, "S:/%s", file_name);
-        lv_img_set_src(ui_photos_img, path);
-        printf("event [%s]\n", path);
-
-        // ui_full_refresh();
+    if(e->code != LV_EVENT_CLICKED) return;
+    lv_obj_t *path_lab = (lv_obj_t *)e->user_data;
+    const char *full_path = lv_label_get_text(path_lab);
+    if(full_path[0] == 'D') {
+        lv_snprintf(sd_curr_path, sizeof(sd_curr_path), "%s", &full_path[1]);
+        sd_file_list_populate();
+        return;
     }
+
+    if(strstr(&full_path[1], ".md") || strstr(&full_path[1], ".markdown")) {
+        lv_snprintf(md_open_path, sizeof(md_open_path), "%s", &full_path[1]);
+        scr_mgr_push(SCREEN11_ID, false);
+        return;
+    }
+
+    lv_img_set_src(ui_photos_img, &full_path[1]);
+    printf("event [%s]\n", &full_path[1]);
 }
 
 static void scr3_btn_event_cb(lv_event_t * e)
@@ -1443,17 +1455,51 @@ static void scr3_add_img_btn(const char *text, int text_len, int type)
     lv_obj_align_to(lab, img, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
 
     lv_obj_t *lab1 = lv_label_create(obj);
-    lv_label_set_text(lab1, text); 
+    lv_label_set_text(lab1, text);
     lv_obj_add_flag(lab1, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_add_event_cb(img, read_img_btn_event, LV_EVENT_CLICKED, lab1);
 }
 
+static void sd_go_parent(void)
+{
+    if(strcmp(sd_curr_path, "/") == 0) return;
+    char *last = strrchr(sd_curr_path, '/');
+    if(last == sd_curr_path) {
+        sd_curr_path[1] = '\0';
+    } else if(last) {
+        *last = '\0';
+    } else {
+        lv_snprintf(sd_curr_path, sizeof(sd_curr_path), "/");
+    }
+}
 
 
 static void sd_file_list_populate(void)
 {
-    File root = SD.open("/");
+    uint32_t child_cnt = lv_obj_get_child_cnt(scr3_cont_file);
+    for(uint32_t i = 0; i < child_cnt; i++) {
+        lv_obj_del(lv_obj_get_child(scr3_cont_file, 0));
+    }
+
+    if(strcmp(sd_curr_path, "/") != 0) {
+        scr3_add_img_btn("..", 2, 1);
+        lv_obj_t *obj = lv_obj_get_child(scr3_cont_file, lv_obj_get_child_cnt(scr3_cont_file) - 1);
+        lv_obj_t *img = lv_obj_get_child(obj, 0);
+        lv_obj_t *lab1 = lv_obj_get_child(obj, 2);
+        static char parent_flag[128];
+        lv_snprintf(parent_flag, sizeof(parent_flag), "D%s", sd_curr_path);
+        lv_label_set_text(lab1, parent_flag);
+        lv_obj_remove_event_cb(img, read_img_btn_event);
+        lv_obj_add_event_cb(img, [](lv_event_t *e){
+            if(e->code == LV_EVENT_CLICKED){
+                sd_go_parent();
+                sd_file_list_populate();
+            }
+        }, LV_EVENT_CLICKED, NULL);
+    }
+
+    File root = SD.open(sd_curr_path);
     if (!root || !root.isDirectory()) {
         return;
     }
@@ -1467,13 +1513,20 @@ static void sd_file_list_populate(void)
             break;
         }
 
+        char display_name[64] = {0};
+        char full_path[128] = {0};
         if (file.isDirectory()) {
-            char dir_name[64] = {0};
-            snprintf(dir_name, sizeof(dir_name), "[%s]", file.name());
-            create_file_obj((char *)dir_name, (char *)file.path(), 0);
+            snprintf(display_name, sizeof(display_name), "[%s]", file.name());
+            lv_snprintf(full_path, sizeof(full_path), "D%s", file.path());
         } else {
-            create_file_obj((char *)file.name(), (char *)file.path(), 0);
+            snprintf(display_name, sizeof(display_name), "%s", file.name());
+            lv_snprintf(full_path, sizeof(full_path), "FS:%s", file.path());
         }
+
+        scr3_add_img_btn(display_name, strlen(display_name), 0);
+        lv_obj_t *obj = lv_obj_get_child(scr3_cont_file, lv_obj_get_child_cnt(scr3_cont_file) - 1);
+        lv_obj_t *lab1 = lv_obj_get_child(obj, 2);
+        lv_label_set_text(lab1, full_path);
 
         file.close();
         file = root.openNextFile();
@@ -1483,6 +1536,7 @@ static void sd_file_list_populate(void)
 }
 
 static void create3(lv_obj_t *parent) {
+    lv_snprintf(sd_curr_path, sizeof(sd_curr_path), "/");
     scr3_cont_file = lv_obj_create(parent);
     lv_obj_set_size(scr3_cont_file, lv_pct(49), lv_pct(85));
     lv_obj_set_style_bg_color(scr3_cont_file, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN);
@@ -1833,6 +1887,7 @@ const char *get_vcom_cb(int *ret_n)
 static ui_setting_handle setting_handle_list[] = {
     {.name="Backlight",       .type=UI_SETTING_TYPE_SW,  .set_cb=ui_setting_set_backlight_level,     .get_cb=ui_setting_get_backlight},
     {.name="Refresh Speed",   .type=UI_SETTING_TYPE_SW,  .set_cb=ui_setting_set_refresh_speed, .get_cb=ui_setting_get_refresh_speed},
+    {.name = "-Set Date & Time", .type=UI_SETTING_TYPE_SUB, .set_cb=NULL, .get_cb=NULL, .sub_id=SCREEN4_3_ID},
     {.name = "-Set EPD Vcom", .type=UI_SETTING_TYPE_SUB, .set_cb=NULL, .get_cb=get_vcom_cb, .sub_id=SCREEN4_2_ID},
     {.name="-About System",   .type=UI_SETTING_TYPE_SUB, .set_cb=NULL, .get_cb=NULL,        .sub_id=SCREEN4_1_ID},
 };
@@ -1906,6 +1961,111 @@ static scr_lifecycle_t screen4 = {
     .entry = entry4,
     .exit  = exit4,
     .destroy = destroy4,
+};
+#endif
+
+// --------------------- screen 4.3 --------------------- Set Date & Time
+#if 1
+static lv_obj_t *set_dt_lab;
+static int set_dt_field = 0;
+static int set_dt_year = 2024, set_dt_month = 1, set_dt_day = 1, set_dt_hour = 0, set_dt_min = 0;
+
+static void set_dt_update_label(void)
+{
+    lv_label_set_text_fmt(set_dt_lab, "%04d-%02d-%02d  %02d:%02d", set_dt_year, set_dt_month, set_dt_day, set_dt_hour, set_dt_min);
+}
+
+static void set_dt_adjust(int delta)
+{
+    int *val = NULL, min = 0, max = 0;
+    switch(set_dt_field) {
+        case 0: val = &set_dt_year;  min = 2000; max = 2099; break;
+        case 1: val = &set_dt_month; min = 1;    max = 12;   break;
+        case 2: val = &set_dt_day;   min = 1;    max = 31;   break;
+        case 3: val = &set_dt_hour;  min = 0;    max = 23;   break;
+        default:val = &set_dt_min;   min = 0;    max = 59;   break;
+    }
+    *val += delta;
+    if(*val > max) *val = min;
+    if(*val < min) *val = max;
+    set_dt_update_label();
+}
+
+static void set_dt_event_cb(lv_event_t * e)
+{
+    if(e->code != LV_EVENT_CLICKED) return;
+    int cmd = (int)e->user_data;
+    if(cmd == 0) set_dt_adjust(1);
+    else if(cmd == 1) set_dt_adjust(-1);
+    else if(cmd == 2) { set_dt_field = (set_dt_field + 1) % 5; }
+    else if(cmd == 3) { set_dt_field = (set_dt_field + 4) % 5; }
+    else if(cmd == 4) { ui_clock_set_data_time(set_dt_year, set_dt_month, set_dt_day, set_dt_hour, set_dt_min, 0); }
+}
+
+static void scr4_3_btn_event_cb(lv_event_t * e)
+{
+    if(e->code == LV_EVENT_CLICKED) scr_mgr_pop(false);
+}
+
+static void create4_3(lv_obj_t *parent)
+{
+    set_dt_lab = lv_label_create(parent);
+    lv_obj_set_style_text_font(set_dt_lab, &Font_Mono_Bold_30, LV_PART_MAIN);
+    lv_obj_align(set_dt_lab, LV_ALIGN_TOP_MID, 0, 100);
+    set_dt_update_label();
+
+    lv_obj_t *btn_up = lv_btn_create(parent);
+    lv_obj_set_size(btn_up, 120, 70);
+    lv_obj_align(btn_up, LV_ALIGN_CENTER, -180, 0);
+    lv_obj_add_event_cb(btn_up, set_dt_event_cb, LV_EVENT_CLICKED, (void *)0);
+    lv_label_set_text(lv_label_create(btn_up), "UP");
+    lv_obj_center(lv_obj_get_child(btn_up, 0));
+
+    lv_obj_t *btn_down = lv_btn_create(parent);
+    lv_obj_set_size(btn_down, 120, 70);
+    lv_obj_align(btn_down, LV_ALIGN_CENTER, -40, 0);
+    lv_obj_add_event_cb(btn_down, set_dt_event_cb, LV_EVENT_CLICKED, (void *)1);
+    lv_label_set_text(lv_label_create(btn_down), "DOWN");
+    lv_obj_center(lv_obj_get_child(btn_down, 0));
+
+    lv_obj_t *btn_next = lv_btn_create(parent);
+    lv_obj_set_size(btn_next, 120, 70);
+    lv_obj_align(btn_next, LV_ALIGN_CENTER, 100, 0);
+    lv_obj_add_event_cb(btn_next, set_dt_event_cb, LV_EVENT_CLICKED, (void *)2);
+    lv_label_set_text(lv_label_create(btn_next), "NEXT");
+    lv_obj_center(lv_obj_get_child(btn_next, 0));
+
+    lv_obj_t *btn_save = lv_btn_create(parent);
+    lv_obj_set_size(btn_save, 120, 70);
+    lv_obj_align(btn_save, LV_ALIGN_CENTER, 240, 0);
+    lv_obj_add_event_cb(btn_save, set_dt_event_cb, LV_EVENT_CLICKED, (void *)4);
+    lv_label_set_text(lv_label_create(btn_save), "SAVE");
+    lv_obj_center(lv_obj_get_child(btn_save, 0));
+
+    scr_back_btn_create(parent, "Set Date & Time", scr4_3_btn_event_cb);
+}
+
+static void entry4_3(void)
+{
+    uint8_t y, m, d, w, hh, mm, ss;
+    ui_clock_get_data(&y, &m, &d, &w);
+    ui_clock_get_time(&hh, &mm, &ss);
+    set_dt_year = 2000 + y;
+    set_dt_month = m;
+    set_dt_day = d;
+    set_dt_hour = hh;
+    set_dt_min = mm;
+    set_dt_field = 0;
+    set_dt_update_label();
+}
+static void exit4_3(void) { }
+static void destroy4_3(void) { }
+
+static scr_lifecycle_t screen4_3 = {
+    .create = create4_3,
+    .entry = entry4_3,
+    .exit  = exit4_3,
+    .destroy = destroy4_3,
 };
 #endif
 //************************************[ screen 5 ]****************************************** test
@@ -2666,6 +2826,77 @@ static scr_lifecycle_t screen10 = {
     .destroy = destroy10,
 };
 #endif
+
+//************************************[ screen 11 ]****************************************** markdown
+#if 1
+static lv_obj_t *md_cont = NULL;
+static lv_obj_t *md_label = NULL;
+static char md_text_buf[4096] = {0};
+
+static void scr11_btn_event_cb(lv_event_t * e)
+{
+    if(e->code == LV_EVENT_CLICKED){
+        scr_mgr_pop(false);
+    }
+}
+
+static void md_load_file(const char *path)
+{
+    md_text_buf[0] = '\0';
+    if(path == NULL || path[0] == '\0') {
+        lv_snprintf(md_text_buf, sizeof(md_text_buf), "No markdown file selected from SD browser.");
+        return;
+    }
+    File f = SD.open(path, FILE_READ);
+    if(!f || f.isDirectory()) {
+        lv_snprintf(md_text_buf, sizeof(md_text_buf), "Failed to open:\n%s", path);
+        return;
+    }
+    size_t idx = 0;
+    while(f.available() && idx < sizeof(md_text_buf) - 1) {
+        char c = (char)f.read();
+        if(c != '\r') md_text_buf[idx++] = c;
+    }
+    md_text_buf[idx] = '\0';
+    f.close();
+}
+
+static void create11(lv_obj_t *parent)
+{
+    md_cont = lv_obj_create(parent);
+    lv_obj_set_size(md_cont, lv_pct(96), lv_pct(84));
+    lv_obj_align(md_cont, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(md_cont, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(md_cont, 8, LV_PART_MAIN);
+    lv_obj_set_style_border_width(md_cont, 1, LV_PART_MAIN);
+    lv_obj_set_scrollbar_mode(md_cont, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scroll_dir(md_cont, LV_DIR_VER);
+
+    md_label = lv_label_create(md_cont);
+    lv_obj_set_width(md_label, lv_pct(100));
+    lv_obj_set_style_text_font(md_label, &Font_Mono_Bold_20, LV_PART_MAIN);
+    lv_label_set_long_mode(md_label, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(md_label, "Open a markdown file from SD.");
+
+    scr_back_btn_create(parent, "Markdown Reader", scr11_btn_event_cb);
+}
+
+static void entry11(void)
+{
+    md_load_file(md_open_path);
+    lv_label_set_text(md_label, md_text_buf);
+    lv_obj_scroll_to_y(md_cont, 0, LV_ANIM_OFF);
+}
+static void exit11(void) { }
+static void destroy11(void) { }
+
+static scr_lifecycle_t screen11 = {
+    .create = create11,
+    .entry = entry11,
+    .exit  = exit11,
+    .destroy = destroy11,
+};
+#endif
 //************************************[ screen 9 ]****************************************** shutdown
 #if 1
 static void scr8_btn_event_cb(lv_event_t * e)
@@ -2857,15 +3088,15 @@ void ui_entry(void)
     scr_mgr_register(SCREEN4_ID,   &screen4);   // setting
     scr_mgr_register(SCREEN4_1_ID, &screen4_1); //  - About System
     scr_mgr_register(SCREEN4_2_ID, &screen4_2); //  - Set EPD Vcom
+    scr_mgr_register(SCREEN4_3_ID, &screen4_3); //  - Set Date & Time
     scr_mgr_register(SCREEN5_ID,   &screen5);   // test
     scr_mgr_register(SCREEN6_ID,   &screen6);   // wifi
     scr_mgr_register(SCREEN7_ID,   &screen7);   // battery
     scr_mgr_register(SCREEN8_ID,   &screen8);   // shutdown
     scr_mgr_register(SCREEN9_ID,   &screen9);   // sleep
     scr_mgr_register(SCREEN10_ID,  &screen10);  // gps
+    scr_mgr_register(SCREEN11_ID,  &screen11);  // markdown
 
     scr_mgr_switch(SCREEN0_ID, false); // set root screen
     scr_mgr_set_anim(LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE);
 }
-
-

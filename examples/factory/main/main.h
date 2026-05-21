@@ -92,5 +92,3 @@ extern TouchDrvGT911 touch;
 
 // RTC
 extern SensorPCF8563 rtc;
-
-

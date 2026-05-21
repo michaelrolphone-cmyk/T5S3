@@ -139,6 +139,15 @@ void ui_clock_get_data(uint8_t *year, uint8_t *month, uint8_t *day, uint8_t *wee
     }
     printf("y=%d, m=%d, d=%d, w=%d\n", *year, *month, *day, *week);
 }
+
+bool ui_clock_set_data_time(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second)
+{
+    if(peri_buf[E_PERI_RTC] != true) {
+        return false;
+    }
+    rtc.setDateTime(year, month, day, hour, minute, second);
+    return true;
+}
 //************************************[ screen 2 ]****************************************** lora
 void ui_lora_recv_suspend(void)
 {
@@ -546,4 +555,3 @@ void ui_sleep(void)
     // esp_sleep_enable_ext1_wakeup((1UL << KEY_BTN), ESP_EXT1_WAKEUP_ANY_LOW); 
     esp_deep_sleep_start();
 }
-
