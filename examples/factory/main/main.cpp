@@ -330,7 +330,6 @@ static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
         // if(touch.getPoint(x, y)){
         if(touch.getPoint(&x, &y, 1)){
             data->state = LV_INDEV_STATE_PRESSED;
-            Serial.printf("[input] X:%d Y:%d\n", data->point.x, data->point.y);
         }
     } 
     else{

@@ -461,6 +461,34 @@ float battery_25896_get_PREC_CURR(void)
 bool ui_battery_27220_is_vaild(void) {return peri_buf[E_PERI_BQ27220]; }
 bool ui_battery_27220_get_input(void) { return bq27220.getIsCharging();}
 bool ui_battery_27220_get_charge_finish(void) { return bq27220.getCharingFinish();}
+
+static uint16_t bq27220_soc_last_valid = 0;
+static bool bq27220_soc_has_valid = false;
+
+static uint16_t ui_battery_27220_get_percent_verified(void)
+{
+    int soc = (int)bq27220.getStateOfCharge();
+    if(soc >= 0 && soc <= 100) {
+        bq27220_soc_last_valid = (uint16_t)soc;
+        bq27220_soc_has_valid = true;
+        return bq27220_soc_last_valid;
+    }
+
+    if(bq27220_soc_has_valid) {
+        return bq27220_soc_last_valid;
+    }
+
+    uint16_t remain = bq27220.getRemainingCapacity();
+    uint16_t full = bq27220.getFullChargeCapacity();
+    if(full > 0 && remain <= full) {
+        bq27220_soc_last_valid = (uint16_t)((remain * 100UL) / full);
+        bq27220_soc_has_valid = true;
+        return bq27220_soc_last_valid;
+    }
+
+    return 0;
+}
+
 uint16_t ui_battery_27220_get_status(void) 
 {
     BQ27220BatteryStatus batt;
@@ -473,11 +501,11 @@ uint16_t ui_battery_27220_get_temperature(void) { return bq27220.getTemperature(
 uint16_t ui_battery_27220_get_full_capacity(void) { return bq27220.getFullChargeCapacity(); }
 uint16_t ui_battery_27220_get_design_capacity(void) { return bq27220.getDesignCapacity(); }
 uint16_t ui_battery_27220_get_remain_capacity(void) { return bq27220.getRemainingCapacity(); }
-uint16_t ui_battery_27220_get_percent(void) { return bq27220.getStateOfCharge(); }
+uint16_t ui_battery_27220_get_percent(void) { return ui_battery_27220_get_percent_verified(); }
 uint16_t ui_battery_27220_get_health(void) { return bq27220.getStateOfHealth(); }
 const char * ui_battert_27220_get_percent_level(void)
 {
-    int percent = bq27220.getStateOfCharge();
+    uint16_t percent = ui_battery_27220_get_percent_verified();
     const char * str = NULL;
     if(percent < 20)      str =  LV_SYMBOL_BATTERY_EMPTY;
     else if(percent < 40) str =  LV_SYMBOL_BATTERY_1;
