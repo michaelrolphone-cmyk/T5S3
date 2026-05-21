@@ -83,6 +83,7 @@ void disp_full_refresh(void);
 void disp_full_clean(void);
 void dips_clean(void);
 void disp_refresh_screen(void);
+void disp_set_update_enabled(bool enabled);
 
 void indev_touch_en();
 void indev_touch_dis();
@@ -92,5 +93,4 @@ extern TouchDrvGT911 touch;
 
 // RTC
 extern SensorPCF8563 rtc;
-
 

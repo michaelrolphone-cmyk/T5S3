@@ -191,6 +191,11 @@ void disp_refresh_screen(void)
     epd_poweroff();
 }
 
+void disp_set_update_enabled(bool enabled)
+{
+    disp_flush_enabled = enabled;
+}
+
 /*********************************************************************************
  *                            STATIC  FUNCTION
  * *******************************************************************************/
