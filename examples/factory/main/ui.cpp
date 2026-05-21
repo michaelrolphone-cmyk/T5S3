@@ -253,17 +253,17 @@ const struct menu_icon icon_buf[] = {
     {&img_clock,    "clock"   , 45,   45  }, 
     {&img_lora,     "lora"    , 210,  45  },
     {&img_sd_card,  "sd card" , 375,  45  },
-    {&img_setting,  "setting" , 45,   250 },
     {&img_test,     "test"    , 210,  250 },
     {&img_wifi,     "wifi"    , 375,  250 },
     {&img_battery,  "battery" , 45,   455 },
     {&img_gps,      "gps",      210,  455 },
-    {&img_test,     "md",       375,  455 },
+    {&img_markdown, "Reader",   375,  455 },
 };
 
 const struct menu_icon icon_buf2[] = {
-    {&img_shutdown, "shutdown", 45,  45 },
-    {&img_sleep,    "sleep" ,   210, 45 },
+    {&img_setting,  "setting", 45,  45 },
+    {&img_shutdown, "shutdown", 210,  45 },
+    {&img_sleep,    "sleep" ,   375, 45 },
 };
 
 static lv_obj_t *ui_Panel4;
@@ -352,13 +352,13 @@ static void menu_btn_event(lv_event_t *e)
          * 0 --- SCREEN1_ID  --- clock
          * 1 --- SCREEN2_ID  --- lora
          * 2 --- SCREEN3_ID  --- sd card
-         * 3 --- SCREEN4_ID  --- setting
-         * 4 --- SCREEN5_ID  --- test
-         * 5 --- SCREEN6_ID  --- wifi
-         * 6 --- SCREEN7_ID  --- battery
-         * 7 --- SCREEN10_ID --- gps
-         * 8 --- SCREEN11_ID --- markdown
+         * 3 --- SCREEN5_ID  --- test
+         * 4 --- SCREEN6_ID  --- wifi
+         * 5 --- SCREEN7_ID  --- battery
+         * 6 --- SCREEN10_ID --- gps
+         * 7 --- SCREEN11_ID --- markdown
          ************ page2 ************
+         * 8 --- SCREEN4_ID  --- setting
          * 9 --- SCREEN8_ID  --- shutdown
          * 10 -- SCREEN9_ID  --- sleep
         */
@@ -366,12 +366,12 @@ static void menu_btn_event(lv_event_t *e)
             case 0: scr_mgr_push(SCREEN1_ID, false); break;
             case 1: scr_mgr_push(SCREEN2_ID, false); break;
             case 2: scr_mgr_push(SCREEN3_ID, false); break;
-            case 3: scr_mgr_push(SCREEN4_ID, false); break;
-            case 4: scr_mgr_push(SCREEN5_ID, false); break;
-            case 5: scr_mgr_push(SCREEN6_ID, false); break;
-            case 6: scr_mgr_push(SCREEN7_ID, false); break;
-            case 7: scr_mgr_push(SCREEN10_ID, false); break;
-            case 8: scr_mgr_push(SCREEN11_ID, false); break;
+            case 3: scr_mgr_push(SCREEN5_ID, false); break;
+            case 4: scr_mgr_push(SCREEN6_ID, false); break;
+            case 5: scr_mgr_push(SCREEN7_ID, false); break;
+            case 6: scr_mgr_push(SCREEN10_ID, false); break;
+            case 7: scr_mgr_push(SCREEN11_ID, false); break;
+            case 8: scr_mgr_push(SCREEN4_ID, false); break;
             case 9: scr_mgr_push(SCREEN8_ID, false); break;
             case 10: scr_mgr_push(SCREEN9_ID, false); break;
             default: break;
@@ -1404,14 +1404,17 @@ static void read_img_btn_event(lv_event_t * e)
         return;
     }
 
-    if(strstr(&full_path[1], ".md") || strstr(&full_path[1], ".markdown")) {
-        lv_snprintf(md_open_path, sizeof(md_open_path), "%s", &full_path[1]);
+    if(strncmp(full_path, "FS:", 3) == 0 &&
+       (strstr(&full_path[3], ".md") || strstr(&full_path[3], ".markdown"))) {
+        lv_snprintf(md_open_path, sizeof(md_open_path), "%s", &full_path[3]);
         scr_mgr_push(SCREEN11_ID, false);
         return;
     }
 
-    lv_img_set_src(ui_photos_img, &full_path[1]);
-    printf("event [%s]\n", &full_path[1]);
+    if(strncmp(full_path, "FS:", 3) == 0) {
+        lv_img_set_src(ui_photos_img, &full_path[3]);
+        printf("event [%s]\n", &full_path[3]);
+    }
 }
 
 static void scr3_btn_event_cb(lv_event_t * e)
@@ -1424,41 +1427,25 @@ static void scr3_btn_event_cb(lv_event_t * e)
 
 static void scr3_add_img_btn(const char *text, int text_len, int type)
 {
-    char buf[16] = {0};
-    strncpy(buf, text, 16);
-    char *suffix = (char *)text + text_len - 4;
-    buf[text_len - 4] = '\0';
-
-    printf("imgbtn [%s][%d][%s]\n", text, text_len, suffix);
-
-    lv_obj_t *obj = lv_obj_create(scr3_cont_file);
-    lv_obj_set_size(obj, LCD_HOR_SIZE/11, LCD_HOR_SIZE/11);
-    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_pad_all(obj, 0, LV_PART_MAIN);
-    lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN);
-
-    lv_obj_t *img = lv_img_create(obj);
-    lv_obj_align(img, LV_ALIGN_CENTER, 0, -10);
-    lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE);
-
-    // switch (type) {
-    //     case 1: lv_img_set_src(img, &img_JPG); break;
-    //     case 2: lv_img_set_src(img, &img_PNG); break;
-    //     case 3: lv_img_set_src(img, &img_BMP); break;
-    //     default:
-    //         break;
-    // }
-
-    lv_obj_t *lab = lv_label_create(obj);
-    lv_obj_set_style_text_font(lab, &Font_Mono_Bold_20, LV_PART_MAIN);
-    lv_label_set_text(lab, buf); // File suffixes are not displayed
-    lv_obj_align_to(lab, img, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
+    (void)text_len;
+    (void)type;
+    lv_obj_t *obj = lv_list_add_btn(scr3_cont_file, NULL, text);
+    lv_obj_set_width(obj, lv_pct(100));
+    lv_obj_set_height(obj, 120);
+    lv_obj_set_style_text_font(obj, &Font_Mono_Bold_20, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN);
+    lv_obj_set_style_text_color(obj, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN);
 
     lv_obj_t *lab1 = lv_label_create(obj);
     lv_label_set_text(lab1, text);
     lv_obj_add_flag(lab1, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(obj, read_img_btn_event, LV_EVENT_CLICKED, lab1);
 
-    lv_obj_add_event_cb(img, read_img_btn_event, LV_EVENT_CLICKED, lab1);
+    uint32_t child_cnt = lv_obj_get_child_cnt(obj);
+    for(uint32_t i = 0; i < child_cnt; i++) {
+        lv_obj_t *child = lv_obj_get_child(obj, i);
+        lv_obj_add_event_cb(child, read_img_btn_event, LV_EVENT_CLICKED, lab1);
+    }
 }
 
 static void sd_go_parent(void)
@@ -1485,13 +1472,12 @@ static void sd_file_list_populate(void)
     if(strcmp(sd_curr_path, "/") != 0) {
         scr3_add_img_btn("..", 2, 1);
         lv_obj_t *obj = lv_obj_get_child(scr3_cont_file, lv_obj_get_child_cnt(scr3_cont_file) - 1);
-        lv_obj_t *img = lv_obj_get_child(obj, 0);
-        lv_obj_t *lab1 = lv_obj_get_child(obj, 2);
+        lv_obj_t *lab1 = lv_obj_get_child(obj, lv_obj_get_child_cnt(obj) - 1);
         static char parent_flag[128];
         lv_snprintf(parent_flag, sizeof(parent_flag), "D%s", sd_curr_path);
         lv_label_set_text(lab1, parent_flag);
-        lv_obj_remove_event_cb(img, read_img_btn_event);
-        lv_obj_add_event_cb(img, [](lv_event_t *e){
+        lv_obj_remove_event_cb(obj, read_img_btn_event);
+        lv_obj_add_event_cb(obj, [](lv_event_t *e){
             if(e->code == LV_EVENT_CLICKED){
                 sd_go_parent();
                 sd_file_list_populate();
@@ -1525,7 +1511,7 @@ static void sd_file_list_populate(void)
 
         scr3_add_img_btn(display_name, strlen(display_name), 0);
         lv_obj_t *obj = lv_obj_get_child(scr3_cont_file, lv_obj_get_child_cnt(scr3_cont_file) - 1);
-        lv_obj_t *lab1 = lv_obj_get_child(obj, 2);
+        lv_obj_t *lab1 = lv_obj_get_child(obj, lv_obj_get_child_cnt(obj) - 1);
         lv_label_set_text(lab1, full_path);
 
         file.close();
@@ -1537,25 +1523,25 @@ static void sd_file_list_populate(void)
 
 static void create3(lv_obj_t *parent) {
     lv_snprintf(sd_curr_path, sizeof(sd_curr_path), "/");
-    scr3_cont_file = lv_obj_create(parent);
-    lv_obj_set_size(scr3_cont_file, lv_pct(49), lv_pct(85));
+    scr3_cont_file = lv_list_create(parent);
+    lv_obj_set_size(scr3_cont_file, lv_pct(100), lv_pct(85));
     lv_obj_set_style_bg_color(scr3_cont_file, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN);
-    lv_obj_set_scrollbar_mode(scr3_cont_file, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_scrollbar_mode(scr3_cont_file, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scroll_dir(scr3_cont_file, LV_DIR_VER);
     lv_obj_set_style_border_width(scr3_cont_file, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(scr3_cont_file, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_hor(scr3_cont_file, 5, LV_PART_MAIN);
-    lv_obj_set_flex_flow(scr3_cont_file, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_style_pad_row(scr3_cont_file, 5, LV_PART_MAIN);
-    lv_obj_set_style_pad_column(scr3_cont_file, 5, LV_PART_MAIN);
-    lv_obj_set_align(scr3_cont_file, LV_ALIGN_BOTTOM_LEFT);
+    lv_obj_set_style_pad_row(scr3_cont_file, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(scr3_cont_file, 0, LV_PART_MAIN);
+    lv_obj_set_align(scr3_cont_file, LV_ALIGN_BOTTOM_MID);
 
     scr3_cont_img = lv_obj_create(parent);
-    lv_obj_set_size(scr3_cont_img, lv_pct(49), lv_pct(85));
+    lv_obj_set_size(scr3_cont_img, 1, 1);
     lv_obj_set_style_bg_color(scr3_cont_img, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN);
     lv_obj_set_scrollbar_mode(scr3_cont_img, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_border_width(scr3_cont_img, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(scr3_cont_img, 0, LV_PART_MAIN);
-    lv_obj_set_align(scr3_cont_img, LV_ALIGN_BOTTOM_RIGHT);
+    lv_obj_add_flag(scr3_cont_img, LV_OBJ_FLAG_HIDDEN);
 
     //---------------------
     ui_photos_img = lv_img_create(scr3_cont_img);
