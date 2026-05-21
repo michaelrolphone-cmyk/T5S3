@@ -1967,12 +1967,29 @@ static scr_lifecycle_t screen4 = {
 // --------------------- screen 4.3 --------------------- Set Date & Time
 #if 1
 static lv_obj_t *set_dt_lab;
+static lv_obj_t *set_dt_field_btns[5];
+static lv_obj_t *set_dt_field_labs[5];
 static int set_dt_field = 0;
 static int set_dt_year = 2024, set_dt_month = 1, set_dt_day = 1, set_dt_hour = 0, set_dt_min = 0;
+
+static void set_dt_update_field_focus(void)
+{
+    for (int i = 0; i < 5; i++) {
+        bool selected = (i == set_dt_field);
+        lv_obj_set_style_bg_opa(set_dt_field_btns[i], selected ? LV_OPA_20 : LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(set_dt_field_btns[i], selected ? 3 : 1, LV_PART_MAIN);
+    }
+}
 
 static void set_dt_update_label(void)
 {
     lv_label_set_text_fmt(set_dt_lab, "%04d-%02d-%02d  %02d:%02d", set_dt_year, set_dt_month, set_dt_day, set_dt_hour, set_dt_min);
+    lv_label_set_text_fmt(set_dt_field_labs[0], "%04d", set_dt_year);
+    lv_label_set_text_fmt(set_dt_field_labs[1], "%02d", set_dt_month);
+    lv_label_set_text_fmt(set_dt_field_labs[2], "%02d", set_dt_day);
+    lv_label_set_text_fmt(set_dt_field_labs[3], "%02d", set_dt_hour);
+    lv_label_set_text_fmt(set_dt_field_labs[4], "%02d", set_dt_min);
+    set_dt_update_field_focus();
 }
 
 static void set_dt_adjust(int delta)
@@ -1997,8 +2014,10 @@ static void set_dt_event_cb(lv_event_t * e)
     int cmd = (int)e->user_data;
     if(cmd == 0) set_dt_adjust(1);
     else if(cmd == 1) set_dt_adjust(-1);
-    else if(cmd == 2) { set_dt_field = (set_dt_field + 1) % 5; }
-    else if(cmd == 3) { set_dt_field = (set_dt_field + 4) % 5; }
+    else if(cmd >= 10 && cmd <= 14) {
+        set_dt_field = cmd - 10;
+        set_dt_update_field_focus();
+    }
     else if(cmd == 4) { ui_clock_set_data_time(set_dt_year, set_dt_month, set_dt_day, set_dt_hour, set_dt_min, 0); }
 }
 
@@ -2011,33 +2030,61 @@ static void create4_3(lv_obj_t *parent)
 {
     set_dt_lab = lv_label_create(parent);
     lv_obj_set_style_text_font(set_dt_lab, &Font_Mono_Bold_30, LV_PART_MAIN);
-    lv_obj_align(set_dt_lab, LV_ALIGN_TOP_MID, 0, 100);
+    lv_obj_align(set_dt_lab, LV_ALIGN_TOP_MID, 0, 70);
+    lv_obj_add_flag(set_dt_lab, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *field_row = lv_obj_create(parent);
+    lv_obj_set_size(field_row, 470, 80);
+    lv_obj_align(field_row, LV_ALIGN_TOP_MID, 0, 130);
+    lv_obj_set_style_border_width(field_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(field_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(field_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(field_row, 6, LV_PART_MAIN);
+    lv_obj_set_flex_flow(field_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(field_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    const char *sep_text[] = {"-", "-", "  ", ":"};
+    int field_width[] = {108, 68, 68, 68, 68};
+    for (int i = 0; i < 5; i++) {
+        lv_obj_t *btn = lv_btn_create(field_row);
+        set_dt_field_btns[i] = btn;
+        lv_obj_set_size(btn, field_width[i], 64);
+        lv_obj_set_style_radius(btn, 12, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
+        lv_obj_set_style_border_color(btn, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN);
+        lv_obj_add_event_cb(btn, set_dt_event_cb, LV_EVENT_CLICKED, (void *)(10 + i));
+
+        set_dt_field_labs[i] = lv_label_create(btn);
+        lv_obj_set_style_text_font(set_dt_field_labs[i], &Font_Mono_Bold_30, LV_PART_MAIN);
+        lv_obj_center(set_dt_field_labs[i]);
+
+        if (i < 4) {
+            lv_obj_t *sep = lv_label_create(field_row);
+            lv_obj_set_style_text_font(sep, &Font_Mono_Bold_30, LV_PART_MAIN);
+            lv_label_set_text(sep, sep_text[i]);
+        }
+    }
+
     set_dt_update_label();
 
     lv_obj_t *btn_up = lv_btn_create(parent);
-    lv_obj_set_size(btn_up, 120, 70);
-    lv_obj_align(btn_up, LV_ALIGN_CENTER, -180, 0);
+    lv_obj_set_size(btn_up, 130, 70);
+    lv_obj_align(btn_up, LV_ALIGN_CENTER, -150, 50);
     lv_obj_add_event_cb(btn_up, set_dt_event_cb, LV_EVENT_CLICKED, (void *)0);
     lv_label_set_text(lv_label_create(btn_up), "UP");
     lv_obj_center(lv_obj_get_child(btn_up, 0));
 
     lv_obj_t *btn_down = lv_btn_create(parent);
-    lv_obj_set_size(btn_down, 120, 70);
-    lv_obj_align(btn_down, LV_ALIGN_CENTER, -40, 0);
+    lv_obj_set_size(btn_down, 130, 70);
+    lv_obj_align(btn_down, LV_ALIGN_CENTER, 0, 50);
     lv_obj_add_event_cb(btn_down, set_dt_event_cb, LV_EVENT_CLICKED, (void *)1);
     lv_label_set_text(lv_label_create(btn_down), "DOWN");
     lv_obj_center(lv_obj_get_child(btn_down, 0));
 
-    lv_obj_t *btn_next = lv_btn_create(parent);
-    lv_obj_set_size(btn_next, 120, 70);
-    lv_obj_align(btn_next, LV_ALIGN_CENTER, 100, 0);
-    lv_obj_add_event_cb(btn_next, set_dt_event_cb, LV_EVENT_CLICKED, (void *)2);
-    lv_label_set_text(lv_label_create(btn_next), "NEXT");
-    lv_obj_center(lv_obj_get_child(btn_next, 0));
-
     lv_obj_t *btn_save = lv_btn_create(parent);
-    lv_obj_set_size(btn_save, 120, 70);
-    lv_obj_align(btn_save, LV_ALIGN_CENTER, 240, 0);
+    lv_obj_set_size(btn_save, 130, 70);
+    lv_obj_align(btn_save, LV_ALIGN_CENTER, 150, 50);
     lv_obj_add_event_cb(btn_save, set_dt_event_cb, LV_EVENT_CLICKED, (void *)4);
     lv_label_set_text(lv_label_create(btn_save), "SAVE");
     lv_obj_center(lv_obj_get_child(btn_save, 0));
