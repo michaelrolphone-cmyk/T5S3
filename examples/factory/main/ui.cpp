@@ -1109,8 +1109,6 @@ static void ta_event_cb(lv_event_t * e)
     }
 
     ui_refresh_set_mode(UI_REFRESH_MODE_FAST);
-    disp_set_update_enabled(true);
-    disp_refresh_screen();
 }
 
 static void scr2_2_btn_event_cb(lv_event_t * e)
@@ -1197,7 +1195,6 @@ static void entry2_2(void)
     lora_lab_cnt = 0;
 
     ui_setting_get_refresh_speed(&scr_refresh_mode);
-    disp_set_update_enabled(false);
 
     if(ui_lora_get_mode() == LORA_MODE_RECV) {
         ui_lora_set_mode(LORA_MODE_SEND);
@@ -1205,8 +1202,6 @@ static void entry2_2(void)
 }
 static void exit2_2(void) 
 {
-    disp_set_update_enabled(true);
-    disp_refresh_screen();
     ui_refresh_set_mode(scr_refresh_mode);
 }
 static void destroy2_2(void) { }
@@ -2873,4 +2868,3 @@ void ui_entry(void)
     scr_mgr_switch(SCREEN0_ID, false); // set root screen
     scr_mgr_set_anim(LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE);
 }
-

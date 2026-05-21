@@ -65,6 +65,8 @@ uint8_t *decodebuffer = NULL;
 volatile bool disp_flush_enabled = true;
 volatile bool indev_touch_enabled = true;
 bool disp_refr_is_busy = false;
+static volatile bool disp_flush_pending = false;
+static TaskHandle_t disp_flush_handle = NULL;
 
 /*********************************************************************************
  *                                   TASK
@@ -191,14 +193,50 @@ void disp_refresh_screen(void)
     epd_poweroff();
 }
 
-void disp_set_update_enabled(bool enabled)
-{
-    disp_flush_enabled = enabled;
-}
-
 /*********************************************************************************
  *                            STATIC  FUNCTION
  * *******************************************************************************/
+static void disp_flush_task(void *param)
+{
+    (void)param;
+    while (1) {
+        if (disp_flush_pending) {
+            disp_flush_pending = false;
+
+            EpdRect rener_area = {
+                .x = 0,
+                .y = 0,
+                .width = epd_rotated_display_width(),
+                .height = epd_rotated_display_height(),
+            };
+
+            if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
+            {
+                epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
+                epd_poweron();
+                checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
+                epd_poweroff();
+            }
+            else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
+            {
+                epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
+                epd_poweron();
+                checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+                epd_poweroff();
+            }
+            else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
+            {
+                disp_full_refresh();
+                epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
+                epd_poweron();
+                checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+                epd_poweroff();
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+}
+
 static inline uint8_t lv_color_to_epd_gray4(lv_color_t color)
 {
     lv_color32_t c32;
@@ -260,38 +298,17 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         }
         // printf("[disp_flush] x1:%d, y1:%d, w:%d, h:%d\n", area->x1, area->y1, w, h);
     }
-    EpdRect rener_area = {
-        .x = 0,
-        .y = 0,
-        .width = epd_rotated_display_width(),
-        .height = epd_rotated_display_height(),
-    };
-
     if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) 
     {
-        // disp_full_refresh();
-        epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
-        epd_poweron();
-        // checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
-        checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
-        epd_poweroff();
+        disp_flush_pending = true;
     } 
     else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
     {
-        // disp_full_refresh();
-        epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
-        epd_poweron();
-        checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
-        // checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
-        epd_poweroff();
+        disp_flush_pending = true;
     } 
     else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
     {
-        disp_full_refresh();
-        epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
-        epd_poweron();
-        checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
-        epd_poweroff();
+        disp_flush_pending = true;
     }
     /* Inform the graphics library that you are ready with the flushing */
     lv_disp_flush_ready(disp);
@@ -637,6 +654,7 @@ void idf_setup()
 
     printf("LVGL Init\n");
     lv_port_disp_init();
+    xTaskCreate(disp_flush_task, "disp_flush_task", 1024 * 6, NULL, 2, &disp_flush_handle);
 
     printf("LVGL UI Entry\n");
     ui_entry();
