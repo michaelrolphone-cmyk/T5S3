@@ -13,6 +13,7 @@
 
 static int scr_refresh_mode;
 static lv_timer_t *taskbar_update_timer = NULL;
+static void format_time_12h(uint8_t h24, uint8_t m, char *buf, size_t len, const char **ampm);
 uint16_t taskbar_statue[TASKBAR_ID_MAX] = {0};
 struct tm timeinfo = {0};
 //************************************[ Other fun ]******************************************
