@@ -74,7 +74,7 @@ static TaskHandle_t disp_flush_handle = NULL;
 void btn_task(void *param)
 {
     bool boot_btn_pressed = false;
-    bool io48_backlight_low_on = false;
+    bool ioext_btn_pressed = false;
 
     while(1)
     {
@@ -94,13 +94,19 @@ void btn_task(void *param)
         if (digitalRead(BOARD_PCA9535_INT) == LOW)
         {
             if(button_read()) {
-                // Extended IO button press
-                io48_backlight_low_on = !io48_backlight_low_on;
-                ui_setting_set_backlight(io48_backlight_low_on ? 1 : 0);
+                // Extended IO button press (power key): enter sleep
+                if (!ioext_btn_pressed) {
+                    ioext_btn_pressed = true;
+                    scr_mgr_switch(0, false);
+                    ui_sleep();
+                }
             }
-            else{
-                // Serial.printf("io_extend end\n");
+            else {
+                ioext_btn_pressed = false;
             }
+        }
+        else {
+            ioext_btn_pressed = false;
         }
         delay(80);
     }

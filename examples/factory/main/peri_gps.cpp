@@ -229,6 +229,12 @@ void displayInfo()
             return;
         }
 
+        const char *old_tz = getenv("TZ");
+        char old_tz_buf[64] = {0};
+        if (old_tz != NULL) {
+            strncpy(old_tz_buf, old_tz, sizeof(old_tz_buf) - 1);
+        }
+
         setenv("TZ", "UTC0", 1);
         tzset();
         struct tm tm_utc = {0};
@@ -241,10 +247,18 @@ void displayInfo()
 
         time_t utc_epoch = mktime(&tm_utc);
         if (utc_epoch <= 0) {
+            if (old_tz != NULL) {
+                setenv("TZ", old_tz_buf, 1);
+            } else {
+                unsetenv("TZ");
+            }
+            tzset();
             return;
         }
 
-        setenv("TZ", "MST7MDT,M3.2.0/2,M11.1.0/2", 1);
+        // GPS reports UTC. Convert to fixed Mountain Standard Time (UTC-7).
+        // Use fixed MST (no DST) per product requirement.
+        setenv("TZ", "MST7", 1);
         tzset();
         struct tm tm_mt;
         localtime_r(&utc_epoch, &tm_mt);
@@ -255,6 +269,13 @@ void displayInfo()
         Serial.printf("RTC synced from GPS (Mountain): %04d-%02d-%02d %02d:%02d:%02d\n",
                       tm_mt.tm_year + 1900, tm_mt.tm_mon + 1, tm_mt.tm_mday,
                       tm_mt.tm_hour, tm_mt.tm_min, tm_mt.tm_sec);
+
+        if (old_tz != NULL) {
+            setenv("TZ", old_tz_buf, 1);
+        } else {
+            unsetenv("TZ");
+        }
+        tzset();
     }
 }
 /* clang-format off */
