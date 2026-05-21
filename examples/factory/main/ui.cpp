@@ -5,6 +5,7 @@
 #include "ui.h"
 #include "ui_port.h"
 #include "src/assets.h"
+#include "SD.h"
 
 /* clang-format off */
 
@@ -1449,6 +1450,38 @@ static void scr3_add_img_btn(const char *text, int text_len, int type)
 }
 
 
+
+static void sd_file_list_populate(void)
+{
+    File root = SD.open("/");
+    if (!root || !root.isDirectory()) {
+        return;
+    }
+
+    File file = root.openNextFile();
+    uint16_t file_index = 0;
+    while (file)
+    {
+        if (file_index >= 64) {
+            file.close();
+            break;
+        }
+
+        if (file.isDirectory()) {
+            char dir_name[64] = {0};
+            snprintf(dir_name, sizeof(dir_name), "[%s]", file.name());
+            create_file_obj((char *)dir_name, (char *)file.path(), 0);
+        } else {
+            create_file_obj((char *)file.name(), (char *)file.path(), 0);
+        }
+
+        file.close();
+        file = root.openNextFile();
+        file_index++;
+    }
+    root.close();
+}
+
 static void create3(lv_obj_t *parent) {
     scr3_cont_file = lv_obj_create(parent);
     lv_obj_set_size(scr3_cont_file, lv_pct(49), lv_pct(85));
@@ -1479,6 +1512,7 @@ static void create3(lv_obj_t *parent) {
     ui_test_get_sd(&ret);
     if(ret) {
         ui_sd_read();
+        sd_file_list_populate();
 
         // //---------------------
         // scr_middle_line(parent);
