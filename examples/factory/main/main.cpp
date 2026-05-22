@@ -253,8 +253,14 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
     Serial.printf("[flush start] full=%d area=(%d,%d)-(%d,%d) w=%d h=%d mode=%d\n",
                   full_area, area->x1, area->y1, area->x2, area->y2, w, h, ui_refresh_get_mode());
 
+    static bool printed_polarity_test = false;
+    if (!printed_polarity_test) {
+        printed_polarity_test = true;
+        Serial.println("[EPD POLARITY TEST] decodebuffer clear value is now 0x00");
+    }
+
     if (full_area) {
-        memset(decodebuffer, 0xFF, EPD_IMAGE_BUF_SIZE);
+        memset(decodebuffer, 0x00, EPD_IMAGE_BUF_SIZE);
     } else {
         Serial.printf("[EPD ERROR] partial LVGL flush area=(%d,%d)-(%d,%d)\n", area->x1, area->y1, area->x2, area->y2);
         Serial.printf("[EPD WARN] partial LVGL flush; preserving previous decodebuffer outside region\n");
@@ -335,8 +341,8 @@ static void lv_port_disp_init(void)
     lv_color_t *lv_disp_buf_2 = (lv_color_t *)ps_calloc(sizeof(lv_color_t), DISP_BUF_SIZE);
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
-    memset(decodebuffer, 0xFF, EPD_IMAGE_BUF_SIZE);
-    memset(displaybuffer, 0xFF, EPD_IMAGE_BUF_SIZE);
+    memset(decodebuffer, 0x00, EPD_IMAGE_BUF_SIZE);
+    memset(displaybuffer, 0x00, EPD_IMAGE_BUF_SIZE);
     framebuffer_mutex = xSemaphoreCreateMutex();
     lv_disp_draw_buf_init(&draw_buf, lv_disp_buf_1, lv_disp_buf_2, DISP_BUF_SIZE);
 
