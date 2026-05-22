@@ -95,6 +95,12 @@ static void epd_style_keyboard(lv_obj_t *obj)
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_ITEMS | LV_STATE_PRESSED);
 }
 
+static void keyboard_disable_long_press_repeat(lv_obj_t *keyboard)
+{
+    if (!keyboard) return;
+    lv_btnmatrix_set_btn_ctrl_all(keyboard, LV_BTNMATRIX_CTRL_NO_REPEAT);
+}
+
 static void epd_style_scrollbar(lv_obj_t *obj)
 {
     if (!obj) return;
@@ -1250,6 +1256,7 @@ static void create2_2(lv_obj_t *parent)
     lv_obj_set_height(keyborad, lv_pct(40));
     lv_obj_align(keyborad, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_border_width(keyborad, 0, LV_PART_MAIN);
+    keyboard_disable_long_press_repeat(keyborad);
 
     /*Create a text area. The keyboard will write here*/
     textarea = lv_textarea_create(parent);
@@ -2773,6 +2780,7 @@ static void create6(lv_obj_t *parent)
     lv_obj_set_height(wifi_keyboard, lv_pct(40));
     lv_obj_align(wifi_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_textarea(wifi_keyboard, wifi_sta_ssid_ta);
+    keyboard_disable_long_press_repeat(wifi_keyboard);
     epd_style_keyboard(wifi_keyboard);
 
     // apply btn
@@ -3669,6 +3677,7 @@ static void create12(lv_obj_t *parent)
     lv_obj_set_height(web_keyboard, lv_pct(32));
     lv_obj_align(web_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_textarea(web_keyboard, web_url_ta);
+    keyboard_disable_long_press_repeat(web_keyboard);
     epd_style_keyboard(web_keyboard);
 }
 
