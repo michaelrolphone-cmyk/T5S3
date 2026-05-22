@@ -480,6 +480,8 @@ static void create0(lv_obj_t *parent)
     for(int i = 0; i < icon_buf_len; i++) {
         lv_obj_t *img = lv_img_create(menu_screen1);
         lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_opa(img, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(img, 0, LV_PART_MAIN);
         lv_obj_set_x(img, icon_buf[i].offs_x);
         lv_obj_set_y(img, icon_buf[i].offs_y);
         lv_img_set_src(img, icon_buf[i].icon_src);
@@ -495,6 +497,8 @@ static void create0(lv_obj_t *parent)
     for(int i = 0; i < icon_buf2_len; i++) {
         lv_obj_t *img = lv_img_create(menu_screen2);
         lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_opa(img, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(img, 0, LV_PART_MAIN);
         lv_obj_set_x(img, icon_buf2[i].offs_x);
         lv_obj_set_y(img, icon_buf2[i].offs_y);
         lv_img_set_src(img, icon_buf2[i].icon_src);

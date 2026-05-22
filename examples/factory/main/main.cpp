@@ -228,6 +228,9 @@ static void disp_flush_task(void *param)
                     memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
                     xSemaphoreGive(framebuffer_mutex);
                 } else {
+                    // Keep the flush request pending; otherwise this frame can
+                    // be dropped and leave stale/blank rectangles on screen.
+                    disp_flush_pending = true;
                     vTaskDelay(pdMS_TO_TICKS(1));
                     continue;
                 }
@@ -297,9 +300,12 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
     }
 
     if(disp_flush_enabled) {
-        if (framebuffer_mutex && xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(20)) != pdTRUE) {
-            lv_disp_flush_ready(disp);
-            return;
+        if (framebuffer_mutex) {
+            while (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+                // Never drop a LVGL flush area; wait and retry so a frame
+                // cannot be left partially updated.
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
         }
         int32_t w = lv_area_get_width(area);
         int32_t h = lv_area_get_height(area);
