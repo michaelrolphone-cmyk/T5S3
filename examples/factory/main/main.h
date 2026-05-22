@@ -87,6 +87,8 @@ void disp_request_full_clear(void);
 
 void indev_touch_en();
 void indev_touch_dis();
+void touch_begin_home_transition_guard(uint32_t min_block_ms);
+bool touch_home_transition_guard_active(void);
 
 // Touch
 extern TouchDrvGT911 touch;

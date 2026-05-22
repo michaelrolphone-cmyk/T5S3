@@ -24,12 +24,13 @@ static lv_obj_t *scr_mgr_default_style(scr_card_t *card)
     lv_obj_t *obj = lv_obj_create(NULL);
     lv_obj_set_size(obj, lv_pct(100), lv_pct(100));
     lv_obj_set_style_bg_color(obj, lv_color_hex(default_bg_color), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(obj, 0, LV_PART_MAIN);
+    lv_obj_set_style_outline_width(obj, 0, LV_PART_MAIN);
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_OFF);
-    // lv_obj_align(obj, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
-    // lv_obj_set_scroll_snap_x(obj, LV_SCROLL_SNAP_CENTER);
-    // lv_obj_set_flex_flow(obj, LV_FLEX_FLOW_ROW);
-    // lv_obj_set_style_bg_opa(obj, LV_OPA_0, 0);
-    // lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+
     card->life->create(obj);
     return obj;
 }
@@ -151,6 +152,9 @@ bool scr_mgr_switch(int id, bool anim)  // 清空栈，然后切换到指定 id�
         lv_mem_free((void *)scr_stack_top);
         scr_stack_top = stack_scr;
     }
+
+    Serial.printf("[SCR] request full clear before screen create id=%d\n", tgt_card->id);
+    disp_request_full_clear();
 
     stack_scr = (scr_card_t *)lv_mem_alloc(sizeof(scr_card_t));
     stack_scr->id = tgt_card->id;
