@@ -237,14 +237,14 @@ static void disp_flush_task(void *param)
             {
                 epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
-                checkError(epd_hl_update_screen(&hl, MODE_DU, epd_ambient_temperature()));
+                checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
                 epd_poweroff();
             }
             else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
             {
                 epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
-                checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+                checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
                 epd_poweroff();
             }
             else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
