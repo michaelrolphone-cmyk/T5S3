@@ -2652,7 +2652,7 @@ static void create6(lv_obj_t *parent)
     create_field("AP Password", &wifi_ap_pwd_ta, wifi_ap_pwd.c_str(), true);
 
     wifi_keyboard = lv_keyboard_create(parent);
-    lv_obj_set_height(wifi_keyboard, 110);
+    lv_obj_set_height(wifi_keyboard, lv_pct(40));
     lv_obj_align(wifi_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_textarea(wifi_keyboard, wifi_sta_ssid_ta);
 
