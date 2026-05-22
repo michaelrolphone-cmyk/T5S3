@@ -272,9 +272,16 @@ static inline uint8_t lv_color_to_epd_gray4(lv_color_t color)
     lv_color32_t c32;
     c32.full = lv_color_to32(color);
 
-    uint16_t gray = (uint16_t)c32.ch.red * 76U +
-                    (uint16_t)c32.ch.green * 150U +
-                    (uint16_t)c32.ch.blue * 30U;
+    // LVGL provides ARGB pixels for TRUE_COLOR_ALPHA images. Blend against a
+    // white paper background before grayscale conversion, otherwise fully
+    // transparent icon pixels are treated as black (0,0,0,0) and appear as
+    // black rectangles.
+    uint16_t alpha = c32.ch.alpha;
+    uint16_t red = (uint16_t)((c32.ch.red * alpha + 255U * (255U - alpha)) / 255U);
+    uint16_t green = (uint16_t)((c32.ch.green * alpha + 255U * (255U - alpha)) / 255U);
+    uint16_t blue = (uint16_t)((c32.ch.blue * alpha + 255U * (255U - alpha)) / 255U);
+
+    uint16_t gray = red * 76U + green * 150U + blue * 30U;
     uint8_t gray4 = (uint8_t)(((gray >> 8) + 8U) >> 4);
     return gray4 > 0x0F ? 0x0F : gray4;
 }
@@ -311,6 +318,14 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         int32_t h = lv_area_get_height(area);
         int32_t screen_w = epd_rotated_display_width();
         int32_t screen_h = epd_rotated_display_height();
+
+        // For full-screen flushes, reset the 4bpp staging buffer first.
+        // This prevents stale pixels from previous frames when LVGL draw
+        // output contains transparent regions or skipped primitives.
+        if (area->x1 == 0 && area->y1 == 0 &&
+            area->x2 == (screen_w - 1) && area->y2 == (screen_h - 1)) {
+            memset(decodebuffer, 0xFF, EPD_IMAGE_BUF_SIZE);
+        }
 
 #if 0   // Mirror screen or not
         for(int i = 0; i < h ; i++) {
