@@ -68,9 +68,13 @@ volatile bool disp_flush_enabled = true;
 volatile bool indev_touch_enabled = true;
 static volatile bool touch_ignore_until_release = false;
 static volatile bool home_button_pending = false;
+static volatile bool home_waiting_for_release = false;
+static volatile bool home_switch_after_release = false;
 static volatile uint32_t touch_ignore_start_ms = 0;
 static volatile uint32_t touch_ignore_max_ms = 800;
 static volatile uint32_t home_button_last_ms = 0;
+static volatile uint32_t home_release_wait_start_ms = 0;
+static volatile uint32_t touch_block_until_ms = 0;
 static lv_indev_t *touch_indev = NULL;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
@@ -411,9 +415,6 @@ static void touch_cancel_current_press(const char *reason)
 
     if (touch_indev) {
         lv_indev_reset(touch_indev, NULL);
-#if LVGL_VERSION_MAJOR >= 8
-        lv_indev_wait_release(touch_indev);
-#endif
     }
 
     Serial.printf("[TOUCH] suppress current press: %s\n", reason ? reason : "");
@@ -424,6 +425,19 @@ static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
     static int16_t x=0, y=0;
 
     (void)drv;
+    uint32_t now = millis();
+    if (touch_block_until_ms != 0 && now < touch_block_until_ms) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        data->point.x = x;
+        data->point.y = y;
+        return;
+    }
+
+    if (touch_block_until_ms != 0 && now >= touch_block_until_ms) {
+        touch_block_until_ms = 0;
+        Serial.println("[TOUCH] post-home input block ended");
+    }
+
     if (touch_ignore_until_release) {
         bool still_pressed = indev_touch_enabled && touch.isPressed();
         uint32_t elapsed = millis() - touch_ignore_start_ms;
@@ -507,15 +521,30 @@ static bool touch_gt911_init(void)
     // Set the center button to trigger the callback , Only for specific devices, e.g LilyGo-EPD47 S3 GT911
     touch.setHomeButtonCallback([](void *user_data) {
         uint32_t now = millis();
+
         if (now - home_button_last_ms < 700) {
             Serial.println("[HOME] ignored duplicate home callback");
             return;
         }
+
         home_button_last_ms = now;
 
-        Serial.println("[HOME] GT911 home callback");
-        touch_cancel_current_press("GT911 home button");
+        Serial.println("[HOME] GT911 home callback; waiting for release before springboard switch");
+
         home_button_pending = true;
+        home_waiting_for_release = true;
+        home_switch_after_release = true;
+        home_release_wait_start_ms = now;
+
+        // Immediately block normal LVGL input so this press/release cannot become a springboard click.
+        touch_ignore_until_release = true;
+        touch_ignore_start_ms = now;
+        touch_ignore_max_ms = 1500;
+        touch_block_until_ms = now + 1500;
+
+        if (touch_indev) {
+            lv_indev_reset(touch_indev, NULL);
+        }
     }, NULL);
 
     touch.setInterruptMode(LOW_LEVEL_QUERY);
@@ -844,23 +873,61 @@ void idf_setup()
 
 void idf_loop() 
 {
+    bool handled_home = false;
+
     if (home_button_pending) {
-        home_button_pending = false;
+        bool switch_performed = false;
+        bool still_pressed = touch.isPressed();
+        uint32_t now = millis();
+        uint32_t elapsed = now - home_release_wait_start_ms;
 
-        Serial.println("[HOME] switching to springboard");
+        if (home_waiting_for_release && still_pressed && elapsed < 1500) {
+            // Keep LVGL from seeing the active home press.
+            touch_ignore_until_release = true;
+            touch_block_until_ms = now + 100;
+        } else {
+            if (home_waiting_for_release && still_pressed) {
+                Serial.println("[HOME WARN] release wait timeout; switching anyway");
+            } else {
+                Serial.println("[HOME] release observed; switching to springboard");
+            }
 
-        touch_cancel_current_press("home navigation");
+            home_button_pending = false;
+            home_waiting_for_release = false;
+            home_switch_after_release = false;
 
-        scr_mgr_switch(0, false); // Return to the main screen
+            if (touch_indev) {
+                lv_indev_reset(touch_indev, NULL);
+            }
 
-        if (touch_indev) {
-            lv_indev_reset(touch_indev, NULL);
-#if LVGL_VERSION_MAJOR >= 8
-            lv_indev_wait_release(touch_indev);
-#endif
+            // Block input across the screen switch so the release cannot hit a springboard icon.
+            touch_ignore_until_release = true;
+            touch_ignore_start_ms = now;
+            touch_ignore_max_ms = 1000;
+            touch_block_until_ms = now + 1000;
+
+            Serial.println("[HOME] switching to springboard");
+            scr_mgr_switch(SCREEN0_ID, false);
+
+            if (touch_indev) {
+                lv_indev_reset(touch_indev, NULL);
+            }
+
+            // Do not let LVGL process input in the same loop iteration as the switch.
+            delay(20);
+            switch_performed = true;
+        }
+
+        if (switch_performed) {
+            handled_home = true;
         }
     }
-    lv_task_handler();
+
+    if (!handled_home) {
+        lv_task_handler();
+    } else {
+        // Allow rendering timers to continue next loop, but do not process the release as a click immediately.
+    }
     ui_wifi_service_loop();
     delay(1);
 }
