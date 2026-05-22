@@ -70,9 +70,6 @@ static volatile bool touch_ignore_until_release = false;
 static volatile bool home_button_pending = false;
 static volatile uint32_t touch_ignore_start_ms = 0;
 bool disp_refr_is_busy = false;
-static volatile bool disp_flush_pending = false;
-static volatile bool framebuffer_dirty = false;
-static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 
 /*********************************************************************************
@@ -208,62 +205,6 @@ void disp_refresh_screen(void)
 /*********************************************************************************
  *                            STATIC  FUNCTION
  * *******************************************************************************/
-static void disp_flush_task(void *param)
-{
-    (void)param;
-    while (1) {
-        if (disp_flush_pending) {
-            disp_flush_pending = false;
-            framebuffer_dirty = false;
-
-            EpdRect rener_area = {
-                .x = 0,
-                .y = 0,
-                .width = epd_rotated_display_width(),
-                .height = epd_rotated_display_height(),
-            };
-
-            if (framebuffer_mutex && decodebuffer && displaybuffer) {
-                if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
-                    xSemaphoreGive(framebuffer_mutex);
-                } else {
-                    vTaskDelay(pdMS_TO_TICKS(1));
-                    continue;
-                }
-            }
-
-            if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
-            {
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-                epd_poweron();
-                checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
-                epd_poweroff();
-            }
-            else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
-            {
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-                epd_poweron();
-                checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
-                epd_poweroff();
-            }
-            else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
-            {
-                disp_full_refresh();
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-                epd_poweron();
-                checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
-                epd_poweroff();
-            }
-
-            if (framebuffer_dirty) {
-                disp_flush_pending = true;
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(2));
-    }
-}
-
 static inline uint8_t lv_color_to_epd_gray4(lv_color_t color)
 {
     lv_color32_t c32;
@@ -291,62 +232,71 @@ static inline void epd_image_set_pixel_4bpp(uint8_t *buf, int32_t width, int32_t
 
 static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
 {
-    if(decodebuffer == NULL) {
+    if (!decodebuffer) {
         lv_disp_flush_ready(disp);
         return;
     }
 
-    if(disp_flush_enabled) {
-        if (framebuffer_mutex && xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(20)) != pdTRUE) {
-            lv_disp_flush_ready(disp);
-            return;
-        }
-        int32_t w = lv_area_get_width(area);
-        int32_t h = lv_area_get_height(area);
-        int32_t screen_w = epd_rotated_display_width();
-        int32_t screen_h = epd_rotated_display_height();
-        // Serial.printf("[flush] area=(%d,%d)-(%d,%d) w=%d h=%d mode=%d\n", area->x1, area->y1, area->x2, area->y2, w, h, ui_refresh_get_mode());
+    xSemaphoreTake(framebuffer_mutex, portMAX_DELAY);
 
-#if 0   // Mirror screen or not
-        for(int i = 0; i < h ; i++) {
-            for(int j = 0; j < w / 2; j++) {
-                lv_color_t t = *(color_p + (i * w) + j);
-                *(color_p + (i * w) + j) = *(color_p + (i * w) + (w - j - 1));
-                *(color_p + (i * w) + (w - j - 1)) = t;
-            }
-        }
-#endif
-        for(int32_t y = 0; y < h; y++) {
-            int32_t dst_y = area->y1 + y;
-            if(dst_y < 0 || dst_y >= screen_h) continue;
+    int32_t w = lv_area_get_width(area);
+    int32_t h = lv_area_get_height(area);
+    int32_t screen_w = epd_rotated_display_width();
+    int32_t screen_h = epd_rotated_display_height();
 
-            for(int32_t x = 0; x < w; x++) {
-                int32_t dst_x = area->x1 + x;
-                if(dst_x < 0 || dst_x >= screen_w) continue;
+    bool full_area =
+        area->x1 == 0 &&
+        area->y1 == 0 &&
+        area->x2 == screen_w - 1 &&
+        area->y2 == screen_h - 1;
 
-                uint8_t gray4 = lv_color_to_epd_gray4(color_p[y * w + x]);
-                epd_image_set_pixel_4bpp(decodebuffer, screen_w, dst_x, dst_y, gray4);
-            }
-        }
-        if (framebuffer_mutex) {
-            xSemaphoreGive(framebuffer_mutex);
-        }
-        framebuffer_dirty = true;
-        // printf("[disp_flush] x1:%d, y1:%d, w:%d, h:%d\n", area->x1, area->y1, w, h);
+    Serial.printf("[flush start] full=%d area=(%d,%d)-(%d,%d) w=%d h=%d mode=%d\n",
+                  full_area, area->x1, area->y1, area->x2, area->y2, w, h, ui_refresh_get_mode());
+
+    if (full_area) {
+        memset(decodebuffer, 0xFF, EPD_IMAGE_BUF_SIZE);
+    } else {
+        Serial.printf("[EPD ERROR] partial LVGL flush area=(%d,%d)-(%d,%d)\n", area->x1, area->y1, area->x2, area->y2);
+        Serial.printf("[EPD WARN] partial LVGL flush; preserving previous decodebuffer outside region\n");
     }
-    if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) 
-    {
-        disp_flush_pending = true;
-    } 
-    else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
-    {
-        disp_flush_pending = true;
-    } 
-    else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
-    {
-        disp_flush_pending = true;
+
+    for (int32_t y = 0; y < h; y++) {
+        int32_t dst_y = area->y1 + y;
+        if (dst_y < 0 || dst_y >= screen_h) continue;
+
+        for (int32_t x = 0; x < w; x++) {
+            int32_t dst_x = area->x1 + x;
+            if (dst_x < 0 || dst_x >= screen_w) continue;
+
+            uint8_t gray4 = lv_color_to_epd_gray4(color_p[y * w + x]);
+            epd_image_set_pixel_4bpp(decodebuffer, screen_w, dst_x, dst_y, gray4);
+        }
     }
-    /* Inform the graphics library that you are ready with the flushing */
+
+    EpdRect full = {
+        .x = 0,
+        .y = 0,
+        .width = epd_rotated_display_width(),
+        .height = epd_rotated_display_height(),
+    };
+
+    epd_draw_rotated_image(full, decodebuffer, epd_hl_get_framebuffer(&hl));
+    epd_poweron();
+
+    if (ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) {
+        checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), full));
+    } else if (ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL) {
+        checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+    } else {
+        checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+    }
+
+    epd_poweroff();
+
+    Serial.println("[flush done]");
+
+    xSemaphoreGive(framebuffer_mutex);
+
     lv_disp_flush_ready(disp);
 }
 
@@ -385,6 +335,8 @@ static void lv_port_disp_init(void)
     lv_color_t *lv_disp_buf_2 = (lv_color_t *)ps_calloc(sizeof(lv_color_t), DISP_BUF_SIZE);
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
+    memset(decodebuffer, 0xFF, EPD_IMAGE_BUF_SIZE);
+    memset(displaybuffer, 0xFF, EPD_IMAGE_BUF_SIZE);
     framebuffer_mutex = xSemaphoreCreateMutex();
     lv_disp_draw_buf_init(&draw_buf, lv_disp_buf_1, lv_disp_buf_2, DISP_BUF_SIZE);
 
@@ -693,7 +645,6 @@ void idf_setup()
 
     printf("LVGL Init\n");
     lv_port_disp_init();
-    xTaskCreatePinnedToCore(disp_flush_task, "disp_flush_task", 1024 * 6, NULL, 2, &disp_flush_handle, 0);
 
     printf("LVGL UI Entry\n");
     ui_entry();
