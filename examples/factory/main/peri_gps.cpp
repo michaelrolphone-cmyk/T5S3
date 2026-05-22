@@ -4,6 +4,7 @@
 #include "main.h"
 #include <TinyGPS++.h>
 #include <time.h>
+#include <math.h>
 
 /* clang-format off */
 
@@ -15,6 +16,11 @@ static bool gps_csv_ensure_dir();
 static bool gps_csv_make_daily_path(char *out, size_t out_len);
 static bool gps_csv_make_timestamp(char *out, size_t out_len);
 static void gps_csv_append_fix(double lat, double lon, double speed_kmph, uint32_t satellites);
+static void gps_debug_log(const char *msg);
+static void gps_capture_pending_fix();
+static bool gps_csv_time_ready();
+static bool gps_should_log_fix(double lat, double lon);
+static void gps_try_write_pending_fix();
 
 TaskHandle_t gps_handle = NULL;
 double gps_lat=0, gps_lng=0, gps_altitude=0, gps_speed=0;
@@ -25,6 +31,16 @@ static uint32_t gps_vsat=0;
 static bool gps_ready = false;
 static int gps_last_sync_minute = -1;
 static uint32_t last_gps_diag_ms = 0;
+static uint32_t last_gps_sd_diag_ms = 0;
+static bool gps_pending_fix_valid = false;
+static double gps_pending_lat = 0.0;
+static double gps_pending_lon = 0.0;
+static double gps_pending_speed_kmph = 0.0;
+static uint32_t gps_pending_satellites = 0;
+static uint32_t gps_pending_fix_ms = 0;
+static double gps_last_logged_lat = 999.0;
+static double gps_last_logged_lon = 999.0;
+static uint32_t gps_last_logged_ms = 0;
 
 uint8_t buffer[256];
 
@@ -55,6 +71,9 @@ bool gps_init(void)
     if(result) {
         Serial.println("GPS Task Create...!");
         gps_task_create();
+        if (peri_buf[E_PERI_SD_CARD]) {
+            gps_debug_log("[GPS CSV] boot: logger active");
+        }
         result = (gps_handle != NULL);
     } else {
         SerialGPS.end();
@@ -76,14 +95,12 @@ void gps_task(void *param)
             if (gps.encode(c)) {
                 displayInfo();
                 if (gps.location.isUpdated() && gps.location.isValid()) {
-                    gps_csv_append_fix(
-                        gps.location.lat(),
-                        gps.location.lng(),
-                        gps.speed.isValid() ? gps.speed.kmph() : 0.0,
-                        gps.satellites.isValid() ? gps.satellites.value() : 0);
+                    gps_capture_pending_fix();
                 }
+                gps_try_write_pending_fix();
             }
         }
+        gps_try_write_pending_fix();
 
         if (millis() - last_gps_diag_ms > 10000) {
             last_gps_diag_ms = millis();
@@ -96,9 +113,24 @@ void gps_task(void *param)
                           gps.satellites.isValid() ? gps.satellites.value() : 0,
                           peri_buf[E_PERI_SD_CARD]);
         }
+        if (millis() - last_gps_sd_diag_ms > 60000) {
+            last_gps_sd_diag_ms = millis();
+            char diag[160] = {0};
+            snprintf(diag, sizeof(diag),
+                     "[GPS] chars=%lu fix_valid=%d date_valid=%d time_valid=%d sats=%lu sd=%d pending=%d",
+                     gps.charsProcessed(),
+                     gps.location.isValid(),
+                     gps.date.isValid(),
+                     gps.time.isValid(),
+                     gps.satellites.isValid() ? gps.satellites.value() : 0,
+                     peri_buf[E_PERI_SD_CARD],
+                     gps_pending_fix_valid);
+            gps_debug_log(diag);
+        }
 
         if (millis() > 30000 && gps.charsProcessed() < 10) {
             Serial.println(F("No GPS detected: check wiring."));
+            gps_debug_log("[GPS] No GPS detected: chars not increasing");
             delay(1000);
         }
         delay(1);
@@ -119,7 +151,7 @@ void gps_task_create(void)
     }
 
     gps_ready = true;
-    Serial.println("[GPS] task running; CSV logging active when valid fixes arrive");
+    gps_debug_log("[GPS CSV] task running; logger active");
 }
 
 uint32_t gps_get_charsProcessed(void)
@@ -306,12 +338,18 @@ void displayInfo()
 static bool gps_csv_ensure_dir()
 {
     if (!peri_buf[E_PERI_SD_CARD]) {
-        Serial.println("[GPS CSV] SD unavailable; skipped log row");
+        gps_debug_log("[GPS CSV] SD unavailable");
         return false;
     }
     if (!SD.exists("/gps")) {
         if (!SD.mkdir("/gps")) {
-            Serial.println("[GPS CSV] failed to create /gps directory");
+            gps_debug_log("[GPS CSV] failed to create /gps directory");
+            return false;
+        }
+        if (SD.exists("/gps")) {
+            gps_debug_log("[GPS CSV] created /gps directory");
+        } else {
+            gps_debug_log("[GPS CSV] /gps directory still missing after mkdir");
             return false;
         }
     }
@@ -392,8 +430,8 @@ static bool gps_csv_make_timestamp(char *out, size_t out_len)
 
 static void gps_csv_append_fix(double lat, double lon, double speed_kmph, uint32_t satellites)
 {
-    if (!gps.location.isValid()) {
-        Serial.println("[GPS CSV] skipped fix because location is invalid");
+    if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0 || (lat == 0.0 && lon == 0.0)) {
+        gps_debug_log("[GPS CSV] skipped invalid passed coordinate");
         return;
     }
 
@@ -404,14 +442,14 @@ static void gps_csv_append_fix(double lat, double lon, double speed_kmph, uint32
     char path[32] = {0};
     char timestamp[32] = {0};
     if (!gps_csv_make_daily_path(path, sizeof(path)) || !gps_csv_make_timestamp(timestamp, sizeof(timestamp))) {
-        Serial.println("[GPS CSV] skipped fix because date/time is not valid yet");
+        gps_debug_log("[GPS CSV] date/time invalid");
         return;
     }
 
     bool exists = SD.exists(path);
     File f = SD.open(path, FILE_APPEND);
     if (!f) {
-        Serial.printf("[GPS CSV] failed to open %s\n", path);
+        gps_debug_log("[GPS CSV] CSV open failed");
         return;
     }
 
@@ -421,9 +459,97 @@ static void gps_csv_append_fix(double lat, double lon, double speed_kmph, uint32
 
     f.printf("%s,%.8f,%.8f,%.2f,%u\n", timestamp, lat, lon, speed_kmph, satellites);
     f.close();
+    gps_last_logged_lat = lat;
+    gps_last_logged_lon = lon;
+    gps_last_logged_ms = millis();
+    gps_debug_log("[GPS CSV] CSV row written");
 
     Serial.printf("[GPS CSV] logged %s lat=%.8f lon=%.8f sat=%u speed=%.2f\n",
                   path, lat, lon, satellites, speed_kmph);
+}
+
+static void gps_debug_log(const char *msg)
+{
+    Serial.println(msg);
+
+    if (!peri_buf[E_PERI_SD_CARD]) {
+        return;
+    }
+
+    if (!SD.exists("/gps")) {
+        SD.mkdir("/gps");
+    }
+
+    File f = SD.open("/gps/gps_debug.txt", FILE_APPEND);
+    if (!f) {
+        return;
+    }
+
+    f.printf("%lu,%s\n", (unsigned long)millis(), msg);
+    f.close();
+}
+
+static void gps_capture_pending_fix()
+{
+    if (!gps.location.isValid()) {
+        gps_debug_log("[GPS CSV] location invalid");
+        return;
+    }
+    double lat = gps.location.lat();
+    double lon = gps.location.lng();
+    if (lat == 0.0 && lon == 0.0) {
+        gps_debug_log("[GPS CSV] ignored 0,0 coordinate");
+        return;
+    }
+    gps_pending_lat = lat;
+    gps_pending_lon = lon;
+    gps_pending_speed_kmph = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
+    gps_pending_satellites = gps.satellites.isValid() ? gps.satellites.value() : 0;
+    gps_pending_fix_ms = millis();
+    gps_pending_fix_valid = true;
+    gps_debug_log("[GPS CSV] pending fix stored");
+    gps_debug_log("[GPS CSV] pending fix captured");
+}
+
+static bool gps_csv_time_ready()
+{
+    if (gps.date.isValid() && gps.date.year() >= 2000 && gps.time.isValid()) return true;
+    if (peri_buf[E_PERI_RTC]) {
+        RTC_DateTime dt = rtc.getDateTime();
+        if (dt.year >= 2000 && dt.month >= 1 && dt.month <= 12 && dt.day >= 1 && dt.day <= 31) return true;
+    }
+    return false;
+}
+
+static bool gps_should_log_fix(double lat, double lon)
+{
+    uint32_t now = millis();
+    if (gps_last_logged_lat > 900.0 || gps_last_logged_lon > 900.0) return true;
+    double dlat = fabs(lat - gps_last_logged_lat);
+    double dlon = fabs(lon - gps_last_logged_lon);
+    if (dlat > 0.00001 || dlon > 0.00001) return true;
+    if (now - gps_last_logged_ms >= 10000) return true;
+    return false;
+}
+
+static void gps_try_write_pending_fix()
+{
+    if (!gps_pending_fix_valid) return;
+    if (!gps_csv_time_ready()) {
+        static uint32_t last_wait_log_ms = 0;
+        if (millis() - last_wait_log_ms > 10000) {
+            last_wait_log_ms = millis();
+            gps_debug_log("[GPS CSV] pending fix waiting for valid date/time");
+        }
+        return;
+    }
+    if (!gps_should_log_fix(gps_pending_lat, gps_pending_lon)) {
+        gps_pending_fix_valid = false;
+        return;
+    }
+    gps_csv_append_fix(gps_pending_lat, gps_pending_lon, gps_pending_speed_kmph, gps_pending_satellites);
+    gps_debug_log("[GPS CSV] pending fix written");
+    gps_pending_fix_valid = false;
 }
 /* clang-format off */
 
