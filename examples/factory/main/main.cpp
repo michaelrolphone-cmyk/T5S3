@@ -72,11 +72,6 @@ static volatile uint32_t touch_ignore_start_ms = 0;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
-static volatile bool framebuffer_has_dirty_area = false;
-static volatile int32_t framebuffer_dirty_x1 = 0;
-static volatile int32_t framebuffer_dirty_y1 = 0;
-static volatile int32_t framebuffer_dirty_x2 = 0;
-static volatile int32_t framebuffer_dirty_y2 = 0;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 
@@ -227,23 +222,6 @@ static void disp_flush_task(void *param)
                 .width = epd_rotated_display_width(),
                 .height = epd_rotated_display_height(),
             };
-            EpdRect rener_area = full_area;
-
-            if (framebuffer_has_dirty_area) {
-                rener_area.x = framebuffer_dirty_x1;
-                rener_area.y = framebuffer_dirty_y1;
-                rener_area.width = framebuffer_dirty_x2 - framebuffer_dirty_x1 + 1;
-                rener_area.height = framebuffer_dirty_y2 - framebuffer_dirty_y1 + 1;
-                framebuffer_has_dirty_area = false;
-            }
-
-            if (framebuffer_has_dirty_area) {
-                rener_area.x = framebuffer_dirty_x1;
-                rener_area.y = framebuffer_dirty_y1;
-                rener_area.width = framebuffer_dirty_x2 - framebuffer_dirty_x1 + 1;
-                rener_area.height = framebuffer_dirty_y2 - framebuffer_dirty_y1 + 1;
-                framebuffer_has_dirty_area = false;
-            }
 
             if (framebuffer_mutex && decodebuffer && displaybuffer) {
                 if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -347,25 +325,6 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
 
                 uint8_t gray4 = lv_color_to_epd_gray4(color_p[y * w + x]);
                 epd_image_set_pixel_4bpp(decodebuffer, screen_w, dst_x, dst_y, gray4);
-            }
-        }
-        int32_t dirty_x1 = area->x1 < 0 ? 0 : area->x1;
-        int32_t dirty_y1 = area->y1 < 0 ? 0 : area->y1;
-        int32_t dirty_x2 = area->x2 >= screen_w ? screen_w - 1 : area->x2;
-        int32_t dirty_y2 = area->y2 >= screen_h ? screen_h - 1 : area->y2;
-
-        if (dirty_x1 <= dirty_x2 && dirty_y1 <= dirty_y2) {
-            if (!framebuffer_has_dirty_area) {
-                framebuffer_dirty_x1 = dirty_x1;
-                framebuffer_dirty_y1 = dirty_y1;
-                framebuffer_dirty_x2 = dirty_x2;
-                framebuffer_dirty_y2 = dirty_y2;
-                framebuffer_has_dirty_area = true;
-            } else {
-                if (dirty_x1 < framebuffer_dirty_x1) framebuffer_dirty_x1 = dirty_x1;
-                if (dirty_y1 < framebuffer_dirty_y1) framebuffer_dirty_y1 = dirty_y1;
-                if (dirty_x2 > framebuffer_dirty_x2) framebuffer_dirty_x2 = dirty_x2;
-                if (dirty_y2 > framebuffer_dirty_y2) framebuffer_dirty_y2 = dirty_y2;
             }
         }
         if (framebuffer_mutex) {
