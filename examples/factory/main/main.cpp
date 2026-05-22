@@ -305,7 +305,7 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         int32_t h = lv_area_get_height(area);
         int32_t screen_w = epd_rotated_display_width();
         int32_t screen_h = epd_rotated_display_height();
-        Serial.printf("[flush] area=(%d,%d)-(%d,%d) w=%d h=%d mode=%d\n", area->x1, area->y1, area->x2, area->y2, w, h, ui_refresh_get_mode());
+        // Serial.printf("[flush] area=(%d,%d)-(%d,%d) w=%d h=%d mode=%d\n", area->x1, area->y1, area->x2, area->y2, w, h, ui_refresh_get_mode());
 
 #if 0   // Mirror screen or not
         for(int i = 0; i < h ; i++) {
