@@ -5,6 +5,7 @@
 #include "ui.h"
 #include "ui_port.h"
 #include "src/assets.h"
+#include "nvs_param.h"
 #include "SD.h"
 #include <WiFi.h>
 #include <WebServer.h>
