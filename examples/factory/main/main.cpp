@@ -73,6 +73,7 @@ bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
 static volatile bool disp_force_clear_next_flush = false;
+static volatile bool disp_force_physical_clear_next_update = false;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 
@@ -271,37 +272,45 @@ static void disp_flush_task(void *param)
 
             static uint32_t last_hash = 0;
             static bool have_last_hash = false;
+            bool force_physical_clear = disp_force_physical_clear_next_update;
+            disp_force_physical_clear_next_update = false;
+
+            if (force_physical_clear) {
+                Serial.println("[EPD] screen transition: hard physical clear before drawing new frame");
+
+                have_last_hash = false;
+                last_hash = 0;
+
+                disp_full_clean();
+
+                epd_hl_set_all_white(&hl);
+                epd_poweron();
+                checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+                epd_poweroff();
+            }
+
             uint32_t current_hash = epd_frame_hash(displaybuffer, EPD_IMAGE_BUF_SIZE);
-            Serial.printf("[EPD update after LVGL frame complete] hash=%08lx mode=%d\n", current_hash, ui_refresh_get_mode());
-            if (have_last_hash && current_hash == last_hash) {
+            Serial.printf("[EPD update after LVGL frame complete] hash=%08lx mode=%d force_physical_clear=%d\n",
+                          current_hash, ui_refresh_get_mode(), force_physical_clear);
+            if (!force_physical_clear && have_last_hash && current_hash == last_hash) {
                 Serial.println("[EPD] skip duplicate physical refresh");
                 continue;
             }
             last_hash = current_hash;
             have_last_hash = true;
 
-            if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
-            {
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-                epd_poweron();
-                checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
-                epd_poweroff();
-            }
-            else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
-            {
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-                epd_poweron();
-                checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
-                epd_poweroff();
-            }
-            else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
-            {
-                disp_full_refresh();
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-                epd_poweron();
+            epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+            epd_poweron();
+            if (force_physical_clear) {
                 checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
-                epd_poweroff();
+            } else if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) {
+                checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
+            } else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL) {
+                checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+            } else {
+                checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
             }
+            epd_poweroff();
 
             if (framebuffer_dirty) {
                 disp_flush_pending = true;
@@ -332,10 +341,12 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
             area->y1 == 0 &&
             area->x2 == screen_w - 1 &&
             area->y2 == screen_h - 1;
-        if (disp_force_clear_next_flush || full_area) {
+        bool force_clear_this_flush = disp_force_clear_next_flush;
+        if (force_clear_this_flush || full_area) {
             memset(decodebuffer, 0x00, EPD_IMAGE_BUF_SIZE);
             disp_force_clear_next_flush = false;
-            Serial.printf("[LVGL flush] logical framebuffer cleared full=%d\n", full_area);
+            Serial.printf("[LVGL flush] logical framebuffer cleared full=%d force=%d\n",
+                          full_area, force_clear_this_flush);
         }
 
         for(int32_t y = 0; y < h; y++) {
@@ -356,7 +367,7 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
 
         bool is_last_flush = lv_disp_flush_is_last(disp);
         Serial.printf("[LVGL flush] full=%d last=%d force_clear=%d area=(%d,%d)-(%d,%d) w=%d h=%d\n",
-                      full_area, is_last_flush, disp_force_clear_next_flush,
+                      full_area, is_last_flush, force_clear_this_flush,
                       area->x1, area->y1, area->x2, area->y2,
                       w, h);
         framebuffer_dirty = true;
@@ -371,6 +382,7 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
 void disp_request_full_clear(void)
 {
     disp_force_clear_next_flush = true;
+    disp_force_physical_clear_next_update = true;
 }
 
 static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
