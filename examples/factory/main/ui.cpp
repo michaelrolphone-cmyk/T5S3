@@ -6,6 +6,9 @@
 #include "ui_port.h"
 #include "src/assets.h"
 #include "SD.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
 
 /* clang-format off */
 
@@ -2257,6 +2260,137 @@ static lv_timer_t   *wifi_timer            = NULL;
 static uint32_t      wifi_timer_counter    = 0;
 static uint32_t      wifi_connnect_timeout = 60;
 
+static const char *wifi_ap_ssid = "T5S3-AP";
+static const char *wifi_ap_pwd  = "12345678";
+static WebServer wifi_web_server(80);
+static DNSServer wifi_dns_server;
+static bool wifi_web_started = false;
+
+static void wifi_send_cors_headers(void)
+{
+    wifi_web_server.sendHeader("Access-Control-Allow-Origin", "http://paper.go");
+    wifi_web_server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    wifi_web_server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+static void wifi_handle_settings_options(void)
+{
+    wifi_send_cors_headers();
+    wifi_web_server.send(204, "text/plain", "");
+}
+
+static void wifi_handle_settings_get(void)
+{
+    int backlight = 0;
+    int refresh_speed = 0;
+    ui_setting_get_backlight(&backlight);
+    ui_setting_get_refresh_speed(&refresh_speed);
+    int vcom = ui_setting_get_vcom();
+    bool wifi_connected = ui_wifi_get_status();
+
+    String json = "{";
+    json += "\"backlight\":" + String(backlight) + ",";
+    json += "\"refresh_speed\":" + String(refresh_speed) + ",";
+    json += "\"vcom\":" + String(vcom) + ",";
+    json += "\"wifi_connected\":" + String(wifi_connected ? "true" : "false");
+    json += "}";
+
+    wifi_send_cors_headers();
+    wifi_web_server.send(200, "application/json", json);
+}
+
+static void wifi_handle_settings_post(void)
+{
+    if (wifi_web_server.hasArg("backlight")) {
+        ui_setting_set_backlight_level(wifi_web_server.arg("backlight").toInt());
+    }
+    if (wifi_web_server.hasArg("refresh_speed")) {
+        int target = wifi_web_server.arg("refresh_speed").toInt();
+        int current = 0;
+        ui_setting_get_refresh_speed(&current);
+        for (int i = 0; i < 3 && current != target; ++i) {
+            ui_setting_set_refresh_speed(0);
+            ui_setting_get_refresh_speed(&current);
+        }
+    }
+    if (wifi_web_server.hasArg("vcom")) {
+        ui_setting_set_vcom(wifi_web_server.arg("vcom").toInt());
+    }
+    wifi_handle_settings_get();
+}
+
+static String wifi_guess_content_type(const String &path)
+{
+    if (path.endsWith(".html") || path.endsWith(".htm")) return "text/html";
+    if (path.endsWith(".css")) return "text/css";
+    if (path.endsWith(".js")) return "application/javascript";
+    if (path.endsWith(".json")) return "application/json";
+    if (path.endsWith(".png")) return "image/png";
+    if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
+    if (path.endsWith(".svg")) return "image/svg+xml";
+    if (path.endsWith(".ico")) return "image/x-icon";
+    if (path.endsWith(".txt")) return "text/plain";
+    return "application/octet-stream";
+}
+
+static bool wifi_serve_sd_path(String req_path)
+{
+    if (req_path.length() == 0 || req_path == "/") req_path = "/index.html";
+    if (req_path.endsWith("/")) req_path += "index.html";
+    if (req_path.indexOf("..") >= 0) return false;
+
+    String fs_path = String("/webroot") + req_path;
+    File f = SD.open(fs_path.c_str(), FILE_READ);
+    if (!f || f.isDirectory()) {
+        if (f) f.close();
+        return false;
+    }
+
+    wifi_web_server.streamFile(f, wifi_guess_content_type(fs_path));
+    f.close();
+    return true;
+}
+
+static void wifi_start_web_services(void)
+{
+    if (wifi_web_started) return;
+
+    wifi_dns_server.start(53, "*", WiFi.softAPIP());
+    wifi_web_server.on("/settings", HTTP_OPTIONS, wifi_handle_settings_options);
+    wifi_web_server.on("/settings", HTTP_GET, wifi_handle_settings_get);
+    wifi_web_server.on("/settings", HTTP_POST, wifi_handle_settings_post);
+    wifi_web_server.onNotFound([]() {
+        String host = wifi_web_server.hostHeader();
+        if (host.equalsIgnoreCase("paper.api") || host.equalsIgnoreCase("paper.api:80")) {
+            wifi_send_cors_headers();
+            wifi_web_server.send(404, "application/json", "{\"error\":\"not_found\"}");
+            return;
+        }
+        if (host.equalsIgnoreCase("paper.go") || host.equalsIgnoreCase("paper.go:80") || host.length() == 0) {
+            if (wifi_serve_sd_path(wifi_web_server.uri())) return;
+            wifi_web_server.send(404, "text/plain", "Not Found");
+            return;
+        }
+        wifi_web_server.sendHeader("Location", "http://paper.go/");
+        wifi_web_server.send(302, "text/plain", "Redirecting to http://paper.go/");
+    });
+    wifi_web_server.begin();
+    wifi_web_started = true;
+}
+
+static void wifi_enable_apsta(void)
+{
+    WiFi.mode(WIFI_AP_STA);
+    if (WiFi.softAPIP().toString() == "0.0.0.0") {
+        if (!WiFi.softAP(wifi_ap_ssid, wifi_ap_pwd)) {
+            Serial.println("[wifi] softAP start failed");
+        } else {
+            Serial.printf("[wifi] AP started: %s IP=%s\n", wifi_ap_ssid, WiFi.softAPIP().toString().c_str());
+        }
+    }
+    wifi_start_web_services();
+}
+
 static void wifi_info_label_create(lv_obj_t *parent)
 {
     ip_lab = lv_label_create(parent);
@@ -2313,6 +2447,7 @@ static void wifi_config_event_handler(lv_event_t *e)
         smartConfigStart = false;
         return;
     }
+    wifi_enable_apsta();
     WiFi.disconnect();
     smartConfigStart = true;
     WiFi.beginSmartConfig();
@@ -2402,6 +2537,8 @@ static void create6(lv_obj_t *parent)
     lv_obj_set_style_text_align(wifi_st_lab, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
     lv_obj_align(wifi_st_lab, LV_ALIGN_BOTTOM_RIGHT, -0, -190);
 
+    wifi_enable_apsta();
+
     if(ui_wifi_get_status()) {
         wifi_info_label_create(parent);
     }
@@ -2411,13 +2548,15 @@ static void create6(lv_obj_t *parent)
     lv_obj_set_width(tips_label, LV_PCT(100));
     lv_label_set_long_mode(tips_label, LV_LABEL_LONG_SCROLL);
     lv_obj_set_style_text_color(tips_label, lv_color_black(), LV_PART_MAIN);
-    lv_label_set_text(tips_label,   "1. Scan the QR code to download `EspTouch`\n"
+    lv_label_set_text(tips_label,   "STA+AP mode is enabled.\n"
+                                    "AP SSID: T5S3-AP  PWD: 12345678\n"
+                                    "1. Scan the QR code to download `EspTouch`\n"
                                     "2. Install and launch `EspTouch` APP\n"
-                                    "3. Make sure your phone is connected to WIFI\n"
+                                    "3. Make sure your phone is connected to router WIFI\n"
                                     "4. Tap the [EspTouch] option of the APP\n"
-                                    "5. Enter your WIFI password and click [confirm]\n"
-                                    "6. Finally, click [config wifi] on the ink screen\n"
-                                    "After that, wait for the network distribution to succeed!"
+                                    "5. Enter router WIFI password and click [confirm]\n"
+                                    "6. Click [config wifi] on the ink screen\n"
+                                    "Device keeps AP for local web apps while connected to Internet."
                                     );
 
     
@@ -2497,6 +2636,13 @@ static void exit6(void)
 static void destroy6(void) 
 {
     ui_set_rotation(LV_DISP_ROT_NONE);
+}
+
+void ui_wifi_service_loop(void)
+{
+    if (!wifi_web_started) return;
+    wifi_dns_server.processNextRequest();
+    wifi_web_server.handleClient();
 }
 
 static scr_lifecycle_t screen6 = {

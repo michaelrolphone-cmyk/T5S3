@@ -256,9 +256,9 @@ void displayInfo()
             return;
         }
 
-        // GPS reports UTC. Convert to fixed Mountain Standard Time (UTC-7).
-        // Use fixed MST (no DST) per product requirement.
-        setenv("TZ", "MST7", 1);
+        // GPS reports UTC. Convert to Mountain Time with DST rules.
+        // This keeps local time aligned in both MST (UTC-7) and MDT (UTC-6).
+        setenv("TZ", "MST7MDT,M3.2.0/2,M11.1.0/2", 1);
         tzset();
         struct tm tm_mt;
         localtime_r(&utc_epoch, &tm_mt);

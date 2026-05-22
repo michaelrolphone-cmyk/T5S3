@@ -90,5 +90,6 @@ typedef struct _ui_setting
  *                              GLOBAL PROTOTYPES
  * *******************************************************************************/
 void ui_entry(void);
+void ui_wifi_service_loop(void);
 
 #endif /* __UI_EPD47H__ */
