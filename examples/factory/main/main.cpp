@@ -272,7 +272,7 @@ static void disp_flush_task(void *param)
             static uint32_t last_hash = 0;
             static bool have_last_hash = false;
             uint32_t current_hash = epd_frame_hash(displaybuffer, EPD_IMAGE_BUF_SIZE);
-            Serial.printf("[EPD update] hash=%08lx mode=%d\n", current_hash, ui_refresh_get_mode());
+            Serial.printf("[EPD update after LVGL frame complete] hash=%08lx mode=%d\n", current_hash, ui_refresh_get_mode());
             if (have_last_hash && current_hash == last_hash) {
                 Serial.println("[EPD] skip duplicate physical refresh");
                 continue;
@@ -332,10 +332,6 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
             area->y1 == 0 &&
             area->x2 == screen_w - 1 &&
             area->y2 == screen_h - 1;
-        Serial.printf("[LVGL flush] full=%d force_clear=%d area=(%d,%d)-(%d,%d) w=%d h=%d\n",
-                      full_area, disp_force_clear_next_flush,
-                      area->x1, area->y1, area->x2, area->y2,
-                      w, h);
         if (disp_force_clear_next_flush || full_area) {
             memset(decodebuffer, 0x00, EPD_IMAGE_BUF_SIZE);
             disp_force_clear_next_flush = false;
@@ -357,10 +353,18 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         if (framebuffer_mutex) {
             xSemaphoreGive(framebuffer_mutex);
         }
+
+        bool is_last_flush = lv_disp_flush_is_last(disp);
+        Serial.printf("[LVGL flush] full=%d last=%d force_clear=%d area=(%d,%d)-(%d,%d) w=%d h=%d\n",
+                      full_area, is_last_flush, disp_force_clear_next_flush,
+                      area->x1, area->y1, area->x2, area->y2,
+                      w, h);
         framebuffer_dirty = true;
+        if (is_last_flush) {
+            disp_flush_pending = true;
+        }
     }
 
-    disp_flush_pending = true;
     lv_disp_flush_ready(disp);
 }
 
