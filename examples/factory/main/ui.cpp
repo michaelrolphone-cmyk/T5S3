@@ -2411,6 +2411,32 @@ static void wifi_save_settings(void)
     nvs_param_set_str(NVS_ID_WIFI_AP_PWD, wifi_ap_pwd.c_str());
 }
 
+static bool wifi_connect_saved_sta(const char *reason)
+{
+    wifi_load_saved_settings();
+
+    if (wifi_sta_ssid.length() == 0) {
+        Serial.printf("[wifi] no saved STA SSID; cannot connect for %s\n", reason ? reason : "");
+        return false;
+    }
+
+    WiFi.persistent(false);
+    WiFi.setAutoReconnect(true);
+
+    if (WiFi.getMode() == WIFI_OFF) {
+        WiFi.mode(WIFI_STA);
+    } else if (WiFi.getMode() == WIFI_AP) {
+        WiFi.mode(WIFI_AP_STA);
+    }
+
+    Serial.printf("[wifi] connecting saved STA for %s ssid='%s'\n",
+                  reason ? reason : "",
+                  wifi_sta_ssid.c_str());
+
+    WiFi.begin(wifi_sta_ssid.c_str(), wifi_sta_pwd.c_str());
+    return true;
+}
+
 static void wifi_send_cors_headers(void)
 {
     wifi_web_server.sendHeader("Access-Control-Allow-Origin", "http://paper.go");
@@ -2570,10 +2596,10 @@ static void wifi_handle_settings_post(void)
     }
 
     wifi_save_settings();
-
-    if (wifi_sta_ssid.length() > 0) {
-        WiFi.begin(wifi_sta_ssid.c_str(), wifi_sta_pwd.c_str());
-    }
+    Serial.printf("[wifi settings] saved STA ssid='%s' pwd_len=%u AP ssid='%s'\n",
+                  wifi_sta_ssid.c_str(),
+                  (unsigned)wifi_sta_pwd.length(),
+                  wifi_ap_ssid.c_str());
     if (ap_config_changed) {
         WiFi.softAPdisconnect(true);
         if (!WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str())) {
@@ -2811,10 +2837,10 @@ static void wifi_apply_settings_event_handler(lv_event_t *e)
     }
 
     wifi_save_settings();
-
-    if (wifi_sta_ssid.length() > 0) {
-        WiFi.begin(wifi_sta_ssid.c_str(), wifi_sta_pwd.c_str());
-    }
+    Serial.printf("[wifi settings] saved STA ssid='%s' pwd_len=%u AP ssid='%s'\n",
+                  wifi_sta_ssid.c_str(),
+                  (unsigned)wifi_sta_pwd.length(),
+                  wifi_ap_ssid.c_str());
 
     if (wifi_ap_ssid.length() > 0 && wifi_ap_pwd.length() >= 8) {
         WiFi.softAPdisconnect(true);
@@ -3698,6 +3724,10 @@ static lv_obj_t *web_keyboard = NULL;
 static lv_obj_t *web_cont = NULL;
 static lv_obj_t *web_span = NULL;
 static char web_url_buf[256] = "https://example.com";
+static lv_timer_t *web_wifi_connect_timer = NULL;
+static uint32_t web_wifi_connect_start_ms = 0;
+static bool web_pending_fetch_after_wifi = false;
+static const uint32_t WEB_WIFI_CONNECT_TIMEOUT_MS = 20000;
 
 static void web_show_text(const char *text)
 {
@@ -3740,13 +3770,96 @@ static void web_fetch_and_render(const char *in_url)
     web_show_text(md_text_buf);
 }
 
+static void web_wifi_connect_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("[web] WiFi connected ip=%s\n", WiFi.localIP().toString().c_str());
+
+        if (web_wifi_connect_timer) {
+            lv_timer_del(web_wifi_connect_timer);
+            web_wifi_connect_timer = NULL;
+        }
+
+        ui_wifi_set_status(true);
+        web_pending_fetch_after_wifi = false;
+
+        web_show_text("WiFi connected. Loading page...");
+        web_fetch_and_render(web_url_buf);
+        return;
+    }
+
+    uint32_t elapsed = millis() - web_wifi_connect_start_ms;
+    if (elapsed >= WEB_WIFI_CONNECT_TIMEOUT_MS) {
+        Serial.println("[web] WiFi connect timeout");
+
+        if (web_wifi_connect_timer) {
+            lv_timer_del(web_wifi_connect_timer);
+            web_wifi_connect_timer = NULL;
+        }
+
+        web_pending_fetch_after_wifi = false;
+        ui_wifi_set_status(false);
+
+        lv_snprintf(md_text_buf, sizeof(md_text_buf),
+                    "WiFi connection timed out.\n\nSaved SSID: %s\n\nOpen WiFi Settings and verify the password.",
+                    wifi_sta_ssid.c_str());
+        web_show_text(md_text_buf);
+        return;
+    }
+
+    lv_snprintf(md_text_buf, sizeof(md_text_buf),
+                "Connecting to WiFi...\n\nSSID: %s\nElapsed: %lu sec",
+                wifi_sta_ssid.c_str(),
+                (unsigned long)(elapsed / 1000));
+    web_show_text(md_text_buf);
+}
+
+static void web_connect_and_fetch_saved_url(void)
+{
+    if (WiFi.status() == WL_CONNECTED) {
+        ui_wifi_set_status(true);
+        web_fetch_and_render(web_url_buf);
+        return;
+    }
+
+    wifi_load_saved_settings();
+
+    if (wifi_sta_ssid.length() == 0) {
+        web_show_text("No saved WiFi SSID.\n\nOpen WiFi Settings, enter credentials, tap Apply, then return to Browser.");
+        return;
+    }
+
+    web_show_text("Connecting to WiFi...");
+    web_pending_fetch_after_wifi = true;
+    web_wifi_connect_start_ms = millis();
+
+    if (!wifi_connect_saved_sta("web browser")) {
+        web_pending_fetch_after_wifi = false;
+        web_show_text("Unable to start WiFi connection. Check saved WiFi settings.");
+        return;
+    }
+
+    if (web_wifi_connect_timer) {
+        lv_timer_del(web_wifi_connect_timer);
+        web_wifi_connect_timer = NULL;
+    }
+
+    web_wifi_connect_timer = lv_timer_create(web_wifi_connect_timer_cb, 1000, NULL);
+    lv_timer_ready(web_wifi_connect_timer);
+}
+
 static void web_back_btn_event(lv_event_t *e) { if(e->code == LV_EVENT_CLICKED) scr_mgr_pop(false); }
 static void web_go_btn_event(lv_event_t *e)
 {
     if(e->code != LV_EVENT_CLICKED) return;
     const char *url = lv_textarea_get_text(web_url_ta);
     lv_snprintf(web_url_buf, sizeof(web_url_buf), "%s", url ? url : "");
-    web_fetch_and_render(web_url_buf);
+    if (WiFi.status() == WL_CONNECTED) {
+        web_fetch_and_render(web_url_buf);
+    } else {
+        web_connect_and_fetch_saved_url();
+    }
 }
 
 static void web_ta_event_cb(lv_event_t *e)
@@ -3797,8 +3910,18 @@ static void create12(lv_obj_t *parent)
     epd_style_keyboard(web_keyboard);
 }
 
-static void entry12(void) { web_fetch_and_render(web_url_buf); }
-static void exit12(void) { }
+static void entry12(void)
+{
+    web_connect_and_fetch_saved_url();
+}
+static void exit12(void)
+{
+    if (web_wifi_connect_timer) {
+        lv_timer_del(web_wifi_connect_timer);
+        web_wifi_connect_timer = NULL;
+    }
+    web_pending_fetch_after_wifi = false;
+}
 static void destroy12(void) { }
 
 static scr_lifecycle_t screen12 = {
