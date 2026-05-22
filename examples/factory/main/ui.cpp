@@ -9,6 +9,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <HTTPClient.h>
 
 /* clang-format off */
 
@@ -268,6 +269,7 @@ const struct menu_icon icon_buf2[] = {
     {&img_shutdown, "shutdown", 210,  45  },
     {&img_sleep,    "sleep"   , 375,  45  },
     {&img_test,     "test"    , 45,   250 },
+    {&img_wifi,     "browser" , 210,  250 },
 };
 
 static lv_obj_t *ui_Panel4;
@@ -365,6 +367,7 @@ static void menu_btn_event(lv_event_t *e)
          * 8 --- SCREEN8_ID  --- shutdown
          * 9 --- SCREEN9_ID  --- sleep
          * 10 -- SCREEN5_ID  --- test
+         * 11 -- SCREEN12_ID --- browser
         */
         switch (data) {
             case 0: scr_mgr_push(SCREEN1_ID, false); break;
@@ -378,6 +381,7 @@ static void menu_btn_event(lv_event_t *e)
             case 8: scr_mgr_push(SCREEN8_ID, false); break;
             case 9: scr_mgr_push(SCREEN9_ID, false); break;
             case 10: scr_mgr_push(SCREEN5_ID, false); break;
+            case 11: scr_mgr_push(SCREEN12_ID, false); break;
             default: break;
         }
     }
@@ -3352,9 +3356,10 @@ static void md_render_to_spangroup(const char *text)
         }
 
         if(header) {
-            // Preserve markdown line structure: one source line -> one rendered newline.
+            // Ensure headers are visually separated from surrounding body text.
+            md_add_text_span("\n\n", &Font_Geist_Light_20);
             md_add_line_markdown_inline(&line[content_offset], content_len, md_header_font_from_level(hashes), md_header_font_from_level(hashes));
-            md_add_text_span("\n", &Font_Geist_Light_20);
+            md_add_text_span("\n\n", &Font_Geist_Light_20);
         } else if(in_code_block) {
             char code_line[512];
             lv_snprintf(code_line, sizeof(code_line), "%.*s\n", (int)line_len, line);
@@ -3442,6 +3447,116 @@ static scr_lifecycle_t screen11 = {
     .entry = entry11,
     .exit  = exit11,
     .destroy = destroy11,
+};
+#endif
+
+//************************************[ screen 12 ]****************************************** web browser
+#if 1
+static lv_obj_t *web_url_ta = NULL;
+static lv_obj_t *web_keyboard = NULL;
+static lv_obj_t *web_cont = NULL;
+static lv_obj_t *web_span = NULL;
+static char web_url_buf[256] = "https://example.com";
+
+static void web_show_text(const char *text)
+{
+    md_span = web_span;
+    md_doc_type = DOC_TYPE_HTML;
+    md_render_to_spangroup(text);
+    lv_obj_scroll_to_y(web_cont, 0, LV_ANIM_OFF);
+}
+
+static void web_fetch_and_render(const char *in_url)
+{
+    if(in_url == NULL || in_url[0] == '\0') {
+        web_show_text("Empty URL.");
+        return;
+    }
+    char url[256] = {0};
+    if(strstr(in_url, "http://") == in_url || strstr(in_url, "https://") == in_url) lv_snprintf(url, sizeof(url), "%s", in_url);
+    else lv_snprintf(url, sizeof(url), "http://%s", in_url);
+
+    if(WiFi.status() != WL_CONNECTED) {
+        web_show_text("Wi-Fi is not connected. Open Wi-Fi app and connect first.");
+        return;
+    }
+
+    HTTPClient http;
+    if(!http.begin(url)) {
+        web_show_text("Failed to initialize HTTP client.");
+        return;
+    }
+    int code = http.GET();
+    if(code <= 0) {
+        lv_snprintf(md_text_buf, sizeof(md_text_buf), "HTTP GET failed: %d", code);
+        http.end();
+        web_show_text(md_text_buf);
+        return;
+    }
+    String payload = http.getString();
+    http.end();
+    lv_snprintf(md_text_buf, sizeof(md_text_buf), "%s", payload.c_str());
+    web_show_text(md_text_buf);
+}
+
+static void web_back_btn_event(lv_event_t *e) { if(e->code == LV_EVENT_CLICKED) scr_mgr_pop(false); }
+static void web_go_btn_event(lv_event_t *e)
+{
+    if(e->code != LV_EVENT_CLICKED) return;
+    const char *url = lv_textarea_get_text(web_url_ta);
+    lv_snprintf(web_url_buf, sizeof(web_url_buf), "%s", url ? url : "");
+    web_fetch_and_render(web_url_buf);
+}
+
+static void web_ta_event_cb(lv_event_t *e)
+{
+    if(e->code == LV_EVENT_FOCUSED) lv_keyboard_set_textarea(web_keyboard, (lv_obj_t *)e->target);
+}
+
+static void create12(lv_obj_t *parent)
+{
+    scr_back_btn_create(parent, "Web Browser", web_back_btn_event);
+    web_url_ta = lv_textarea_create(parent);
+    lv_obj_set_size(web_url_ta, lv_pct(76), 50);
+    lv_obj_align(web_url_ta, LV_ALIGN_TOP_LEFT, 15, 80);
+    lv_textarea_set_one_line(web_url_ta, true);
+    lv_textarea_set_text(web_url_ta, web_url_buf);
+    lv_obj_add_event_cb(web_url_ta, web_ta_event_cb, LV_EVENT_FOCUSED, NULL);
+
+    lv_obj_t *go_btn = lv_btn_create(parent);
+    lv_obj_set_size(go_btn, 90, 50);
+    lv_obj_align_to(go_btn, web_url_ta, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+    lv_obj_add_event_cb(go_btn, web_go_btn_event, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *go_label = lv_label_create(go_btn);
+    lv_label_set_text(go_label, "Go");
+    lv_obj_center(go_label);
+
+    web_cont = lv_obj_create(parent);
+    lv_obj_set_size(web_cont, lv_pct(96), lv_pct(45));
+    lv_obj_align(web_cont, LV_ALIGN_TOP_MID, 0, 150);
+    lv_obj_set_scroll_dir(web_cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(web_cont, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_pad_all(web_cont, 8, LV_PART_MAIN);
+
+    web_span = lv_spangroup_create(web_cont);
+    lv_obj_set_width(web_span, lv_pct(100));
+    web_show_text("Type a URL with the on-screen keyboard and tap Go.");
+
+    web_keyboard = lv_keyboard_create(parent);
+    lv_obj_set_height(web_keyboard, lv_pct(32));
+    lv_obj_align(web_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_keyboard_set_textarea(web_keyboard, web_url_ta);
+}
+
+static void entry12(void) { web_fetch_and_render(web_url_buf); }
+static void exit12(void) { }
+static void destroy12(void) { }
+
+static scr_lifecycle_t screen12 = {
+    .create = create12,
+    .entry = entry12,
+    .exit = exit12,
+    .destroy = destroy12,
 };
 #endif
 //************************************[ screen 9 ]****************************************** shutdown
@@ -3645,6 +3760,7 @@ void ui_entry(void)
     scr_mgr_register(SCREEN9_ID,   &screen9);   // sleep
     scr_mgr_register(SCREEN10_ID,  &screen10);  // gps
     scr_mgr_register(SCREEN11_ID,  &screen11);  // markdown
+    scr_mgr_register(SCREEN12_ID,  &screen12);  // web browser
 
     scr_mgr_switch(SCREEN0_ID, false); // set root screen
     scr_mgr_set_anim(LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE);

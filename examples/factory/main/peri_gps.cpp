@@ -255,8 +255,9 @@ void displayInfo()
             return;
         }
 
-        // GPS reports UTC. Convert to fixed Mountain Standard Time (UTC-7).
-        setenv("TZ", "MST7", 1);
+        // GPS reports UTC. Convert to Mountain Time with DST support.
+        // This handles standard time (MST, UTC-7) and daylight time (MDT, UTC-6).
+        setenv("TZ", "MST7MDT,M3.2.0/2,M11.1.0/2", 1);
         tzset();
         struct tm tm_mt;
         localtime_r(&utc_epoch, &tm_mt);
@@ -264,7 +265,7 @@ void displayInfo()
         rtc.setDateTime(tm_mt.tm_year + 1900, tm_mt.tm_mon + 1, tm_mt.tm_mday,
                         tm_mt.tm_hour, tm_mt.tm_min, tm_mt.tm_sec);
         gps_last_sync_minute = gps_minute;
-        Serial.printf("RTC synced from GPS (MST): %04d-%02d-%02d %02d:%02d:%02d\n",
+        Serial.printf("RTC synced from GPS (Mountain w/DST): %04d-%02d-%02d %02d:%02d:%02d\n",
                       tm_mt.tm_year + 1900, tm_mt.tm_mon + 1, tm_mt.tm_mday,
                       tm_mt.tm_hour, tm_mt.tm_min, tm_mt.tm_sec);
 
