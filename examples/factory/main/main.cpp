@@ -68,6 +68,7 @@ volatile bool disp_flush_enabled = true;
 volatile bool indev_touch_enabled = true;
 static volatile bool touch_ignore_until_release = false;
 static volatile bool home_button_pending = false;
+static volatile uint32_t touch_ignore_start_ms = 0;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
@@ -85,7 +86,8 @@ static SemaphoreHandle_t framebuffer_mutex = NULL;
 void btn_task(void *param)
 {
     bool boot_btn_pressed = false;
-    bool ioext_btn_pressed = false;
+    // Seed with the current level to avoid a false release edge right after boot.
+    bool ioext_btn_pressed = button_read();
 
     while(1)
     {
@@ -395,7 +397,7 @@ static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
 
     (void)drv;
     if(touch_ignore_until_release) {
-        if(!pressed) {
+        if(!pressed || (millis() - touch_ignore_start_ms > 1500)) {
             touch_ignore_until_release = false;
         }
         data->state = LV_INDEV_STATE_RELEASED;
@@ -460,8 +462,8 @@ static bool touch_gt911_init(void)
 
     // Set the center button to trigger the callback , Only for specific devices, e.g LilyGo-EPD47 S3 GT911
     touch.setHomeButtonCallback([](void *user_data) {
-        Serial.println("Home button pressed!");
         // Prevent the remaining touch-release sequence from re-triggering app clicks.
+        touch_ignore_start_ms = millis();
         touch_ignore_until_release = true;
         home_button_pending = true;
     }, NULL);

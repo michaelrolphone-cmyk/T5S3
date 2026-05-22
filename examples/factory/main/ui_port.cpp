@@ -29,6 +29,8 @@ void ui_nvs_set_defaulat_param(void)
     printf("epd_vcom_default = %d\n", epd_vcom_default );
     printf("refresh_mode = %d\n", refresh_mode );
 
+    // Backlight should default to OFF after every boot.
+    ui_setting_backlight = 0;
     ui_setting_set_backlight(ui_setting_backlight);
 }
 

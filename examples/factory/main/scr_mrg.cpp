@@ -241,7 +241,7 @@ bool scr_mgr_pop(bool anim)
             lv_obj_del(cur_obj);
         }
     }
-    return false;
+    return true;
 }
 
 // set anim
