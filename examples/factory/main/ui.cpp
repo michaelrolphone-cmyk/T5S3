@@ -2260,6 +2260,11 @@ static volatile bool smartConfigStart      = false;
 static lv_timer_t   *wifi_timer            = NULL;
 static uint32_t      wifi_timer_counter    = 0;
 static uint32_t      wifi_connnect_timeout = 60;
+static lv_obj_t     *wifi_sta_ssid_ta      = NULL;
+static lv_obj_t     *wifi_sta_pwd_ta       = NULL;
+static lv_obj_t     *wifi_ap_ssid_ta       = NULL;
+static lv_obj_t     *wifi_ap_pwd_ta        = NULL;
+static lv_obj_t     *wifi_keyboard         = NULL;
 
 static String wifi_sta_ssid = "";
 static String wifi_sta_pwd  = "";
@@ -2553,6 +2558,41 @@ static void wifi_config_event_handler(lv_event_t *e)
     1000, NULL);
 }
 
+static void wifi_ta_focus_event_handler(lv_event_t *e)
+{
+    lv_obj_t *ta = lv_event_get_target(e);
+    if (wifi_keyboard) {
+        lv_keyboard_set_textarea(wifi_keyboard, ta);
+    }
+}
+
+static void wifi_apply_settings_event_handler(lv_event_t *e)
+{
+    if (e->code != LV_EVENT_CLICKED) return;
+
+    wifi_sta_ssid = lv_textarea_get_text(wifi_sta_ssid_ta);
+    wifi_sta_pwd  = lv_textarea_get_text(wifi_sta_pwd_ta);
+    wifi_ap_ssid  = lv_textarea_get_text(wifi_ap_ssid_ta);
+    String ap_pwd = lv_textarea_get_text(wifi_ap_pwd_ta);
+
+    if (ap_pwd.length() >= 8) {
+        wifi_ap_pwd = ap_pwd;
+    }
+
+    if (wifi_sta_ssid.length() > 0) {
+        WiFi.begin(wifi_sta_ssid.c_str(), wifi_sta_pwd.c_str());
+    }
+
+    if (wifi_ap_ssid.length() > 0 && wifi_ap_pwd.length() >= 8) {
+        WiFi.softAPdisconnect(true);
+        if (!WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str())) {
+            Serial.println("[wifi] softAP reconfigure failed");
+        }
+    }
+
+    lv_label_set_text(wifi_st_lab, "Wifi Settings Applied");
+}
+
 static void scr6_btn_event_cb(lv_event_t * e)
 {
     if(e->code == LV_EVENT_CLICKED){
@@ -2580,66 +2620,54 @@ static void create6(lv_obj_t *parent)
         wifi_info_label_create(parent);
     }
 
-    lv_obj_t *label, *tips_label;
-    tips_label = lv_label_create(parent);
-    lv_obj_set_width(tips_label, LV_PCT(100));
-    lv_label_set_long_mode(tips_label, LV_LABEL_LONG_SCROLL);
-    lv_obj_set_style_text_color(tips_label, lv_color_black(), LV_PART_MAIN);
-    lv_label_set_text_fmt(tips_label, "STA+AP mode is enabled.\n"
-                                    "AP SSID: %s  PWD: %s\n"
-                                    "1. Scan the QR code to download `EspTouch`\n"
-                                    "2. Install and launch `EspTouch` APP\n"
-                                    "3. Make sure your phone is connected to router WIFI\n"
-                                    "4. Tap the [EspTouch] option of the APP\n"
-                                    "5. Enter router WIFI password and click [confirm]\n"
-                                    "6. Click [config wifi] on the ink screen\n"
-                                    "Device keeps AP for local web apps while connected to Internet.",
-                                    wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str()
-                                    );
+    lv_obj_t *label;
+    lv_obj_t *form = lv_obj_create(parent);
+    lv_obj_set_size(form, lv_pct(95), 220);
+    lv_obj_align(form, LV_ALIGN_TOP_MID, 0, 50);
+    lv_obj_set_style_pad_all(form, 10, LV_PART_MAIN);
+    lv_obj_set_flex_flow(form, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(form, 8, LV_PART_MAIN);
 
-    
-    lv_obj_set_style_text_font(tips_label, &Font_Mono_Bold_25, LV_PART_MAIN);
-    lv_obj_align(tips_label, LV_ALIGN_LEFT_MID, 50, -100);
+    auto create_field = [&](const char *title, lv_obj_t **out_ta, const char *value, bool pwd) {
+        lv_obj_t *row = lv_obj_create(form);
+        lv_obj_set_size(row, lv_pct(100), 45);
+        lv_obj_set_style_pad_all(row, 4, LV_PART_MAIN);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_t *lab = lv_label_create(row);
+        lv_label_set_text(lab, title);
+        lv_obj_set_width(lab, 170);
+        lv_obj_set_style_text_font(lab, &Font_Mono_Bold_25, LV_PART_MAIN);
+        lv_obj_t *ta = lv_textarea_create(row);
+        lv_obj_set_size(ta, 280, 36);
+        lv_textarea_set_one_line(ta, true);
+        lv_textarea_set_text(ta, value);
+        lv_obj_add_event_cb(ta, wifi_ta_focus_event_handler, LV_EVENT_FOCUSED, NULL);
+        if (pwd) lv_textarea_set_password_mode(ta, true);
+        *out_ta = ta;
+    };
 
-    const char *android_url = "https://github.com/EspressifApp/EsptouchForAndroid/releases/tag/v2.0.0/esptouch-v2.0.0.apk";
-    const char *ios_url     = "https://apps.apple.com/cn/app/espressif-esptouch/id1071176700";
+    create_field("WiFi SSID", &wifi_sta_ssid_ta, wifi_sta_ssid.c_str(), false);
+    create_field("WiFi Password", &wifi_sta_pwd_ta, wifi_sta_pwd.c_str(), true);
+    create_field("AP SSID", &wifi_ap_ssid_ta, wifi_ap_ssid.c_str(), false);
+    create_field("AP Password", &wifi_ap_pwd_ta, wifi_ap_pwd.c_str(), true);
 
-    lv_coord_t size            = 120;
-    lv_obj_t  *android_rq_code = lv_qrcode_create(parent, size, lv_color_black(), lv_color_white());
-    lv_qrcode_update(android_rq_code, android_url, strlen(android_url));
-    lv_obj_set_pos(android_rq_code, 340, 10);
-    lv_obj_align(android_rq_code, LV_ALIGN_LEFT_MID, 50, 100);
+    wifi_keyboard = lv_keyboard_create(parent);
+    lv_obj_set_height(wifi_keyboard, 110);
+    lv_obj_align(wifi_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_keyboard_set_textarea(wifi_keyboard, wifi_sta_ssid_ta);
 
-    lv_obj_set_style_border_color(android_rq_code, lv_color_white(), 0);
-    lv_obj_set_style_border_width(android_rq_code, 5, 0);
-    label = lv_label_create(parent);
-    lv_label_set_text(label, "Android");
-    lv_obj_set_style_text_color(label, lv_color_black(), LV_PART_MAIN);
-    lv_obj_align_to(label, android_rq_code, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
-
-    lv_obj_t *ios_rq_code = lv_qrcode_create(parent, size, lv_color_black(), lv_color_white());
-    lv_qrcode_update(ios_rq_code, ios_url, strlen(ios_url));
-    lv_obj_align_to(ios_rq_code, android_rq_code, LV_ALIGN_OUT_RIGHT_MID, 20, 0);
-
-    lv_obj_set_style_border_color(ios_rq_code, lv_color_white(), 0);
-    lv_obj_set_style_border_width(ios_rq_code, 5, 0);
-    label = lv_label_create(parent);
-    lv_label_set_text(label, "IOS");
-    lv_obj_set_style_text_color(label, lv_color_black(), LV_PART_MAIN);
-    lv_obj_align_to(label, ios_rq_code, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
-
-    // config btn
+    // apply btn
     lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_set_size(btn, 200, 60);
-    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, -20, -120);
+    lv_obj_set_size(btn, 200, 50);
+    lv_obj_align(btn, LV_ALIGN_BOTTOM_RIGHT, -40, -120);
     lv_obj_set_style_radius(btn, 10, LV_PART_MAIN);
     lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN);
     label = lv_label_create(btn);
-    lv_label_set_text(label, "Config Wifi");
+    lv_label_set_text(label, "Apply");
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(label, &Font_Mono_Bold_25, LV_PART_MAIN);
     lv_obj_center(label);
-    lv_obj_add_event_cb(btn, wifi_config_event_handler, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(btn, wifi_apply_settings_event_handler, LV_EVENT_CLICKED, NULL);
     
     //---------------------
     // scr_middle_line(parent);
