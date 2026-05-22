@@ -384,6 +384,9 @@ static void lv_port_disp_init(void)
     lv_color_t *lv_disp_buf_2 = (lv_color_t *)ps_calloc(sizeof(lv_color_t), DISP_BUF_SIZE);
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
+    // Start LVGL backing buffers from a clean logical screen to avoid
+    // carrying previous boot/status text into subsequent partial updates.
+    epd_hl_set_all_white(&hl);
     const uint8_t *epd_framebuffer = (const uint8_t *)epd_hl_get_framebuffer(&hl);
     if (decodebuffer && displaybuffer && epd_framebuffer) {
         memcpy(decodebuffer, epd_framebuffer, EPD_IMAGE_BUF_SIZE);
