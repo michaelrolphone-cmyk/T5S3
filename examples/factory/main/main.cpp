@@ -259,14 +259,14 @@ static void disp_flush_task(void *param)
             {
                 epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
-                checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
+                checkError(epd_hl_update_screen(&hl, MODE_DU, epd_ambient_temperature()));
                 epd_poweroff();
             }
             else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
             {
                 epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
-                checkError(epd_hl_update_area(&hl, MODE_GL16, epd_ambient_temperature(), rener_area));
+                checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
                 epd_poweroff();
             }
             else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
@@ -425,6 +425,14 @@ static void lv_port_disp_init(void)
     lv_color_t *lv_disp_buf_2 = (lv_color_t *)ps_calloc(sizeof(lv_color_t), DISP_BUF_SIZE);
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
+    // Start LVGL backing buffers from a clean logical screen to avoid
+    // carrying previous boot/status text into subsequent partial updates.
+    epd_hl_set_all_white(&hl);
+    const uint8_t *epd_framebuffer = (const uint8_t *)epd_hl_get_framebuffer(&hl);
+    if (decodebuffer && displaybuffer && epd_framebuffer) {
+        memcpy(decodebuffer, epd_framebuffer, EPD_IMAGE_BUF_SIZE);
+        memcpy(displaybuffer, epd_framebuffer, EPD_IMAGE_BUF_SIZE);
+    }
     framebuffer_mutex = xSemaphoreCreateMutex();
     lv_disp_draw_buf_init(&draw_buf, lv_disp_buf_1, lv_disp_buf_2, DISP_BUF_SIZE);
 
@@ -435,7 +443,10 @@ static void lv_port_disp_init(void)
     disp_drv.flush_cb = disp_flush;
     // disp_drv.render_start_cb = dips_render_start_cb;
     disp_drv.draw_buf = &draw_buf;
-    disp_drv.full_refresh = 0;
+    // Force LVGL to always flush a complete frame. This avoids stale pixels
+    // being preserved between screen transitions when only dirty rectangles
+    // are invalidated.
+    disp_drv.full_refresh = 1;
     lv_disp_drv_register(&disp_drv);
 
     static lv_indev_drv_t indev_drv;
