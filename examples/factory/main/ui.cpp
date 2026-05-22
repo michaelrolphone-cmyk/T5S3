@@ -2603,7 +2603,7 @@ static void scr6_btn_event_cb(lv_event_t * e)
 
 static void create6(lv_obj_t *parent) 
 {
-    ui_set_rotation(LV_DISP_ROT_270);
+    ui_set_rotation(LV_DISP_ROT_NONE);
 
     scr6_root = parent;
     wifi_st_lab = lv_label_create(parent);
