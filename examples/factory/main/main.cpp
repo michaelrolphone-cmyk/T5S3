@@ -72,11 +72,6 @@ static volatile uint32_t touch_ignore_start_ms = 0;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
-static volatile bool framebuffer_has_dirty_area = false;
-static volatile int32_t framebuffer_dirty_x1 = 0;
-static volatile int32_t framebuffer_dirty_y1 = 0;
-static volatile int32_t framebuffer_dirty_x2 = 0;
-static volatile int32_t framebuffer_dirty_y2 = 0;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 
@@ -227,23 +222,6 @@ static void disp_flush_task(void *param)
                 .width = epd_rotated_display_width(),
                 .height = epd_rotated_display_height(),
             };
-            EpdRect rener_area = full_area;
-
-            if (framebuffer_has_dirty_area) {
-                rener_area.x = framebuffer_dirty_x1;
-                rener_area.y = framebuffer_dirty_y1;
-                rener_area.width = framebuffer_dirty_x2 - framebuffer_dirty_x1 + 1;
-                rener_area.height = framebuffer_dirty_y2 - framebuffer_dirty_y1 + 1;
-                framebuffer_has_dirty_area = false;
-            }
-
-            if (framebuffer_has_dirty_area) {
-                rener_area.x = framebuffer_dirty_x1;
-                rener_area.y = framebuffer_dirty_y1;
-                rener_area.width = framebuffer_dirty_x2 - framebuffer_dirty_x1 + 1;
-                rener_area.height = framebuffer_dirty_y2 - framebuffer_dirty_y1 + 1;
-                framebuffer_has_dirty_area = false;
-            }
 
             if (framebuffer_mutex && decodebuffer && displaybuffer) {
                 if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -259,14 +237,14 @@ static void disp_flush_task(void *param)
             {
                 epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
-                checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
+                checkError(epd_hl_update_screen(&hl, MODE_DU, epd_ambient_temperature()));
                 epd_poweroff();
             }
             else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
             {
                 epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
-                checkError(epd_hl_update_area(&hl, MODE_GL16, epd_ambient_temperature(), rener_area));
+                checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
                 epd_poweroff();
             }
             else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
@@ -349,25 +327,6 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
                 epd_image_set_pixel_4bpp(decodebuffer, screen_w, dst_x, dst_y, gray4);
             }
         }
-        int32_t dirty_x1 = area->x1 < 0 ? 0 : area->x1;
-        int32_t dirty_y1 = area->y1 < 0 ? 0 : area->y1;
-        int32_t dirty_x2 = area->x2 >= screen_w ? screen_w - 1 : area->x2;
-        int32_t dirty_y2 = area->y2 >= screen_h ? screen_h - 1 : area->y2;
-
-        if (dirty_x1 <= dirty_x2 && dirty_y1 <= dirty_y2) {
-            if (!framebuffer_has_dirty_area) {
-                framebuffer_dirty_x1 = dirty_x1;
-                framebuffer_dirty_y1 = dirty_y1;
-                framebuffer_dirty_x2 = dirty_x2;
-                framebuffer_dirty_y2 = dirty_y2;
-                framebuffer_has_dirty_area = true;
-            } else {
-                if (dirty_x1 < framebuffer_dirty_x1) framebuffer_dirty_x1 = dirty_x1;
-                if (dirty_y1 < framebuffer_dirty_y1) framebuffer_dirty_y1 = dirty_y1;
-                if (dirty_x2 > framebuffer_dirty_x2) framebuffer_dirty_x2 = dirty_x2;
-                if (dirty_y2 > framebuffer_dirty_y2) framebuffer_dirty_y2 = dirty_y2;
-            }
-        }
         if (framebuffer_mutex) {
             xSemaphoreGive(framebuffer_mutex);
         }
@@ -425,6 +384,14 @@ static void lv_port_disp_init(void)
     lv_color_t *lv_disp_buf_2 = (lv_color_t *)ps_calloc(sizeof(lv_color_t), DISP_BUF_SIZE);
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
+    // Start LVGL backing buffers from a clean logical screen to avoid
+    // carrying previous boot/status text into subsequent partial updates.
+    epd_hl_set_all_white(&hl);
+    const uint8_t *epd_framebuffer = (const uint8_t *)epd_hl_get_framebuffer(&hl);
+    if (decodebuffer && displaybuffer && epd_framebuffer) {
+        memcpy(decodebuffer, epd_framebuffer, EPD_IMAGE_BUF_SIZE);
+        memcpy(displaybuffer, epd_framebuffer, EPD_IMAGE_BUF_SIZE);
+    }
     framebuffer_mutex = xSemaphoreCreateMutex();
     lv_disp_draw_buf_init(&draw_buf, lv_disp_buf_1, lv_disp_buf_2, DISP_BUF_SIZE);
 
@@ -435,7 +402,10 @@ static void lv_port_disp_init(void)
     disp_drv.flush_cb = disp_flush;
     // disp_drv.render_start_cb = dips_render_start_cb;
     disp_drv.draw_buf = &draw_buf;
-    disp_drv.full_refresh = 0;
+    // Force LVGL to always flush a complete frame. This avoids stale pixels
+    // being preserved between screen transitions when only dirty rectangles
+    // are invalidated.
+    disp_drv.full_refresh = 1;
     lv_disp_drv_register(&disp_drv);
 
     static lv_indev_drv_t indev_drv;
