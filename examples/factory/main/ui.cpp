@@ -2391,6 +2391,25 @@ static WebServer wifi_web_server(80);
 static DNSServer wifi_dns_server;
 static bool wifi_web_started = false;
 
+static void wifi_load_saved_settings(void)
+{
+    wifi_sta_ssid = nvs_param_get_str(NVS_ID_WIFI_STA_SSID);
+    wifi_sta_pwd = nvs_param_get_str(NVS_ID_WIFI_STA_PWD);
+    wifi_ap_ssid = nvs_param_get_str(NVS_ID_WIFI_AP_SSID);
+    wifi_ap_pwd = nvs_param_get_str(NVS_ID_WIFI_AP_PWD);
+
+    if (wifi_ap_ssid.length() == 0) wifi_ap_ssid = "T5S3-AP";
+    if (wifi_ap_pwd.length() < 8) wifi_ap_pwd = "12345678";
+}
+
+static void wifi_save_settings(void)
+{
+    nvs_param_set_str(NVS_ID_WIFI_STA_SSID, wifi_sta_ssid.c_str());
+    nvs_param_set_str(NVS_ID_WIFI_STA_PWD, wifi_sta_pwd.c_str());
+    nvs_param_set_str(NVS_ID_WIFI_AP_SSID, wifi_ap_ssid.c_str());
+    nvs_param_set_str(NVS_ID_WIFI_AP_PWD, wifi_ap_pwd.c_str());
+}
+
 static void wifi_send_cors_headers(void)
 {
     wifi_web_server.sendHeader("Access-Control-Allow-Origin", "http://paper.go");
@@ -2464,6 +2483,8 @@ static void wifi_handle_settings_post(void)
             ap_config_changed = true;
         }
     }
+
+    wifi_save_settings();
 
     if (wifi_sta_ssid.length() > 0) {
         WiFi.begin(wifi_sta_ssid.c_str(), wifi_sta_pwd.c_str());
@@ -2699,6 +2720,8 @@ static void wifi_apply_settings_event_handler(lv_event_t *e)
         wifi_ap_pwd = ap_pwd;
     }
 
+    wifi_save_settings();
+
     if (wifi_sta_ssid.length() > 0) {
         WiFi.begin(wifi_sta_ssid.c_str(), wifi_sta_pwd.c_str());
     }
@@ -2735,6 +2758,7 @@ static void create6(lv_obj_t *parent)
     lv_obj_set_style_text_align(wifi_st_lab, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
     lv_obj_align(wifi_st_lab, LV_ALIGN_BOTTOM_RIGHT, -0, -190);
 
+    wifi_load_saved_settings();
     wifi_enable_apsta();
 
     if(ui_wifi_get_status()) {
