@@ -365,6 +365,7 @@ const struct menu_icon icon_buf2[] = {
     {&img_sleep,    "sleep"   , 375,  45  },
     {&img_test,     "test"    , 45,   250 },
     {&img_wifi,     "browser" , 210,  250 },
+    {&img_gps,      "maps"    , 375,  250 },
 };
 
 static lv_obj_t *ui_Panel4;
@@ -463,6 +464,7 @@ static void menu_btn_event(lv_event_t *e)
          * 9 --- SCREEN9_ID  --- sleep
          * 10 -- SCREEN5_ID  --- test
          * 11 -- SCREEN12_ID --- browser
+         * 12 -- SCREEN13_ID --- maps
         */
         switch (data) {
             case 0: scr_mgr_push(SCREEN1_ID, false); break;
@@ -477,6 +479,7 @@ static void menu_btn_event(lv_event_t *e)
             case 9: scr_mgr_push(SCREEN9_ID, false); break;
             case 10: scr_mgr_push(SCREEN5_ID, false); break;
             case 11: scr_mgr_push(SCREEN12_ID, false); break;
+            case 12: scr_mgr_push(SCREEN13_ID, false); break;
             default: break;
         }
     }
@@ -3931,6 +3934,137 @@ static scr_lifecycle_t screen12 = {
     .destroy = destroy12,
 };
 #endif
+
+//************************************[ screen 13 ]****************************************** maps
+#if 1
+static lv_obj_t *maps_status = NULL;
+static lv_obj_t *maps_info = NULL;
+static lv_obj_t *maps_img = NULL;
+static lv_obj_t *maps_marker = NULL;
+static lv_timer_t *maps_timer = NULL;
+static uint32_t maps_wifi_start_ms = 0;
+static bool maps_waiting_wifi = false;
+static int maps_zoom_try = 18;
+static const uint32_t MAPS_WIFI_TIMEOUT_MS = 20000;
+
+static bool maps_coord_valid(double lat, double lon)
+{
+    if (lat < -85.05112878 || lat > 85.05112878) return false;
+    if (lon < -180.0 || lon > 180.0) return false;
+    if (lat == 0.0 && lon == 0.0) return false;
+    return true;
+}
+
+static void maps_set_status(const char *txt) { if (maps_status) lv_label_set_text(maps_status, txt); }
+
+static void maps_tile_for(double lat,double lon,int z,int *tx,int *ty,int *px,int *py)
+{
+    double n=(double)(1<<z);
+    double x=((lon+180.0)/360.0)*n;
+    double r=lat*M_PI/180.0;
+    double y=(1.0-log(tan(r)+1.0/cos(r))/M_PI)/2.0*n;
+    int ix=(int)floor(x), iy=(int)floor(y);
+    if(ix<0)ix=0; if(iy<0)iy=0; if(ix>= (int)n) ix=(int)n-1; if(iy>=(int)n) iy=(int)n-1;
+    int ipx=(int)floor((x-ix)*256.0), ipy=(int)floor((y-iy)*256.0);
+    if(ipx<0)ipx=0; if(ipx>255)ipx=255; if(ipy<0)ipy=0; if(ipy>255)ipy=255;
+    *tx=ix;*ty=iy;*px=ipx;*py=ipy;
+}
+
+static bool maps_cache_dirs(int z,int x)
+{
+    if(!SD.begin()) return false;
+    if(!SD.exists("/cache")) SD.mkdir("/cache");
+    if(!SD.exists("/cache/maps")) SD.mkdir("/cache/maps");
+    char p1[32]; lv_snprintf(p1,sizeof(p1),"/cache/maps/%d",z); if(!SD.exists(p1)) SD.mkdir(p1);
+    char p2[64]; lv_snprintf(p2,sizeof(p2),"/cache/maps/%d/%d",z,x); if(!SD.exists(p2)) SD.mkdir(p2);
+    return true;
+}
+
+static bool maps_download_tile(const char *path, int z,int x,int y)
+{
+    char url[128]; lv_snprintf(url,sizeof(url),"https://tile.openstreetmap.org/%d/%d/%d.png",z,x,y);
+    Serial.printf("[MAP] HTTP GET %s\n", url);
+    HTTPClient http;
+    http.setUserAgent("T5S3-PaperPro-Maps/0.1 (contact: michael.rol.phone@gmail.com)");
+    if(!http.begin(url)) return false;
+    int code=http.GET();
+    if(code!=200){ http.end(); Serial.printf("[MAP] error: http=%d\n",code); return false; }
+    WiFiClient *stream=http.getStreamPtr();
+    File f=SD.open(path, FILE_WRITE);
+    if(!f){http.end(); return false;}
+    uint8_t buf[512]; int total=0;
+    while(http.connected() && (http.getSize()>0 || stream->available())){
+        int n=stream->readBytes(buf,sizeof(buf)); if(n<=0) break; f.write(buf,n); total+=n;
+    }
+    f.close(); http.end();
+    Serial.printf("[MAP] saved tile bytes=%d\n", total);
+    return total>0;
+}
+
+static bool maps_try_render(double lat,double lon)
+{
+    int x,y,px,py; maps_tile_for(lat,lon,maps_zoom_try,&x,&y,&px,&py);
+    char tile[96]; lv_snprintf(tile,sizeof(tile),"/cache/maps/%d/%d/%d.png",maps_zoom_try,x,y);
+    Serial.printf("[MAP] tile z=%d x=%d y=%d px=%d py=%d\n",maps_zoom_try,x,y,px,py);
+    bool has_sd = SD.begin();
+    bool cache_hit = has_sd && SD.exists(tile);
+    if(cache_hit){ Serial.printf("[MAP] cache hit %s\n",tile); maps_set_status("Tile loaded from SD cache"); }
+    if(!cache_hit){
+        Serial.printf("[MAP] cache miss %s\n",tile);
+        if (WiFi.status()!=WL_CONNECTED){
+            wifi_load_saved_settings();
+            if(wifi_sta_ssid.length()==0){ maps_set_status("No saved WiFi credentials. Open WiFi Settings first."); return false; }
+            if(!maps_waiting_wifi){ maps_wifi_start_ms=millis(); maps_waiting_wifi=true; maps_set_status("Connecting WiFi..."); wifi_connect_saved_sta("maps tile download"); }
+            return false;
+        }
+        if(!has_sd){ maps_set_status("SD unavailable: tile not cached."); return false; }
+        maps_cache_dirs(maps_zoom_try,x);
+        if(!maps_download_tile(tile,maps_zoom_try,x,y)){ maps_set_status("map tile unavailable offline"); return false; }
+        maps_set_status("Tile saved to SD");
+    }
+    lv_img_set_src(maps_img, tile);
+    lv_obj_set_size(maps_img, 512, 512);
+    lv_obj_align(maps_img, LV_ALIGN_TOP_MID, 0, 130);
+    int sx = lv_obj_get_x(maps_img) + (px * 512) / 256;
+    int sy = lv_obj_get_y(maps_img) + (py * 512) / 256;
+    lv_obj_set_pos(maps_marker, sx - 16, sy - 16);
+    lv_snprintf(md_text_buf, sizeof(md_text_buf), "lat=%.6f lon=%.6f\nzoom=%d tile=%d/%d/%d\nsource=%s\n© OpenStreetMap contributors", lat, lon, maps_zoom_try, maps_zoom_try, x, y, cache_hit?"cache":"download");
+    lv_label_set_text(maps_info, md_text_buf);
+    Serial.println("[MAP] render complete");
+    return true;
+}
+
+static void maps_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if(maps_waiting_wifi && WiFi.status()!=WL_CONNECTED){
+        uint32_t e=millis()-maps_wifi_start_ms;
+        lv_snprintf(md_text_buf,sizeof(md_text_buf),"Connecting WiFi...\nSSID: %s\n%lus", wifi_sta_ssid.c_str(), (unsigned long)(e/1000));
+        maps_set_status(md_text_buf);
+        if(e>MAPS_WIFI_TIMEOUT_MS){ maps_waiting_wifi=false; maps_set_status("WiFi timeout"); }
+        return;
+    }
+    maps_waiting_wifi=false;
+    double lat=0,lon=0; ui_gps_get_coord(&lat,&lon);
+    Serial.printf("[MAP] gps lat=%.6f lon=%.6f\n",lat,lon);
+    if(!maps_coord_valid(lat,lon)){ maps_set_status("Waiting for GPS fix..."); return; }
+    if(maps_try_render(lat,lon)){ lv_timer_del(maps_timer); maps_timer=NULL; return; }
+}
+
+static void maps_back(lv_event_t *e){ if(e->code==LV_EVENT_CLICKED) scr_mgr_pop(false);}
+static void create13(lv_obj_t *p){
+    scr_back_btn_create(p, "Maps", maps_back);
+    maps_status=lv_label_create(p); lv_obj_align(maps_status, LV_ALIGN_TOP_LEFT, 20, 80); lv_obj_set_width(maps_status, lv_pct(95));
+    maps_img=lv_img_create(p);
+    maps_marker=lv_obj_create(p); lv_obj_set_size(maps_marker, 32, 32); lv_obj_set_style_radius(maps_marker, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_opa(maps_marker, LV_OPA_TRANSP, 0); lv_obj_set_style_border_width(maps_marker, 3, 0);
+    maps_info=lv_label_create(p); lv_obj_align(maps_info, LV_ALIGN_BOTTOM_LEFT, 20, -30); lv_obj_set_width(maps_info, lv_pct(95));
+}
+static void entry13(void){ Serial.println("[MAP] entry"); ui_gps_task_resume(); maps_zoom_try=18; maps_waiting_wifi=false; maps_set_status("Waiting for GPS fix..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 2500, NULL); lv_timer_ready(maps_timer);}
+static void exit13(void){ if(maps_timer){ lv_timer_del(maps_timer); maps_timer=NULL; } maps_waiting_wifi=false; }
+static void destroy13(void){}
+static scr_lifecycle_t screen13 = {.create=create13,.entry=entry13,.exit=exit13,.destroy=destroy13};
+#endif
+
 //************************************[ screen 9 ]****************************************** shutdown
 #if 1
 static void scr8_btn_event_cb(lv_event_t * e)
@@ -4133,6 +4267,7 @@ void ui_entry(void)
     scr_mgr_register(SCREEN10_ID,  &screen10);  // gps
     scr_mgr_register(SCREEN11_ID,  &screen11);  // markdown
     scr_mgr_register(SCREEN12_ID,  &screen12);  // web browser
+    scr_mgr_register(SCREEN13_ID,  &screen13);  // maps
 
     scr_mgr_switch(SCREEN0_ID, false); // set root screen
     scr_mgr_set_anim(LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE);

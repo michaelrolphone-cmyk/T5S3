@@ -50,6 +50,7 @@ enum {
     SCREEN10_ID,
     SCREEN11_ID,
     SCREEN12_ID,
+    SCREEN13_ID,
 };
 
 enum {
