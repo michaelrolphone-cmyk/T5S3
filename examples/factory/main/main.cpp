@@ -443,7 +443,10 @@ static void lv_port_disp_init(void)
     disp_drv.flush_cb = disp_flush;
     // disp_drv.render_start_cb = dips_render_start_cb;
     disp_drv.draw_buf = &draw_buf;
-    disp_drv.full_refresh = 0;
+    // Force LVGL to always flush a complete frame. This avoids stale pixels
+    // being preserved between screen transitions when only dirty rectangles
+    // are invalidated.
+    disp_drv.full_refresh = 1;
     lv_disp_drv_register(&disp_drv);
 
     static lv_indev_drv_t indev_drv;
