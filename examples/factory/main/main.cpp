@@ -68,13 +68,14 @@ volatile bool disp_flush_enabled = true;
 volatile bool indev_touch_enabled = true;
 static volatile bool touch_ignore_until_release = false;
 static volatile bool home_button_pending = false;
-static volatile bool home_waiting_for_release = false;
-static volatile bool home_switch_after_release = false;
 static volatile uint32_t touch_ignore_start_ms = 0;
 static volatile uint32_t touch_ignore_max_ms = 800;
 static volatile uint32_t home_button_last_ms = 0;
-static volatile uint32_t home_release_wait_start_ms = 0;
 static volatile uint32_t touch_block_until_ms = 0;
+static volatile bool home_transition_guard_active = false;
+static volatile bool home_transition_wait_release = false;
+static volatile uint32_t home_transition_guard_until_ms = 0;
+static volatile uint32_t home_transition_guard_start_ms = 0;
 static lv_indev_t *touch_indev = NULL;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
@@ -420,11 +421,78 @@ static void touch_cancel_current_press(const char *reason)
     Serial.printf("[TOUCH] suppress current press: %s\n", reason ? reason : "");
 }
 
+
+void touch_begin_home_transition_guard(uint32_t min_block_ms)
+{
+    uint32_t now = millis();
+
+    home_transition_guard_active = true;
+    home_transition_wait_release = true;
+    home_transition_guard_start_ms = now;
+    home_transition_guard_until_ms = now + min_block_ms;
+
+    touch_ignore_until_release = true;
+    touch_ignore_start_ms = now;
+    touch_ignore_max_ms = 3000;
+    touch_block_until_ms = now + min_block_ms;
+
+    if (touch_indev) {
+        lv_indev_reset(touch_indev, NULL);
+    }
+
+    Serial.printf("[HOME GUARD] begin min_block=%lu\n", (unsigned long)min_block_ms);
+}
+
+bool touch_home_transition_guard_active(void)
+{
+    if (!home_transition_guard_active) return false;
+
+    uint32_t now = millis();
+
+    if (home_transition_wait_release) {
+        bool still_pressed = indev_touch_enabled && touch.isPressed();
+
+        if (!still_pressed && now >= home_transition_guard_until_ms) {
+            home_transition_wait_release = false;
+            home_transition_guard_active = false;
+            touch_block_until_ms = 0;
+            touch_ignore_until_release = false;
+            Serial.println("[HOME GUARD] release observed; guard ended");
+            return false;
+        }
+
+        if (now - home_transition_guard_start_ms > 3000) {
+            home_transition_wait_release = false;
+            home_transition_guard_active = false;
+            touch_block_until_ms = 0;
+            touch_ignore_until_release = false;
+            Serial.println("[HOME GUARD WARN] timeout; guard force-ended");
+            return false;
+        }
+
+        return true;
+    }
+
+    if (now < home_transition_guard_until_ms) {
+        return true;
+    }
+
+    home_transition_guard_active = false;
+    return false;
+}
+
 static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
 {
     static int16_t x=0, y=0;
 
     (void)drv;
+    if (touch_home_transition_guard_active()) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        data->point.x = x;
+        data->point.y = y;
+        return;
+    }
+
     uint32_t now = millis();
     if (touch_block_until_ms != 0 && now < touch_block_until_ms) {
         data->state = LV_INDEV_STATE_RELEASED;
@@ -529,22 +597,10 @@ static bool touch_gt911_init(void)
 
         home_button_last_ms = now;
 
-        Serial.println("[HOME] GT911 home callback; waiting for release before springboard switch");
+        Serial.println("[HOME] GT911 home callback; queue springboard");
 
+        touch_begin_home_transition_guard(1200);
         home_button_pending = true;
-        home_waiting_for_release = true;
-        home_switch_after_release = true;
-        home_release_wait_start_ms = now;
-
-        // Immediately block normal LVGL input so this press/release cannot become a springboard click.
-        touch_ignore_until_release = true;
-        touch_ignore_start_ms = now;
-        touch_ignore_max_ms = 1500;
-        touch_block_until_ms = now + 1500;
-
-        if (touch_indev) {
-            lv_indev_reset(touch_indev, NULL);
-        }
     }, NULL);
 
     touch.setInterruptMode(LOW_LEVEL_QUERY);
@@ -876,58 +932,33 @@ void idf_loop()
     bool handled_home = false;
 
     if (home_button_pending) {
-        bool switch_performed = false;
-        bool still_pressed = touch.isPressed();
-        uint32_t now = millis();
-        uint32_t elapsed = now - home_release_wait_start_ms;
+        home_button_pending = false;
+        handled_home = true;
 
-        if (home_waiting_for_release && still_pressed && elapsed < 1500) {
-            // Keep LVGL from seeing the active home press.
-            touch_ignore_until_release = true;
-            touch_block_until_ms = now + 100;
-        } else {
-            if (home_waiting_for_release && still_pressed) {
-                Serial.println("[HOME WARN] release wait timeout; switching anyway");
-            } else {
-                Serial.println("[HOME] release observed; switching to springboard");
-            }
+        Serial.println("[HOME] switching to springboard");
 
-            home_button_pending = false;
-            home_waiting_for_release = false;
-            home_switch_after_release = false;
+        touch_begin_home_transition_guard(1200);
 
-            if (touch_indev) {
-                lv_indev_reset(touch_indev, NULL);
-            }
-
-            // Block input across the screen switch so the release cannot hit a springboard icon.
-            touch_ignore_until_release = true;
-            touch_ignore_start_ms = now;
-            touch_ignore_max_ms = 1000;
-            touch_block_until_ms = now + 1000;
-
-            Serial.println("[HOME] switching to springboard");
-            scr_mgr_switch(SCREEN0_ID, false);
-
-            if (touch_indev) {
-                lv_indev_reset(touch_indev, NULL);
-            }
-
-            // Do not let LVGL process input in the same loop iteration as the switch.
-            delay(20);
-            switch_performed = true;
+        if (touch_indev) {
+            lv_indev_reset(touch_indev, NULL);
         }
 
-        if (switch_performed) {
-            handled_home = true;
+        scr_mgr_switch(SCREEN0_ID, false);
+
+        if (touch_indev) {
+            lv_indev_reset(touch_indev, NULL);
         }
+
+        // Keep blocking after screen creation so the release cannot hit a new icon.
+        touch_begin_home_transition_guard(1200);
     }
 
     if (!handled_home) {
         lv_task_handler();
     } else {
-        // Allow rendering timers to continue next loop, but do not process the release as a click immediately.
+        Serial.println("[HOME] skipped lv_task_handler during home switch");
     }
+
     ui_wifi_service_loop();
     delay(1);
 }

@@ -437,6 +437,10 @@ static void menu_gesture_event(lv_event_t *e)
 
 static void menu_btn_event(lv_event_t *e)
 {
+    if (touch_home_transition_guard_active()) {
+        Serial.println("[MENU] ignored click during Home transition guard");
+        return;
+    }
     int data = (int)e->user_data;
     printf("code=%d\n", lv_event_get_code(e));
     if(e->code == LV_EVENT_CLICKED) {
