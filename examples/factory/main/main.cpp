@@ -69,6 +69,9 @@ volatile bool indev_touch_enabled = true;
 static volatile bool touch_ignore_until_release = false;
 static volatile bool home_button_pending = false;
 static volatile uint32_t touch_ignore_start_ms = 0;
+static volatile uint32_t touch_ignore_max_ms = 800;
+static volatile uint32_t home_button_last_ms = 0;
+static lv_indev_t *touch_indev = NULL;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
@@ -396,19 +399,48 @@ void disp_request_full_clear(void)
     disp_force_physical_clear_next_update = true;
 }
 
+static void touch_cancel_current_press(const char *reason)
+{
+    touch_ignore_until_release = true;
+    touch_ignore_start_ms = millis();
+    touch_ignore_max_ms = 800;
+
+    if (touch_indev) {
+        lv_indev_reset(touch_indev, NULL);
+#if LVGL_VERSION_MAJOR >= 8
+        lv_indev_wait_release(touch_indev);
+#endif
+    }
+
+    Serial.printf("[TOUCH] suppress current press: %s\n", reason ? reason : "");
+}
+
 static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
 {
     static int16_t x=0, y=0;
-    bool pressed = indev_touch_enabled && touch.isPressed();
 
     (void)drv;
-    if(touch_ignore_until_release) {
-        if(!pressed) {
-            touch_ignore_until_release = false;
-        }
+    if (touch_ignore_until_release) {
+        bool still_pressed = indev_touch_enabled && touch.isPressed();
+        uint32_t elapsed = millis() - touch_ignore_start_ms;
+
         data->state = LV_INDEV_STATE_RELEASED;
+        data->point.x = x;
+        data->point.y = y;
+
+        if (!still_pressed) {
+            touch_ignore_until_release = false;
+            Serial.println("[TOUCH] release observed; touch input re-enabled");
+        } else if (elapsed >= touch_ignore_max_ms) {
+            touch_ignore_until_release = false;
+            Serial.println("[TOUCH WARN] release timeout; touch input force re-enabled");
+        }
+
+        return;
     }
-    else if(pressed) {
+
+    bool pressed = indev_touch_enabled && touch.isPressed();
+    if(pressed) {
         data->state = LV_INDEV_STATE_PRESSED;
         // Keep PRESSED state even if one coordinate sample is missed.
         // Update coordinates whenever a new point is available.
@@ -450,7 +482,7 @@ static void lv_port_disp_init(void)
     indev_drv.read_cb = my_input_read;              /*See below.*/
     /*Register the driver in LVGL and save the created input device object*/
     // static lv_indev_t * my_indev = lv_indev_drv_register(&indev_drv);
-    lv_indev_drv_register(&indev_drv);
+    touch_indev = lv_indev_drv_register(&indev_drv);
 }
 
 static bool touch_gt911_init(void)
@@ -468,9 +500,15 @@ static bool touch_gt911_init(void)
 
     // Set the center button to trigger the callback , Only for specific devices, e.g LilyGo-EPD47 S3 GT911
     touch.setHomeButtonCallback([](void *user_data) {
-        // Prevent the remaining touch-release sequence from re-triggering app clicks.
-        touch_ignore_start_ms = millis();
-        touch_ignore_until_release = true;
+        uint32_t now = millis();
+        if (now - home_button_last_ms < 700) {
+            Serial.println("[HOME] ignored duplicate home callback");
+            return;
+        }
+        home_button_last_ms = now;
+
+        Serial.println("[HOME] GT911 home callback");
+        touch_cancel_current_press("GT911 home button");
         home_button_pending = true;
     }, NULL);
 
@@ -787,9 +825,21 @@ void idf_setup()
 
 void idf_loop() 
 {
-    if(home_button_pending) {
+    if (home_button_pending) {
         home_button_pending = false;
+
+        Serial.println("[HOME] switching to springboard");
+
+        touch_cancel_current_press("home navigation");
+
         scr_mgr_switch(0, false); // Return to the main screen
+
+        if (touch_indev) {
+            lv_indev_reset(touch_indev, NULL);
+#if LVGL_VERSION_MAJOR >= 8
+            lv_indev_wait_release(touch_indev);
+#endif
+        }
     }
     lv_task_handler();
     ui_wifi_service_loop();
