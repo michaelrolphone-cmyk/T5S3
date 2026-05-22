@@ -1,5 +1,6 @@
 
 #include "scr_mrg.h"
+#include "main.h"
 
 /* 记录所有的屏幕卡片 */ 
 scr_card_t *scr_mgr_head;
