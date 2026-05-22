@@ -76,7 +76,6 @@ bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
 static volatile bool disp_force_clear_next_flush = false;
-static volatile bool disp_force_physical_clear_next_update = false;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 
@@ -285,46 +284,48 @@ static void disp_flush_task(void *param)
 
             static uint32_t last_hash = 0;
             static bool have_last_hash = false;
-            bool force_physical_clear = disp_force_physical_clear_next_update;
-            disp_force_physical_clear_next_update = false;
-
-            if (force_physical_clear) {
-                Serial.println("[EPD] screen transition: hard physical clear before drawing new frame");
-
-                have_last_hash = false;
-                last_hash = 0;
-
-                disp_full_clean();
-
-                epd_hl_set_all_white(&hl);
-                epd_poweron();
-                checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
-                epd_poweroff();
-            }
+            static uint32_t physical_update_count = 0;
 
             uint32_t current_hash = epd_frame_hash(displaybuffer, EPD_IMAGE_BUF_SIZE);
-            Serial.printf("[EPD update after LVGL frame complete] hash=%08lx mode=%d force_physical_clear=%d\n",
-                          current_hash, ui_refresh_get_mode(), force_physical_clear);
-            if (!force_physical_clear && have_last_hash && current_hash == last_hash) {
+            Serial.printf("[EPD update after LVGL frame complete] hash=%08lx mode=%d\n",
+                          current_hash, ui_refresh_get_mode());
+            if (have_last_hash && current_hash == last_hash) {
                 Serial.println("[EPD] skip duplicate physical refresh");
                 continue;
             }
             last_hash = current_hash;
             have_last_hash = true;
 
-            epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-            wifi_quiet_before_epd_update();
-            epd_poweron();
-            if (force_physical_clear) {
-                checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
-            } else if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) {
-                checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
-            } else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL) {
-                checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
-            } else {
-                checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+            if (physical_update_count == 0) {
+                Serial.println("[EPD] first physical update after boot");
             }
-            epd_poweroff();
+            physical_update_count++;
+
+            if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
+            {
+                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+                wifi_quiet_before_epd_update();
+                epd_poweron();
+                checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
+                epd_poweroff();
+            }
+            else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
+            {
+                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+                wifi_quiet_before_epd_update();
+                epd_poweron();
+                checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+                epd_poweroff();
+            }
+            else
+            {
+                disp_full_refresh();
+                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+                wifi_quiet_before_epd_update();
+                epd_poweron();
+                checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+                epd_poweroff();
+            }
 
             if (framebuffer_dirty) {
                 disp_flush_pending = true;
@@ -379,11 +380,15 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
             xSemaphoreGive(framebuffer_mutex);
         }
 
+        static uint32_t flush_log_count = 0;
         bool is_last_flush = lv_disp_flush_is_last(disp);
-        Serial.printf("[LVGL flush] full=%d last=%d force_clear=%d area=(%d,%d)-(%d,%d) w=%d h=%d\n",
-                      full_area, is_last_flush, force_clear_this_flush,
-                      area->x1, area->y1, area->x2, area->y2,
-                      w, h);
+        if (flush_log_count < 3) {
+            Serial.printf("[LVGL flush #%lu] full=%d last=%d area=(%d,%d)-(%d,%d) w=%d h=%d\n",
+                          flush_log_count + 1, full_area, is_last_flush,
+                          area->x1, area->y1, area->x2, area->y2,
+                          w, h);
+            flush_log_count++;
+        }
         framebuffer_dirty = true;
         if (is_last_flush) {
             disp_flush_pending = true;
@@ -396,7 +401,6 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
 void disp_request_full_clear(void)
 {
     disp_force_clear_next_flush = true;
-    disp_force_physical_clear_next_update = true;
 }
 
 static void touch_cancel_current_press(const char *reason)
@@ -463,6 +467,8 @@ static void lv_port_disp_init(void)
     lv_color_t *lv_disp_buf_2 = (lv_color_t *)ps_calloc(sizeof(lv_color_t), DISP_BUF_SIZE);
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
+    if (decodebuffer) memset(decodebuffer, 0x00, EPD_IMAGE_BUF_SIZE);
+    if (displaybuffer) memset(displaybuffer, 0x00, EPD_IMAGE_BUF_SIZE);
     framebuffer_mutex = xSemaphoreCreateMutex();
     lv_disp_draw_buf_init(&draw_buf, lv_disp_buf_1, lv_disp_buf_2, DISP_BUF_SIZE);
 
@@ -549,25 +555,32 @@ static void disp_init_status(const char *name, int *x, int *y, bool init_st)
 }
 
 
-static void epd_power_domain_cold_start(void)
+static void epd_power_domain_cold_start(esp_reset_reason_t rr)
 {
-    Serial.println("[EPD] cold-start display power domain");
+    Serial.printf("[EPD BOOT] cold display init reset_reason=%d\n", rr);
 
-    // Make sure the panel is not being driven.
+    // Let rails settle after EN/RST or firmware-upload auto-reset.
+    delay(500);
+
     epd_poweroff();
-    delay(250);
+    delay(300);
 
-    // If the board exposes ink power through the IO expander / PMIC path,
-    // cycle it here using existing helpers only. Do not invent new pins.
-    // Keep this conservative: no random GPIO toggles.
-
-    // Clear any stale high-level framebuffer state after power settle.
+    // First clear the raw panel state.
     epd_poweron();
     delay(100);
     epd_clear();
     delay(100);
     epd_poweroff();
-    delay(250);
+    delay(300);
+
+    // Reset the high-level framebuffer to white and push a full GC16 update.
+    epd_hl_set_all_white(&hl);
+    epd_poweron();
+    checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+    epd_poweroff();
+    delay(300);
+
+    Serial.println("[EPD BOOT] cold display init complete");
 }
 
 static bool screen_init(void)
@@ -589,7 +602,8 @@ static bool screen_init(void)
         epd_rotated_display_height()
     );
 
-    epd_power_domain_cold_start();
+    epd_power_domain_cold_start(esp_reset_reason());
+    Serial.println("[BOOT] screen_init: cold display init returned");
 
     epd_hl_set_all_white(&hl);
 
@@ -734,8 +748,9 @@ void idf_setup()
     }
 
     Serial.begin(115200);
+    esp_reset_reason_t rr = esp_reset_reason();
     Serial.printf("[BOOT] reset_reason=%d wakeup_cause=%d\n",
-                  esp_reset_reason(),
+                  rr,
                   esp_sleep_get_wakeup_cause());
     SerialGPS.begin(38400, SERIAL_8N1, BOARD_GPS_RXD, BOARD_GPS_TXD);
     // // while (!Serial);
@@ -753,9 +768,11 @@ void idf_setup()
     WiFi.persistent(false);
     WiFi.disconnect(true, true);
     WiFi.mode(WIFI_OFF);
+    delay(100);
 
     peri_buf[E_PERI_BQ27220]    = bq27220_init();   // PMU --- 0x55
     
+    Serial.println("[BOOT] before screen_init()");
     screen_init();
     io_extend_lora_gps_power_on(true);
 
@@ -814,10 +831,12 @@ void idf_setup()
 
     printf("LVGL Init\n");
     lv_port_disp_init();
+    Serial.println("[BOOT] after lv_port_disp_init()");
     xTaskCreatePinnedToCore(disp_flush_task, "disp_flush_task", 1024 * 6, NULL, 2, &disp_flush_handle, 0);
 
     printf("LVGL UI Entry\n");
     ui_entry();
+    Serial.println("[BOOT] after ui_entry()");
 
     // task
     xTaskCreate(btn_task, "lora_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
