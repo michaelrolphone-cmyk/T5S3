@@ -3598,9 +3598,9 @@ static void md_render_to_spangroup(const char *text)
 
         if(header) {
             // Ensure headers are visually separated from surrounding body text.
-            md_add_text_span("\n\n", &Font_Geist_Light_20);
+            md_add_text_span("\n\n\n\n", &Font_Geist_Light_20);
             md_add_line_markdown_inline(&line[content_offset], content_len, md_header_font_from_level(hashes), md_header_font_from_level(hashes));
-            md_add_text_span("\n\n", &Font_Geist_Light_20);
+            md_add_text_span("\n\n\n", &Font_Geist_Light_20);
         } else if(in_code_block) {
             char code_line[512];
             lv_snprintf(code_line, sizeof(code_line), "%.*s\n", (int)line_len, line);
