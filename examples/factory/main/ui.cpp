@@ -15,35 +15,100 @@
 
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(a[0]))
 
+static const uint32_t EPD_MAIN_STATES[] = {
+    LV_PART_MAIN | LV_STATE_DEFAULT,
+    LV_PART_MAIN | LV_STATE_PRESSED,
+    LV_PART_MAIN | LV_STATE_FOCUSED,
+    LV_PART_MAIN | LV_STATE_CHECKED,
+    LV_PART_MAIN | LV_STATE_EDITED,
+    LV_PART_MAIN | LV_STATE_DISABLED,
+};
 
-static void epd_style_plain(lv_obj_t *obj)
+static void epd_style_label(lv_obj_t *obj)
 {
-    lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (!obj) return;
     lv_obj_set_style_text_color(obj, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_color(obj, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_shadow_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_outline_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_opa(obj, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
 }
 
-static void epd_style_transparent(lv_obj_t *obj)
+static void epd_style_main_states(lv_obj_t *obj, lv_opa_t bg_opa, uint16_t border_width)
 {
-    lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_color(obj, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(obj, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_shadow_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_outline_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (!obj) return;
+    for (size_t i = 0; i < sizeof(EPD_MAIN_STATES) / sizeof(EPD_MAIN_STATES[0]); ++i) {
+        uint32_t sel = EPD_MAIN_STATES[i];
+        lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_BG), sel);
+        lv_obj_set_style_bg_opa(obj, bg_opa, sel);
+        lv_obj_set_style_text_color(obj, lv_color_hex(EPD_COLOR_FG), sel);
+        lv_obj_set_style_text_opa(obj, LV_OPA_COVER, sel);
+        lv_obj_set_style_border_color(obj, lv_color_hex(EPD_COLOR_FG), sel);
+        lv_obj_set_style_border_width(obj, border_width, sel);
+        lv_obj_set_style_shadow_width(obj, 0, sel);
+        lv_obj_set_style_outline_width(obj, 0, sel);
+    }
 }
+
+static void epd_style_plain(lv_obj_t *obj) { epd_style_main_states(obj, LV_OPA_COVER, 1); }
+static void epd_style_transparent(lv_obj_t *obj) { epd_style_main_states(obj, LV_OPA_TRANSP, 0); }
 
 static void epd_style_button(lv_obj_t *obj)
 {
-    lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(obj, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_color(obj, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(obj, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_shadow_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_outline_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    epd_style_main_states(obj, LV_OPA_COVER, 2);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(obj, 3, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_set_style_border_width(obj, 3, LV_PART_MAIN | LV_STATE_FOCUSED);
+}
+
+static void epd_style_textarea(lv_obj_t *obj)
+{
+    epd_style_plain(obj);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_BG), LV_PART_SELECTED);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_SELECTED);
+    lv_obj_set_style_text_color(obj, lv_color_hex(EPD_COLOR_FG), LV_PART_SELECTED);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_FG), LV_PART_CURSOR);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_CURSOR);
+    lv_obj_set_style_width(obj, 2, LV_PART_CURSOR);
+}
+
+static void epd_style_keyboard(lv_obj_t *obj)
+{
+    epd_style_plain(obj);
+    const uint32_t item_selectors[] = {
+        LV_PART_ITEMS | LV_STATE_DEFAULT, LV_PART_ITEMS | LV_STATE_PRESSED, LV_PART_ITEMS | LV_STATE_FOCUSED,
+        LV_PART_ITEMS | LV_STATE_CHECKED, LV_PART_ITEMS | LV_STATE_DISABLED,
+    };
+    for (size_t i = 0; i < sizeof(item_selectors) / sizeof(item_selectors[0]); ++i) {
+        uint32_t sel = item_selectors[i];
+        lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_BG), sel);
+        lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, sel);
+        lv_obj_set_style_text_color(obj, lv_color_hex(EPD_COLOR_FG), sel);
+        lv_obj_set_style_text_opa(obj, LV_OPA_COVER, sel);
+        lv_obj_set_style_border_color(obj, lv_color_hex(EPD_COLOR_FG), sel);
+        lv_obj_set_style_border_width(obj, 1, sel);
+        lv_obj_set_style_shadow_width(obj, 0, sel);
+        lv_obj_set_style_outline_width(obj, 0, sel);
+    }
+    lv_obj_set_style_border_width(obj, 3, LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_BG), LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_ITEMS | LV_STATE_PRESSED);
+}
+
+static void epd_style_scrollbar(lv_obj_t *obj)
+{
+    if (!obj) return;
+    lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_FG), LV_PART_SCROLLBAR | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_50, LV_PART_SCROLLBAR | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_width(obj, 0, LV_PART_SCROLLBAR | LV_STATE_DEFAULT);
+}
+
+static void epd_style_selectable_field(lv_obj_t *obj)
+{
+    epd_style_main_states(obj, LV_OPA_TRANSP, 1);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(obj, 3, LV_PART_MAIN | LV_STATE_PRESSED);
 }
 
 static int scr_refresh_mode;
@@ -56,23 +121,28 @@ struct tm timeinfo = {0};
 void scr_back_btn_create(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
 {
     lv_obj_t * btn = lv_btn_create(parent);
+    epd_style_transparent(btn);
     lv_obj_set_style_pad_all(btn, 0, 0);
     lv_obj_set_height(btn, 50);
     lv_obj_align(btn, LV_ALIGN_TOP_LEFT, 15, 15);
     lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(EPD_COLOR_BG), LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(btn, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_outline_width(btn, 0, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_outline_width(btn, 0, LV_PART_MAIN | LV_STATE_FOCUSED);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *label2 = lv_label_create(btn);
     lv_obj_align(label2, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(label2, lv_color_hex(EPD_COLOR_TEXT), LV_PART_MAIN);
+    epd_style_label(label2);
     lv_label_set_text(label2, " " LV_SYMBOL_LEFT);
 
     lv_obj_t *label = lv_label_create(parent);
     lv_obj_align_to(label, btn, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
     lv_obj_set_style_text_font(label, &Font_Mono_Bold_30, LV_PART_MAIN);
-    lv_obj_set_style_text_color(label, lv_color_hex(EPD_COLOR_TEXT), LV_PART_MAIN);
+    epd_style_label(label);
     lv_label_set_text(label, text);
     lv_obj_add_flag(label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(label, cb, LV_EVENT_CLICKED, NULL);
@@ -169,11 +239,13 @@ static const char *line_full_format(int max_c, const char *str1, const char *str
             h->obj = lv_obj_class_create_obj(&lv_list_btn_class, list);                    \
             lv_obj_class_init_obj(h->obj);                                                 \
             lv_obj_set_size(h->obj, LV_PCT(100), LV_SIZE_CONTENT);                         \
+            epd_style_button(h->obj);                                                      \
                                                                                            \
             lv_obj_t *label = lv_label_create(h->obj);                                     \
             lv_label_set_text(label, h->name);                                             \
             lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL_CIRCULAR);                  \
             lv_obj_align(label, LV_ALIGN_LEFT_MID, 10, 0);                                 \
+            epd_style_label(label);                                                        \
                                                                                            \
             lv_obj_set_height(h->obj, 85);                                                 \
             lv_obj_set_style_text_font(h->obj, &Font_Mono_Bold_30, LV_PART_MAIN);          \
@@ -191,6 +263,7 @@ static const char *line_full_format(int max_c, const char *str1, const char *str
                 lv_obj_set_style_text_font(h->st, &Font_Mono_Bold_30, LV_PART_MAIN);       \
                 lv_obj_align(h->st, LV_ALIGN_RIGHT_MID, -3, 0);                            \
                 lv_label_set_text_fmt(h->st, "%s", h->get_cb(NULL));                       \
+                epd_style_label(h->st);                                                    \
             }                                                                              \
         }                                                                                  \
     }
@@ -229,20 +302,13 @@ static const char *line_full_format(int max_c, const char *str1, const char *str
 void ui_list_btn_create(lv_obj_t *parent, lv_event_cb_t event_cb)
 {
     lv_obj_t * ui_Button2 = lv_btn_create(parent);
+    epd_style_button(ui_Button2);
     lv_obj_set_width(ui_Button2, 140);
     lv_obj_set_height(ui_Button2, 85);
     lv_obj_align(ui_Button2, LV_ALIGN_BOTTOM_MID, -140, -30);
     // lv_obj_set_align(ui_Button2, LV_ALIGN_CENTER);
     lv_obj_add_flag(ui_Button2, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
     lv_obj_clear_flag(ui_Button2, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
-    lv_obj_set_style_bg_color(ui_Button2, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(ui_Button2, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(ui_Button2, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_shadow_width(ui_Button2, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_shadow_spread(ui_Button2, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(ui_Button2, 0, LV_PART_MAIN | LV_STATE_CHECKED | LV_STATE_PRESSED);
-    lv_obj_set_style_shadow_width(ui_Button2, 0, LV_PART_MAIN | LV_STATE_CHECKED | LV_STATE_PRESSED);
-    lv_obj_set_style_shadow_spread(ui_Button2, 0, LV_PART_MAIN | LV_STATE_CHECKED | LV_STATE_PRESSED);
     lv_obj_set_style_radius(ui_Button2, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     lv_obj_t * ui_Label1 = lv_label_create(ui_Button2);
@@ -250,24 +316,16 @@ void ui_list_btn_create(lv_obj_t *parent, lv_event_cb_t event_cb)
     lv_obj_set_height(ui_Label1, LV_SIZE_CONTENT);    /// 1
     lv_obj_set_align(ui_Label1, LV_ALIGN_CENTER);
     lv_label_set_text(ui_Label1, "Back");
-    lv_obj_set_style_text_color(ui_Label1, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_opa(ui_Label1, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    epd_style_label(ui_Label1);
 
     lv_obj_t * ui_Button14 = lv_btn_create(parent);
+    epd_style_button(ui_Button14);
     lv_obj_set_width(ui_Button14, 140);
     lv_obj_set_height(ui_Button14, 85);
     lv_obj_align(ui_Button14, LV_ALIGN_BOTTOM_MID, 140, -30);
     // lv_obj_set_align(ui_Button14, LV_ALIGN_CENTER);
     lv_obj_add_flag(ui_Button14, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
     lv_obj_clear_flag(ui_Button14, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
-    lv_obj_set_style_bg_color(ui_Button14, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(ui_Button14, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(ui_Button14, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_shadow_width(ui_Button14, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_shadow_spread(ui_Button14, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(ui_Button14, 0, LV_PART_MAIN | LV_STATE_CHECKED | LV_STATE_PRESSED);
-    lv_obj_set_style_shadow_width(ui_Button14, 0, LV_PART_MAIN | LV_STATE_CHECKED | LV_STATE_PRESSED);
-    lv_obj_set_style_shadow_spread(ui_Button14, 0, LV_PART_MAIN | LV_STATE_CHECKED | LV_STATE_PRESSED);
     lv_obj_set_style_radius(ui_Button14, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     lv_obj_t * ui_Label15 = lv_label_create(ui_Button14);
@@ -275,8 +333,7 @@ void ui_list_btn_create(lv_obj_t *parent, lv_event_cb_t event_cb)
     lv_obj_set_height(ui_Label15, LV_SIZE_CONTENT);    /// 1
     lv_obj_set_align(ui_Label15, LV_ALIGN_CENTER);
     lv_label_set_text(ui_Label15, "Next");
-    lv_obj_set_style_text_color(ui_Label15, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_opa(ui_Label15, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    epd_style_label(ui_Label15);
 
     lv_obj_add_event_cb(ui_Button2, event_cb, LV_EVENT_CLICKED, (void*)'n');
     lv_obj_add_event_cb(ui_Button14, event_cb, LV_EVENT_CLICKED, (void*)'p');
@@ -2048,7 +2105,7 @@ static void set_dt_update_field_focus(void)
 {
     for (int i = 0; i < 5; i++) {
         bool selected = (i == set_dt_field);
-        lv_obj_set_style_bg_opa(set_dt_field_btns[i], selected ? LV_OPA_20 : LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(set_dt_field_btns[i], LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_set_style_border_width(set_dt_field_btns[i], selected ? 3 : 1, LV_PART_MAIN);
     }
 }
@@ -2102,6 +2159,7 @@ static void create4_3(lv_obj_t *parent)
 {
     set_dt_lab = lv_label_create(parent);
     lv_obj_set_style_text_font(set_dt_lab, &Font_Mono_Bold_30, LV_PART_MAIN);
+    epd_style_label(set_dt_lab);
     lv_obj_align(set_dt_lab, LV_ALIGN_TOP_MID, 0, 70);
     lv_obj_add_flag(set_dt_lab, LV_OBJ_FLAG_HIDDEN);
 
@@ -2125,19 +2183,19 @@ static void create4_3(lv_obj_t *parent)
         lv_obj_set_style_radius(btn, 12, LV_PART_MAIN);
         lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
         lv_obj_set_style_border_color(btn, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(btn, LV_OPA_20, LV_PART_MAIN);
-        epd_style_button(btn);
+        epd_style_selectable_field(btn);
         lv_obj_add_event_cb(btn, set_dt_event_cb, LV_EVENT_CLICKED, (void *)(10 + i));
 
         set_dt_field_labs[i] = lv_label_create(btn);
         lv_obj_set_style_text_font(set_dt_field_labs[i], &Font_Mono_Bold_30, LV_PART_MAIN);
-        lv_obj_set_style_text_color(set_dt_field_labs[i], lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN | LV_STATE_DEFAULT);
+        epd_style_label(set_dt_field_labs[i]);
         lv_obj_center(set_dt_field_labs[i]);
 
         if (i < 4) {
             lv_obj_t *sep = lv_label_create(field_row);
             lv_obj_set_style_text_font(sep, &Font_Mono_Bold_30, LV_PART_MAIN);
             lv_label_set_text(sep, sep_text[i]);
+            epd_style_label(sep);
         }
     }
 
@@ -2488,18 +2546,21 @@ static void wifi_enable_apsta(void)
 static void wifi_info_label_create(lv_obj_t *parent)
 {
     ip_lab = lv_label_create(parent);
+    epd_style_label(ip_lab);
     // lv_obj_set_style_text_color(ip_lab, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
     lv_obj_set_style_text_font(ip_lab, &Font_Mono_Bold_25, LV_PART_MAIN);
     lv_label_set_text_fmt(ip_lab, "ip: %s", ui_wifi_get_ip());
     lv_obj_align_to(ip_lab, wifi_st_lab, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
 
     ssid_lab = lv_label_create(parent);
+    epd_style_label(ssid_lab);
     // lv_obj_set_style_text_color(ssid_lab, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
     lv_obj_set_style_text_font(ssid_lab, &Font_Mono_Bold_25, LV_PART_MAIN);
     lv_label_set_text_fmt(ssid_lab, "ssid: %s", WiFi.SSID().c_str());
     lv_obj_align_to(ssid_lab, ip_lab, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
 
     pwd_lab = lv_label_create(parent);
+    epd_style_label(pwd_lab);
     // lv_obj_set_style_text_color(pwd_lab, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
     lv_obj_set_style_text_font(pwd_lab, &Font_Mono_Bold_25, LV_PART_MAIN);
     lv_label_set_text_fmt(pwd_lab, "rssi: %ddB", WiFi.RSSI());
@@ -2662,6 +2723,7 @@ static void create6(lv_obj_t *parent)
     lv_obj_set_width(wifi_st_lab, 360);
     // lv_obj_set_style_text_color(wifi_st_lab, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
     lv_obj_set_style_text_font(wifi_st_lab, &Font_Mono_Bold_25, LV_PART_MAIN);
+    epd_style_label(wifi_st_lab);
     lv_label_set_text(wifi_st_lab, (ui_wifi_get_status() ? "Wifi Connect" : "Wifi Disconnect"));
     lv_obj_set_style_text_align(wifi_st_lab, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
     lv_obj_align(wifi_st_lab, LV_ALIGN_BOTTOM_RIGHT, -0, -190);
@@ -2689,11 +2751,12 @@ static void create6(lv_obj_t *parent)
         epd_style_transparent(row);
         lv_obj_t *lab = lv_label_create(row);
         lv_label_set_text(lab, title);
+        epd_style_label(lab);
         lv_obj_set_width(lab, 170);
         lv_obj_set_style_text_font(lab, &Font_Mono_Bold_25, LV_PART_MAIN);
         lv_obj_t *ta = lv_textarea_create(row);
         lv_obj_set_size(ta, 280, 36);
-        epd_style_plain(ta);
+        epd_style_textarea(ta);
         lv_textarea_set_one_line(ta, true);
         lv_textarea_set_text(ta, value);
         lv_obj_add_event_cb(ta, wifi_ta_focus_event_handler, LV_EVENT_FOCUSED, NULL);
@@ -2710,7 +2773,7 @@ static void create6(lv_obj_t *parent)
     lv_obj_set_height(wifi_keyboard, lv_pct(40));
     lv_obj_align(wifi_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_textarea(wifi_keyboard, wifi_sta_ssid_ta);
-    epd_style_plain(wifi_keyboard);
+    epd_style_keyboard(wifi_keyboard);
 
     // apply btn
     lv_obj_t *btn = lv_btn_create(parent);
@@ -2723,6 +2786,7 @@ static void create6(lv_obj_t *parent)
     lv_label_set_text(label, "Apply");
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(label, &Font_Mono_Bold_25, LV_PART_MAIN);
+    epd_style_label(label);
     lv_obj_center(label);
     lv_obj_add_event_cb(btn, wifi_apply_settings_event_handler, LV_EVENT_CLICKED, NULL);
     
@@ -3575,7 +3639,7 @@ static void create12(lv_obj_t *parent)
     lv_textarea_set_one_line(web_url_ta, true);
     lv_textarea_set_text(web_url_ta, web_url_buf);
     lv_obj_add_event_cb(web_url_ta, web_ta_event_cb, LV_EVENT_FOCUSED, NULL);
-    epd_style_plain(web_url_ta);
+    epd_style_textarea(web_url_ta);
 
     lv_obj_t *go_btn = lv_btn_create(parent);
     lv_obj_set_size(go_btn, 90, 50);
@@ -3584,7 +3648,7 @@ static void create12(lv_obj_t *parent)
     epd_style_button(go_btn);
     lv_obj_t *go_label = lv_label_create(go_btn);
     lv_label_set_text(go_label, "Go");
-    lv_obj_set_style_text_color(go_label, lv_color_hex(EPD_COLOR_FG), LV_PART_MAIN | LV_STATE_DEFAULT);
+    epd_style_label(go_label);
     lv_obj_center(go_label);
 
     web_cont = lv_obj_create(parent);
@@ -3594,16 +3658,18 @@ static void create12(lv_obj_t *parent)
     lv_obj_set_scrollbar_mode(web_cont, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_pad_all(web_cont, 8, LV_PART_MAIN);
     epd_style_transparent(web_cont);
+    epd_style_scrollbar(web_cont);
 
     web_span = lv_spangroup_create(web_cont);
     lv_obj_set_width(web_span, lv_pct(100));
+    epd_style_plain(web_span);
     web_show_text("Type a URL with the on-screen keyboard and tap Go.");
 
     web_keyboard = lv_keyboard_create(parent);
     lv_obj_set_height(web_keyboard, lv_pct(32));
     lv_obj_align(web_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_textarea(web_keyboard, web_url_ta);
-    epd_style_plain(web_keyboard);
+    epd_style_keyboard(web_keyboard);
 }
 
 static void entry12(void) { web_fetch_and_render(web_url_buf); }
