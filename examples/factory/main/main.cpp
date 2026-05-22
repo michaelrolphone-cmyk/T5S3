@@ -67,6 +67,7 @@ uint8_t *displaybuffer = NULL;
 volatile bool disp_flush_enabled = true;
 volatile bool indev_touch_enabled = true;
 static volatile bool touch_ignore_until_release = false;
+static volatile bool home_button_pending = false;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
@@ -421,7 +422,7 @@ static bool touch_gt911_init(void)
         Serial.println("Home button pressed!");
         // Prevent the remaining touch-release sequence from re-triggering app clicks.
         touch_ignore_until_release = true;
-        scr_mgr_switch(0, false); // Return to the main screen
+        home_button_pending = true;
     }, NULL);
 
     touch.setInterruptMode(LOW_LEVEL_QUERY);
@@ -631,6 +632,7 @@ void idf_setup()
     Wire.begin(BOARD_SDA, BOARD_SCL);
 
     pinMode(BOARD_BL_EN, OUTPUT);
+    analogWrite(BOARD_BL_EN, 0); // Keep backlight off until user setting is applied
     pinMode(BOARD_BOOT_BTN, INPUT_PULLUP);
 
     // Init system
@@ -699,6 +701,11 @@ void idf_setup()
 
 void idf_loop() 
 {
+    if(home_button_pending) {
+        home_button_pending = false;
+        scr_mgr_switch(0, false); // Return to the main screen
+    }
     lv_task_handler();
+    ui_wifi_service_loop();
     delay(1);
 }
