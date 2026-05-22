@@ -7,7 +7,7 @@
 #include "ui_port.h"
 #include "nvs_param.h"
 
-int ui_setting_backlight = 3;  // 0 - 3
+int ui_setting_backlight = 0;  // 0 - 3
 int epd_vcom_default = 1560;
 int refresh_mode = UI_REFRESH_MODE_NORMAL;
 
