@@ -219,12 +219,21 @@ static void disp_flush_task(void *param)
             disp_flush_pending = false;
             framebuffer_dirty = false;
 
-            EpdRect rener_area = {
+            EpdRect full_area = {
                 .x = 0,
                 .y = 0,
                 .width = epd_rotated_display_width(),
                 .height = epd_rotated_display_height(),
             };
+            EpdRect rener_area = full_area;
+
+            if (framebuffer_has_dirty_area) {
+                rener_area.x = framebuffer_dirty_x1;
+                rener_area.y = framebuffer_dirty_y1;
+                rener_area.width = framebuffer_dirty_x2 - framebuffer_dirty_x1 + 1;
+                rener_area.height = framebuffer_dirty_y2 - framebuffer_dirty_y1 + 1;
+                framebuffer_has_dirty_area = false;
+            }
 
             if (framebuffer_has_dirty_area) {
                 rener_area.x = framebuffer_dirty_x1;
@@ -246,14 +255,14 @@ static void disp_flush_task(void *param)
 
             if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
             {
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+                epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
                 checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
                 epd_poweroff();
             }
             else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
             {
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+                epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
                 checkError(epd_hl_update_area(&hl, MODE_GL16, epd_ambient_temperature(), rener_area));
                 epd_poweroff();
@@ -261,7 +270,7 @@ static void disp_flush_task(void *param)
             else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
             {
                 disp_full_refresh();
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+                epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
                 checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
                 epd_poweroff();
