@@ -2417,6 +2417,90 @@ static void wifi_send_cors_headers(void)
     wifi_web_server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
+
+static const char *WIFI_API_ROOT_HTML = R"HTML(<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>paper.api Wi-Fi Settings</title>
+  <style>
+    body { font-family: sans-serif; max-width: 560px; margin: 24px auto; padding: 0 16px; }
+    h1 { font-size: 1.2rem; }
+    label { display:block; margin: 10px 0 4px; font-weight: 600; }
+    input { width: 100%; box-sizing: border-box; padding: 8px; }
+    button { margin-top: 14px; padding: 10px 14px; }
+    .row { margin-top: 6px; }
+    #status { margin-top: 10px; color: #1f2937; }
+  </style>
+</head>
+<body>
+  <h1>paper.api Wi-Fi Settings</h1>
+  <p class="row">Saved via <code>POST /settings</code> to device NVS, same fields as the on-device settings app.</p>
+
+  <label for="wifi_ssid">Wi-Fi SSID</label>
+  <input id="wifi_ssid" type="text" />
+
+  <label for="wifi_password">Wi-Fi Password</label>
+  <input id="wifi_password" type="password" />
+
+  <label for="ap_ssid">AP SSID</label>
+  <input id="ap_ssid" type="text" />
+
+  <label for="ap_password">AP Password (min 8 chars or empty)</label>
+  <input id="ap_password" type="password" />
+
+  <button id="saveBtn">Save Settings</button>
+  <div id="status"></div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    function setStatus(msg) { statusEl.textContent = msg; }
+
+    async function loadSettings() {
+      setStatus('Loading...');
+      const r = await fetch('/settings');
+      if (!r.ok) throw new Error('GET /settings failed: ' + r.status);
+      const d = await r.json();
+      document.getElementById('wifi_ssid').value = d.wifi_ssid || '';
+      document.getElementById('wifi_password').value = d.wifi_password || '';
+      document.getElementById('ap_ssid').value = d.ap_ssid || '';
+      document.getElementById('ap_password').value = d.ap_password || '';
+      setStatus('Loaded current settings.');
+    }
+
+    async function saveSettings() {
+      setStatus('Saving...');
+      const body = new URLSearchParams();
+      body.set('wifi_ssid', document.getElementById('wifi_ssid').value);
+      body.set('wifi_password', document.getElementById('wifi_password').value);
+      body.set('ap_ssid', document.getElementById('ap_ssid').value);
+      body.set('ap_password', document.getElementById('ap_password').value);
+
+      const r = await fetch('/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body
+      });
+      if (!r.ok) throw new Error('POST /settings failed: ' + r.status);
+      const d = await r.json();
+      setStatus('Saved. Wi-Fi connected: ' + (d.wifi_connected ? 'yes' : 'no'));
+    }
+
+    document.getElementById('saveBtn').addEventListener('click', () => {
+      saveSettings().catch(e => setStatus('Error: ' + e.message));
+    });
+
+    loadSettings().catch(e => setStatus('Error: ' + e.message));
+  </script>
+</body>
+</html>)HTML";
+
+static void wifi_handle_api_root_get(void)
+{
+    wifi_web_server.send(200, "text/html", WIFI_API_ROOT_HTML);
+}
+
 static void wifi_handle_settings_options(void)
 {
     wifi_send_cors_headers();
@@ -2536,12 +2620,17 @@ static void wifi_start_web_services(void)
     if (wifi_web_started) return;
 
     wifi_dns_server.start(53, "*", WiFi.softAPIP());
+    wifi_web_server.on("/", HTTP_GET, wifi_handle_api_root_get);
     wifi_web_server.on("/settings", HTTP_OPTIONS, wifi_handle_settings_options);
     wifi_web_server.on("/settings", HTTP_GET, wifi_handle_settings_get);
     wifi_web_server.on("/settings", HTTP_POST, wifi_handle_settings_post);
     wifi_web_server.onNotFound([]() {
         String host = wifi_web_server.hostHeader();
         if (host.equalsIgnoreCase("paper.api") || host.equalsIgnoreCase("paper.api:80")) {
+            if (wifi_web_server.uri() == "/") {
+                wifi_handle_api_root_get();
+                return;
+            }
             wifi_send_cors_headers();
             wifi_web_server.send(404, "application/json", "{\"error\":\"not_found\"}");
             return;
