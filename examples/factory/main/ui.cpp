@@ -2260,8 +2260,10 @@ static lv_timer_t   *wifi_timer            = NULL;
 static uint32_t      wifi_timer_counter    = 0;
 static uint32_t      wifi_connnect_timeout = 60;
 
-static const char *wifi_ap_ssid = "T5S3-AP";
-static const char *wifi_ap_pwd  = "12345678";
+static String wifi_sta_ssid = "";
+static String wifi_sta_pwd  = "";
+static String wifi_ap_ssid = "T5S3-AP";
+static String wifi_ap_pwd  = "12345678";
 static WebServer wifi_web_server(80);
 static DNSServer wifi_dns_server;
 static bool wifi_web_started = false;
@@ -2292,7 +2294,11 @@ static void wifi_handle_settings_get(void)
     json += "\"backlight\":" + String(backlight) + ",";
     json += "\"refresh_speed\":" + String(refresh_speed) + ",";
     json += "\"vcom\":" + String(vcom) + ",";
-    json += "\"wifi_connected\":" + String(wifi_connected ? "true" : "false");
+    json += "\"wifi_connected\":" + String(wifi_connected ? "true" : "false") + ",";
+    json += "\"wifi_ssid\":\"" + wifi_sta_ssid + "\",";
+    json += "\"wifi_password\":\"" + wifi_sta_pwd + "\",";
+    json += "\"ap_ssid\":\"" + wifi_ap_ssid + "\",";
+    json += "\"ap_password\":\"" + wifi_ap_pwd + "\"";
     json += "}";
 
     wifi_send_cors_headers();
@@ -2316,6 +2322,36 @@ static void wifi_handle_settings_post(void)
     if (wifi_web_server.hasArg("vcom")) {
         ui_setting_set_vcom(wifi_web_server.arg("vcom").toInt());
     }
+
+    bool ap_config_changed = false;
+    if (wifi_web_server.hasArg("wifi_ssid")) {
+        wifi_sta_ssid = wifi_web_server.arg("wifi_ssid");
+    }
+    if (wifi_web_server.hasArg("wifi_password")) {
+        wifi_sta_pwd = wifi_web_server.arg("wifi_password");
+    }
+    if (wifi_web_server.hasArg("ap_ssid")) {
+        wifi_ap_ssid = wifi_web_server.arg("ap_ssid");
+        ap_config_changed = true;
+    }
+    if (wifi_web_server.hasArg("ap_password")) {
+        String ap_pwd = wifi_web_server.arg("ap_password");
+        if (ap_pwd.length() >= 8 || ap_pwd.length() == 0) {
+            wifi_ap_pwd = ap_pwd;
+            ap_config_changed = true;
+        }
+    }
+
+    if (wifi_sta_ssid.length() > 0) {
+        WiFi.begin(wifi_sta_ssid.c_str(), wifi_sta_pwd.c_str());
+    }
+    if (ap_config_changed) {
+        WiFi.softAPdisconnect(true);
+        if (!WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str())) {
+            Serial.println("[wifi] softAP reconfigure failed");
+        }
+    }
+
     wifi_handle_settings_get();
 }
 
@@ -2382,10 +2418,10 @@ static void wifi_enable_apsta(void)
 {
     WiFi.mode(WIFI_AP_STA);
     if (WiFi.softAPIP().toString() == "0.0.0.0") {
-        if (!WiFi.softAP(wifi_ap_ssid, wifi_ap_pwd)) {
+        if (!WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str())) {
             Serial.println("[wifi] softAP start failed");
         } else {
-            Serial.printf("[wifi] AP started: %s IP=%s\n", wifi_ap_ssid, WiFi.softAPIP().toString().c_str());
+            Serial.printf("[wifi] AP started: %s IP=%s\n", wifi_ap_ssid.c_str(), WiFi.softAPIP().toString().c_str());
         }
     }
     wifi_start_web_services();
@@ -2548,15 +2584,16 @@ static void create6(lv_obj_t *parent)
     lv_obj_set_width(tips_label, LV_PCT(100));
     lv_label_set_long_mode(tips_label, LV_LABEL_LONG_SCROLL);
     lv_obj_set_style_text_color(tips_label, lv_color_black(), LV_PART_MAIN);
-    lv_label_set_text(tips_label,   "STA+AP mode is enabled.\n"
-                                    "AP SSID: T5S3-AP  PWD: 12345678\n"
+    lv_label_set_text_fmt(tips_label, "STA+AP mode is enabled.\n"
+                                    "AP SSID: %s  PWD: %s\n"
                                     "1. Scan the QR code to download `EspTouch`\n"
                                     "2. Install and launch `EspTouch` APP\n"
                                     "3. Make sure your phone is connected to router WIFI\n"
                                     "4. Tap the [EspTouch] option of the APP\n"
                                     "5. Enter router WIFI password and click [confirm]\n"
                                     "6. Click [config wifi] on the ink screen\n"
-                                    "Device keeps AP for local web apps while connected to Internet."
+                                    "Device keeps AP for local web apps while connected to Internet.",
+                                    wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str()
                                     );
 
     
