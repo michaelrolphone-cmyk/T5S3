@@ -10,6 +10,10 @@ nvs_param nvs_default[NVS_ID_MAX] = {
     {NVS_ID_BACKLIGHT,      NVS_U8,     "blacklight",   .data = {.u8 = 0}},
     {NVS_ID_EPD_VCOM,       NVS_U16,    "eps_vcom",     .data = {.u16 = 1560}},
     {NVS_ID_REFRESH_MODE,   NVS_U8,     "refresh_mode", .data = {.u8 = 0} },
+    {NVS_ID_WIFI_STA_SSID,  NVS_STR,    "wifi_sta_ssid", .data = {.str = ""}},
+    {NVS_ID_WIFI_STA_PWD,   NVS_STR,    "wifi_sta_pwd",  .data = {.str = ""}},
+    {NVS_ID_WIFI_AP_SSID,   NVS_STR,    "wifi_ap_ssid",  .data = {.str = "T5S3-AP"}},
+    {NVS_ID_WIFI_AP_PWD,    NVS_STR,    "wifi_ap_pwd",   .data = {.str = "12345678"}},
 };
 /* clang-format on */
 
