@@ -245,6 +245,16 @@ static uint32_t epd_frame_hash(const uint8_t *buf, size_t len)
     return h;
 }
 
+
+static void wifi_quiet_before_epd_update(void)
+{
+    // For now just diagnostic; do not permanently kill WiFi unless test proves it.
+    if (WiFi.getMode() != WIFI_OFF) {
+        Serial.printf("[EPD/WIFI] WiFi active during EPD update mode=%d status=%d\n",
+                      WiFi.getMode(), WiFi.status());
+    }
+}
+
 static void disp_flush_task(void *param)
 {
     (void)param;
@@ -300,6 +310,7 @@ static void disp_flush_task(void *param)
             have_last_hash = true;
 
             epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+            wifi_quiet_before_epd_update();
             epd_poweron();
             if (force_physical_clear) {
                 checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
@@ -499,6 +510,28 @@ static void disp_init_status(const char *name, int *x, int *y, bool init_st)
     epd_poweroff();
 }
 
+
+static void epd_power_domain_cold_start(void)
+{
+    Serial.println("[EPD] cold-start display power domain");
+
+    // Make sure the panel is not being driven.
+    epd_poweroff();
+    delay(250);
+
+    // If the board exposes ink power through the IO expander / PMIC path,
+    // cycle it here using existing helpers only. Do not invent new pins.
+    // Keep this conservative: no random GPIO toggles.
+
+    // Clear any stale high-level framebuffer state after power settle.
+    epd_poweron();
+    delay(100);
+    epd_clear();
+    delay(100);
+    epd_poweroff();
+    delay(250);
+}
+
 static bool screen_init(void)
 {
     epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_64K);
@@ -518,6 +551,10 @@ static bool screen_init(void)
         epd_rotated_display_height()
     );
 
+    epd_power_domain_cold_start();
+
+    epd_hl_set_all_white(&hl);
+
     // The display bus settings for V7 may be conservative, you can manually
     // override the bus speed to tune for speed, i.e., if you set the PSRAM speed
     // to 120MHz.
@@ -525,10 +562,6 @@ static bool screen_init(void)
 
     heap_caps_print_heap_info(MALLOC_CAP_INTERNAL);
     heap_caps_print_heap_info(MALLOC_CAP_SPIRAM);
-
-    epd_poweron();
-    epd_clear();
-    epd_poweroff();
 
     int cursor_x = 250;
     int cursor_y = epd_rotated_display_height() / 2 - 250;
@@ -663,6 +696,9 @@ void idf_setup()
     }
 
     Serial.begin(115200);
+    Serial.printf("[BOOT] reset_reason=%d wakeup_cause=%d\n",
+                  esp_reset_reason(),
+                  esp_sleep_get_wakeup_cause());
     SerialGPS.begin(38400, SERIAL_8N1, BOARD_GPS_RXD, BOARD_GPS_TXD);
     // // while (!Serial);
 
@@ -675,6 +711,10 @@ void idf_setup()
 
     // Init system
     ui_nvs_set_defaulat_param();
+
+    WiFi.persistent(false);
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_OFF);
 
     peri_buf[E_PERI_BQ27220]    = bq27220_init();   // PMU --- 0x55
     
@@ -697,6 +737,14 @@ void idf_setup()
     peri_buf[E_PERI_INK_POWER]  = false; 
 
     peri_buf[E_PERI_BQ25896]    = bq25896_init();   // PMU --- 0x6B
+    if (peri_buf[E_PERI_BQ25896]) {
+        Serial.printf("[BOOT PWR] vbus_in=%d vbus=%.3f vsys=%.3f vbat=%.3f charging=%d\n",
+                      battery_25896_is_vbus_in(),
+                      battery_25896_get_VBUS(),
+                      battery_25896_get_VSYS(),
+                      battery_25896_get_VBAT(),
+                      battery_25896_is_chr());
+    }
     cursor_x = 100;
     cursor_y = epd_rotated_display_height() / 2 - 100 + 50;
     disp_init_status("BQ25896 Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_BQ25896]);

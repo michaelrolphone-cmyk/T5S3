@@ -22,9 +22,11 @@ void ui_nvs_set_defaulat_param(void)
 {
     nsv_param_init();
     ui_setting_backlight = nvs_param_get_u8(NVS_ID_BACKLIGHT);
-    epd_vcom_default = nvs_param_get_u16(NVS_ID_EPD_VCOM);
-    refresh_mode = nvs_param_get_u8(NVS_ID_REFRESH_MODE);
+    epd_vcom_default = 1560;
     refresh_mode = UI_REFRESH_MODE_NORMAL;
+
+    Serial.printf("[BOOT SETTINGS] forced VCOM=%d refresh_mode=%d\n",
+                  epd_vcom_default, refresh_mode);
 
     printf("ui_setting_backlight = %d\n", ui_setting_backlight );
     printf("epd_vcom_default = %d\n", epd_vcom_default );
