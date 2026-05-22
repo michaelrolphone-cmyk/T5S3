@@ -212,6 +212,8 @@ static void disp_flush_task(void *param)
 {
     (void)param;
     while (1) {
+        // Wait for any producer to notify there is new framebuffer data.
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
         if (disp_flush_pending) {
             disp_flush_pending = false;
             framebuffer_dirty = false;
@@ -228,6 +230,9 @@ static void disp_flush_task(void *param)
                     memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
                     xSemaphoreGive(framebuffer_mutex);
                 } else {
+                    // Keep the flush request pending; otherwise this frame can
+                    // be dropped and leave stale/blank rectangles on screen.
+                    disp_flush_pending = true;
                     vTaskDelay(pdMS_TO_TICKS(1));
                     continue;
                 }
@@ -258,6 +263,7 @@ static void disp_flush_task(void *param)
 
             if (framebuffer_dirty) {
                 disp_flush_pending = true;
+                xTaskNotifyGive(disp_flush_handle);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(2));
@@ -269,9 +275,16 @@ static inline uint8_t lv_color_to_epd_gray4(lv_color_t color)
     lv_color32_t c32;
     c32.full = lv_color_to32(color);
 
-    uint16_t gray = (uint16_t)c32.ch.red * 76U +
-                    (uint16_t)c32.ch.green * 150U +
-                    (uint16_t)c32.ch.blue * 30U;
+    // LVGL provides ARGB pixels for TRUE_COLOR_ALPHA images. Blend against a
+    // white paper background before grayscale conversion, otherwise fully
+    // transparent icon pixels are treated as black (0,0,0,0) and appear as
+    // black rectangles.
+    uint16_t alpha = c32.ch.alpha;
+    uint16_t red = (uint16_t)((c32.ch.red * alpha + 255U * (255U - alpha)) / 255U);
+    uint16_t green = (uint16_t)((c32.ch.green * alpha + 255U * (255U - alpha)) / 255U);
+    uint16_t blue = (uint16_t)((c32.ch.blue * alpha + 255U * (255U - alpha)) / 255U);
+
+    uint16_t gray = red * 76U + green * 150U + blue * 30U;
     uint8_t gray4 = (uint8_t)(((gray >> 8) + 8U) >> 4);
     return gray4 > 0x0F ? 0x0F : gray4;
 }
@@ -297,14 +310,25 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
     }
 
     if(disp_flush_enabled) {
-        if (framebuffer_mutex && xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(20)) != pdTRUE) {
-            lv_disp_flush_ready(disp);
-            return;
+        if (framebuffer_mutex) {
+            while (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+                // Never drop a LVGL flush area; wait and retry so a frame
+                // cannot be left partially updated.
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
         }
         int32_t w = lv_area_get_width(area);
         int32_t h = lv_area_get_height(area);
         int32_t screen_w = epd_rotated_display_width();
         int32_t screen_h = epd_rotated_display_height();
+
+        // For full-screen flushes, reset the 4bpp staging buffer first.
+        // This prevents stale pixels from previous frames when LVGL draw
+        // output contains transparent regions or skipped primitives.
+        if (area->x1 == 0 && area->y1 == 0 &&
+            area->x2 == (screen_w - 1) && area->y2 == (screen_h - 1)) {
+            memset(decodebuffer, 0xFF, EPD_IMAGE_BUF_SIZE);
+        }
 
 #if 0   // Mirror screen or not
         for(int i = 0; i < h ; i++) {
@@ -331,19 +355,41 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
             xSemaphoreGive(framebuffer_mutex);
         }
         framebuffer_dirty = true;
-        // printf("[disp_flush] x1:%d, y1:%d, w:%d, h:%d\n", area->x1, area->y1, w, h);
-    }
-    if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) 
-    {
-        disp_flush_pending = true;
-    } 
-    else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
-    {
-        disp_flush_pending = true;
-    } 
-    else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
-    {
-        disp_flush_pending = true;
+
+        // Run e-paper update in the flush callback to keep LVGL draw/flush
+        // strictly serialized and avoid cross-task frame races.
+        EpdRect full_area = {
+            .x = 0,
+            .y = 0,
+            .width = epd_rotated_display_width(),
+            .height = epd_rotated_display_height(),
+        };
+        if (displaybuffer) {
+            memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
+        }
+
+        if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
+        {
+            epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+            epd_poweron();
+            checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+            epd_poweroff();
+        }
+        else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
+        {
+            epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+            epd_poweron();
+            checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+            epd_poweroff();
+        }
+        else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
+        {
+            disp_full_refresh();
+            epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+            epd_poweron();
+            checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+            epd_poweroff();
+        }
     }
     /* Inform the graphics library that you are ready with the flushing */
     lv_disp_flush_ready(disp);
