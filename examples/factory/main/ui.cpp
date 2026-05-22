@@ -2786,7 +2786,7 @@ static void create6(lv_obj_t *parent)
     // apply btn
     lv_obj_t *btn = lv_btn_create(parent);
     lv_obj_set_size(btn, 200, 50);
-    lv_obj_align(btn, LV_ALIGN_BOTTOM_RIGHT, -40, -120);
+    lv_obj_align_to(btn, wifi_keyboard, LV_ALIGN_OUT_TOP_RIGHT, -40, -10);
     lv_obj_set_style_radius(btn, 10, LV_PART_MAIN);
     lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN);
     epd_style_button(btn);
@@ -2797,6 +2797,7 @@ static void create6(lv_obj_t *parent)
     epd_style_label(label);
     lv_obj_center(label);
     lv_obj_add_event_cb(btn, wifi_apply_settings_event_handler, LV_EVENT_CLICKED, NULL);
+    lv_obj_move_foreground(btn);
     
     //---------------------
     // scr_middle_line(parent);
