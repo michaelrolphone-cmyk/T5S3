@@ -212,6 +212,8 @@ static void disp_flush_task(void *param)
 {
     (void)param;
     while (1) {
+        // Wait for any producer to notify there is new framebuffer data.
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
         if (disp_flush_pending) {
             disp_flush_pending = false;
             framebuffer_dirty = false;
@@ -261,6 +263,7 @@ static void disp_flush_task(void *param)
 
             if (framebuffer_dirty) {
                 disp_flush_pending = true;
+                xTaskNotifyGive(disp_flush_handle);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(2));
@@ -357,14 +360,17 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
     if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) 
     {
         disp_flush_pending = true;
+        if (disp_flush_handle) xTaskNotifyGive(disp_flush_handle);
     } 
     else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
     {
         disp_flush_pending = true;
+        if (disp_flush_handle) xTaskNotifyGive(disp_flush_handle);
     } 
     else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
     {
         disp_flush_pending = true;
+        if (disp_flush_handle) xTaskNotifyGive(disp_flush_handle);
     }
     /* Inform the graphics library that you are ready with the flushing */
     lv_disp_flush_ready(disp);
