@@ -355,22 +355,41 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
             xSemaphoreGive(framebuffer_mutex);
         }
         framebuffer_dirty = true;
-        // printf("[disp_flush] x1:%d, y1:%d, w:%d, h:%d\n", area->x1, area->y1, w, h);
-    }
-    if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) 
-    {
-        disp_flush_pending = true;
-        if (disp_flush_handle) xTaskNotifyGive(disp_flush_handle);
-    } 
-    else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
-    {
-        disp_flush_pending = true;
-        if (disp_flush_handle) xTaskNotifyGive(disp_flush_handle);
-    } 
-    else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
-    {
-        disp_flush_pending = true;
-        if (disp_flush_handle) xTaskNotifyGive(disp_flush_handle);
+
+        // Run e-paper update in the flush callback to keep LVGL draw/flush
+        // strictly serialized and avoid cross-task frame races.
+        EpdRect full_area = {
+            .x = 0,
+            .y = 0,
+            .width = epd_rotated_display_width(),
+            .height = epd_rotated_display_height(),
+        };
+        if (displaybuffer) {
+            memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
+        }
+
+        if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
+        {
+            epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+            epd_poweron();
+            checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+            epd_poweroff();
+        }
+        else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
+        {
+            epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+            epd_poweron();
+            checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+            epd_poweroff();
+        }
+        else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
+        {
+            disp_full_refresh();
+            epd_draw_rotated_image(full_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+            epd_poweron();
+            checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+            epd_poweroff();
+        }
     }
     /* Inform the graphics library that you are ready with the flushing */
     lv_disp_flush_ready(disp);
