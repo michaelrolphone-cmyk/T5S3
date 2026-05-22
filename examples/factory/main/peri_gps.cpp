@@ -24,6 +24,7 @@ uint8_t gps_hour=0, gps_minute=0, gps_second=0;
 static uint32_t gps_vsat=0;
 static bool gps_ready = false;
 static int gps_last_sync_minute = -1;
+static uint32_t last_gps_diag_ms = 0;
 
 uint8_t buffer[256];
 
@@ -84,6 +85,18 @@ void gps_task(void *param)
             }
         }
 
+        if (millis() - last_gps_diag_ms > 10000) {
+            last_gps_diag_ms = millis();
+            Serial.printf("[GPS] chars=%lu fix_valid=%d loc_updated=%d date_valid=%d time_valid=%d sats=%lu sd=%d\n",
+                          gps.charsProcessed(),
+                          gps.location.isValid(),
+                          gps.location.isUpdated(),
+                          gps.date.isValid(),
+                          gps.time.isValid(),
+                          gps.satellites.isValid() ? gps.satellites.value() : 0,
+                          peri_buf[E_PERI_SD_CARD]);
+        }
+
         if (millis() > 30000 && gps.charsProcessed() < 10) {
             Serial.println(F("No GPS detected: check wiring."));
             delay(1000);
@@ -106,6 +119,7 @@ void gps_task_create(void)
     }
 
     gps_ready = true;
+    Serial.println("[GPS] task running; CSV logging active when valid fixes arrive");
 }
 
 uint32_t gps_get_charsProcessed(void)
@@ -378,6 +392,11 @@ static bool gps_csv_make_timestamp(char *out, size_t out_len)
 
 static void gps_csv_append_fix(double lat, double lon, double speed_kmph, uint32_t satellites)
 {
+    if (!gps.location.isValid()) {
+        Serial.println("[GPS CSV] skipped fix because location is invalid");
+        return;
+    }
+
     if (!gps_csv_ensure_dir()) {
         return;
     }
