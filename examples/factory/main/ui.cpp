@@ -3339,8 +3339,9 @@ static void entry10(void) {
 }
 static void exit10(void) 
 {
-    ui_gps_task_suspend();
-
+    // Do not suspend GPS here. GPS logging is a background service and must continue after leaving the GPS screen.
+    // Keep GPS running in the background so CSV logging continues whenever the device is on.
+    // Only stop the UI refresh timer when leaving the GPS screen.
     if(GPS_loop_timer) {
         lv_timer_del(GPS_loop_timer);
         GPS_loop_timer = NULL;
