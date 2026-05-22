@@ -3120,7 +3120,7 @@ static bool md_is_ordered_list(const char *line, size_t line_len, size_t *conten
 {
     size_t i = 0;
     while(i < line_len && line[i] >= '0' && line[i] <= '9') i++;
-    if(i > 0 && i + 1 < line_len && line[i] == '.' && line[i + 1] == ' ') {
+    if(i > 0 && i + 1 < line_len && (line[i] == '.' || line[i] == ')') && line[i + 1] == ' ') {
         if(content_start) *content_start = i + 2;
         return true;
     }
@@ -3143,42 +3143,65 @@ static void md_add_text_span(const char *txt, const lv_font_t *font)
     lv_span_set_text(sp, txt);
 }
 
-static void md_add_line_with_bold(const char *line, size_t len, const lv_font_t *normal_font, const lv_font_t *bold_font)
+static void md_add_line_markdown_inline(const char *line, size_t len, const lv_font_t *normal_font, const lv_font_t *bold_font)
 {
     size_t i = 0;
     while(i < len) {
-        const char *mark = NULL;
-        for(size_t j = i; j + 1 < len; ++j) {
-            if(line[j] == '*' && line[j + 1] == '*') { mark = &line[j]; break; }
+        if(i + 1 < len && line[i] == '*' && line[i + 1] == '*') {
+            size_t end = i + 2;
+            while(end + 1 < len && !(line[end] == '*' && line[end + 1] == '*')) end++;
+            if(end + 1 < len) {
+                char bold_part[512];
+                lv_snprintf(bold_part, sizeof(bold_part), "%.*s", (int)(end - (i + 2)), &line[i + 2]);
+                md_add_text_span(bold_part, bold_font);
+                i = end + 2;
+                continue;
+            }
         }
-        if(!mark) {
-            char part[512];
-            lv_snprintf(part, sizeof(part), "%.*s", (int)(len - i), &line[i]);
-            md_add_text_span(part, normal_font);
-            break;
+
+        if(line[i] == '`') {
+            size_t end = i + 1;
+            while(end < len && line[end] != '`') end++;
+            if(end < len) {
+                char code_part[512];
+                lv_snprintf(code_part, sizeof(code_part), "%.*s", (int)(end - (i + 1)), &line[i + 1]);
+                md_add_text_span(code_part, &Font_Mono_Bold_20);
+                i = end + 1;
+                continue;
+            }
         }
-        size_t mark_idx = (size_t)(mark - line);
-        if(mark_idx > i) {
-            char part[512];
-            lv_snprintf(part, sizeof(part), "%.*s", (int)(mark_idx - i), &line[i]);
-            md_add_text_span(part, normal_font);
+
+        if(line[i] == '*') {
+            size_t end = i + 1;
+            while(end < len && line[end] != '*') end++;
+            if(end < len) {
+                char italic_part[512];
+                lv_snprintf(italic_part, sizeof(italic_part), "%.*s", (int)(end - (i + 1)), &line[i + 1]);
+                md_add_text_span(italic_part, normal_font);
+                i = end + 1;
+                continue;
+            }
         }
-        size_t end = mark_idx + 2;
-        const char *close = NULL;
-        for(size_t j = end; j + 1 < len; ++j) {
-            if(line[j] == '*' && line[j + 1] == '*') { close = &line[j]; break; }
+
+        if(line[i] == '[') {
+            size_t close_bracket = i + 1;
+            while(close_bracket < len && line[close_bracket] != ']') close_bracket++;
+            if(close_bracket + 1 < len && line[close_bracket + 1] == '(') {
+                size_t close_paren = close_bracket + 2;
+                while(close_paren < len && line[close_paren] != ')') close_paren++;
+                if(close_paren < len) {
+                    char link_text[512];
+                    lv_snprintf(link_text, sizeof(link_text), "%.*s", (int)(close_bracket - (i + 1)), &line[i + 1]);
+                    md_add_text_span(link_text, bold_font);
+                    i = close_paren + 1;
+                    continue;
+                }
+            }
         }
-        if(!close) {
-            char part[512];
-            lv_snprintf(part, sizeof(part), "%.*s", (int)(len - mark_idx), &line[mark_idx]);
-            md_add_text_span(part, normal_font);
-            break;
-        }
-        size_t close_idx = (size_t)(close - line);
-        char bold_part[512];
-        lv_snprintf(bold_part, sizeof(bold_part), "%.*s", (int)(close_idx - end), &line[end]);
-        md_add_text_span(bold_part, bold_font);
-        i = close_idx + 2;
+
+        char ch[2] = {line[i], '\0'};
+        md_add_text_span(ch, normal_font);
+        i++;
     }
 }
 
@@ -3255,7 +3278,6 @@ static void md_render_to_spangroup(const char *text)
     }
 
     const char *line = text;
-    bool first_header = true;
     bool in_code_block = false;
     while(*line) {
         const char *line_end = strchr(line, '\n');
@@ -3285,9 +3307,16 @@ static void md_render_to_spangroup(const char *text)
                 content_len = line_len - content_offset;
             } else if(md_is_ordered_list(line, line_len, &content_offset)) {
                 char prefix[24];
-                lv_snprintf(prefix, sizeof(prefix), "%.*s. ", (int)(content_offset - 2), line);
+                lv_snprintf(prefix, sizeof(prefix), "%.*s ", (int)(content_offset - 1), line);
                 md_add_text_span(prefix, &Font_Geist_Light_20);
                 content_len = line_len - content_offset;
+            } else if(line_len > 1 && line[0] == '>' && line[1] == ' ') {
+                md_add_text_span("│ ", &Font_Geist_Light_20);
+                content_offset = 2;
+                content_len = line_len - content_offset;
+            } else if(line_len >= 3 && ((line[0] == '-' && line[1] == '-' && line[2] == '-') || (line[0] == '*' && line[1] == '*' && line[2] == '*'))) {
+                md_add_text_span("--------------------------------\n", &Font_Mono_Bold_20);
+                goto next_line;
             } else if(line_len > 0 && line[0] == '|') {
                 table = true;
                 content_offset = 0;
@@ -3295,10 +3324,9 @@ static void md_render_to_spangroup(const char *text)
         }
 
         if(header) {
-            if(!first_header) md_add_text_span("\n", &Font_Geist_Light_20);
-            md_add_line_with_bold(&line[content_offset], content_len, md_header_font_from_level(hashes), md_header_font_from_level(hashes));
-            md_add_text_span("\n\n", &Font_Geist_Light_20);
-            first_header = false;
+            // Preserve markdown line structure: one source line -> one rendered newline.
+            md_add_line_markdown_inline(&line[content_offset], content_len, md_header_font_from_level(hashes), md_header_font_from_level(hashes));
+            md_add_text_span("\n", &Font_Geist_Light_20);
         } else if(in_code_block) {
             char code_line[512];
             lv_snprintf(code_line, sizeof(code_line), "%.*s\n", (int)line_len, line);
@@ -3308,7 +3336,7 @@ static void md_render_to_spangroup(const char *text)
             lv_snprintf(table_line, sizeof(table_line), "%.*s\n", (int)line_len, line);
             md_add_text_span(table_line, &Font_Mono_Bold_20);
         } else {
-            md_add_line_with_bold(&line[content_offset], content_len, &Font_Geist_Light_20, &Font_Geist_Bold_20);
+            md_add_line_markdown_inline(&line[content_offset], content_len, &Font_Geist_Light_20, &Font_Geist_Bold_20);
             md_add_text_span("\n", &Font_Geist_Light_20);
         }
 
