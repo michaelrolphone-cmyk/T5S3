@@ -1446,7 +1446,7 @@ static void read_img_btn_event(lv_event_t * e)
     }
 
     if(strncmp(full_path, "FS:", 3) == 0 &&
-       (strstr(&full_path[3], ".md") || strstr(&full_path[3], ".markdown"))) {
+       (strstr(&full_path[3], ".md") || strstr(&full_path[3], ".markdown") || strstr(&full_path[3], ".txt") || strstr(&full_path[3], ".html") || strstr(&full_path[3], ".htm") || strstr(&full_path[3], ".csv"))) {
         lv_snprintf(md_open_path, sizeof(md_open_path), "%s", &full_path[3]);
         scr_mgr_push(SCREEN11_ID, false);
         return;
@@ -3054,6 +3054,8 @@ static lv_obj_t *md_cont = NULL;
 static lv_obj_t *md_label = NULL;
 static lv_obj_t *md_span = NULL;
 static char md_text_buf[4096] = {0};
+typedef enum { DOC_TYPE_MD = 0, DOC_TYPE_TEXT, DOC_TYPE_HTML, DOC_TYPE_CSV } doc_type_t;
+static doc_type_t md_doc_type = DOC_TYPE_MD;
 
 static const lv_font_t *md_header_font_from_level(int level)
 {
@@ -3063,6 +3065,82 @@ static const lv_font_t *md_header_font_from_level(int level)
         case 3: return &Font_Mono_Bold_25;
         case 4: return &Font_Mono_Bold_20;
         default: return &Font_Geist_Bold_20; // ##### same size as content, bold
+    }
+}
+
+static bool md_is_unordered_list(const char *line, size_t line_len, size_t *content_start)
+{
+    if(line_len < 2) return false;
+    if((line[0] == '-' || line[0] == '*' || line[0] == '+') && line[1] == ' ') {
+        if(content_start) *content_start = 2;
+        return true;
+    }
+    return false;
+}
+
+static bool md_is_ordered_list(const char *line, size_t line_len, size_t *content_start)
+{
+    size_t i = 0;
+    while(i < line_len && line[i] >= '0' && line[i] <= '9') i++;
+    if(i > 0 && i + 1 < line_len && line[i] == '.' && line[i + 1] == ' ') {
+        if(content_start) *content_start = i + 2;
+        return true;
+    }
+    return false;
+}
+
+static bool md_path_ends_with(const char *path, const char *suffix)
+{
+    if(!path || !suffix) return false;
+    size_t path_len = strlen(path), suffix_len = strlen(suffix);
+    if(path_len < suffix_len) return false;
+    return strcasecmp(path + path_len - suffix_len, suffix) == 0;
+}
+
+static void md_add_text_span(const char *txt, const lv_font_t *font)
+{
+    lv_span_t *sp = lv_spangroup_new_span(md_span);
+    lv_style_set_text_font(&sp->style, font);
+    lv_style_set_text_color(&sp->style, lv_color_hex(EPD_COLOR_FG));
+    lv_span_set_text(sp, txt);
+}
+
+static void md_add_line_with_bold(const char *line, size_t len, const lv_font_t *normal_font, const lv_font_t *bold_font)
+{
+    size_t i = 0;
+    while(i < len) {
+        const char *mark = NULL;
+        for(size_t j = i; j + 1 < len; ++j) {
+            if(line[j] == '*' && line[j + 1] == '*') { mark = &line[j]; break; }
+        }
+        if(!mark) {
+            char part[512];
+            lv_snprintf(part, sizeof(part), "%.*s", (int)(len - i), &line[i]);
+            md_add_text_span(part, normal_font);
+            break;
+        }
+        size_t mark_idx = (size_t)(mark - line);
+        if(mark_idx > i) {
+            char part[512];
+            lv_snprintf(part, sizeof(part), "%.*s", (int)(mark_idx - i), &line[i]);
+            md_add_text_span(part, normal_font);
+        }
+        size_t end = mark_idx + 2;
+        const char *close = NULL;
+        for(size_t j = end; j + 1 < len; ++j) {
+            if(line[j] == '*' && line[j + 1] == '*') { close = &line[j]; break; }
+        }
+        if(!close) {
+            char part[512];
+            lv_snprintf(part, sizeof(part), "%.*s", (int)(len - mark_idx), &line[mark_idx]);
+            md_add_text_span(part, normal_font);
+            break;
+        }
+        size_t close_idx = (size_t)(close - line);
+        char bold_part[512];
+        lv_snprintf(bold_part, sizeof(bold_part), "%.*s", (int)(close_idx - end), &line[end]);
+        md_add_text_span(bold_part, bold_font);
+        i = close_idx + 2;
     }
 }
 
@@ -3076,34 +3154,127 @@ static void md_render_to_spangroup(const char *text)
 
     if(text == NULL) return;
 
+    if(md_doc_type == DOC_TYPE_CSV) {
+        const char *line = text;
+        while(*line) {
+            const char *line_end = strchr(line, '\n');
+            size_t line_len = line_end ? (size_t)(line_end - line) : strlen(line);
+            char row[512]; size_t w = 0;
+            for(size_t i = 0; i < line_len && w + 3 < sizeof(row) - 1; ++i) {
+                if(line[i] == ',') { row[w++] = ' '; row[w++] = '|'; row[w++] = ' '; }
+                else row[w++] = line[i];
+            }
+            row[w] = '\0';
+            md_add_text_span(row, &Font_Mono_Bold_20);
+            md_add_text_span("\n", &Font_Mono_Bold_20);
+            if(!line_end) break;
+            line = line_end + 1;
+        }
+        return;
+    }
+
+    if(md_doc_type == DOC_TYPE_HTML) {
+        const char *p = text;
+        bool bold_on = false;
+        bool in_ordered = false;
+        int ol_idx = 1;
+        while(*p) {
+            if(*p == '<') {
+                const char *tag_end = strchr(p, '>');
+                if(!tag_end) break;
+                if(strncasecmp(p, "<h1", 3) == 0) md_add_text_span("\n", &Font_Geist_Light_20);
+                else if(strncasecmp(p, "<h2", 3) == 0) md_add_text_span("\n", &Font_Geist_Light_20);
+                else if(strncasecmp(p, "<h3", 3) == 0) md_add_text_span("\n", &Font_Geist_Light_20);
+                else if(strncasecmp(p, "<h4", 3) == 0) md_add_text_span("\n", &Font_Geist_Light_20);
+                else if(strncasecmp(p, "<h5", 3) == 0) md_add_text_span("\n", &Font_Geist_Light_20);
+                else if(strncasecmp(p, "</h", 3) == 0 || strncasecmp(p, "<p", 2) == 0 || strncasecmp(p, "</p", 3) == 0 || strncasecmp(p, "<br", 3) == 0 || strncasecmp(p, "</tr", 4) == 0 || strncasecmp(p, "<table", 6) == 0 || strncasecmp(p, "</table", 7) == 0) md_add_text_span("\n", &Font_Geist_Light_20);
+                else if(strncasecmp(p, "<ul", 3) == 0 || strncasecmp(p, "</ul", 4) == 0) md_add_text_span("\n", &Font_Geist_Light_20);
+                else if(strncasecmp(p, "<ol", 3) == 0) { in_ordered = true; ol_idx = 1; md_add_text_span("\n", &Font_Geist_Light_20); }
+                else if(strncasecmp(p, "</ol", 4) == 0) { in_ordered = false; md_add_text_span("\n", &Font_Geist_Light_20); }
+                else if(strncasecmp(p, "<li", 3) == 0) {
+                    if(in_ordered) { char n[16]; lv_snprintf(n, sizeof(n), "%d. ", ol_idx++); md_add_text_span(n, &Font_Geist_Light_20); }
+                    else md_add_text_span("• ", &Font_Geist_Light_20);
+                }
+                else if(strncasecmp(p, "</li", 4) == 0) md_add_text_span("\n", &Font_Geist_Light_20);
+                else if(strncasecmp(p, "<td", 3) == 0 || strncasecmp(p, "<th", 3) == 0) {}
+                else if(strncasecmp(p, "</td", 4) == 0 || strncasecmp(p, "</th", 4) == 0) md_add_text_span(" | ", &Font_Mono_Bold_20);
+                else if(strncasecmp(p, "<b>", 3) == 0 || strncasecmp(p, "<strong", 7) == 0) bold_on = true;
+                else if(strncasecmp(p, "</b>", 4) == 0 || strncasecmp(p, "</strong", 9) == 0) bold_on = false;
+                p = tag_end + 1;
+                continue;
+            }
+            const char *txt_end = strchr(p, '<');
+            size_t len = txt_end ? (size_t)(txt_end - p) : strlen(p);
+            if(len > 0) {
+                char seg[512];
+                lv_snprintf(seg, sizeof(seg), "%.*s", (int)len, p);
+                md_add_text_span(seg, bold_on ? &Font_Geist_Bold_20 : &Font_Geist_Light_20);
+            }
+            if(!txt_end) break;
+            p = txt_end;
+        }
+        return;
+    }
+
     const char *line = text;
+    bool first_header = true;
+    bool in_code_block = false;
     while(*line) {
         const char *line_end = strchr(line, '\n');
         size_t line_len = line_end ? (size_t)(line_end - line) : strlen(line);
 
-        int hashes = 0;
-        while(hashes < (int)line_len && hashes < 5 && line[hashes] == '#') hashes++;
         bool header = false;
-        const char *content = line;
+        bool table = false;
+        size_t content_offset = 0;
         size_t content_len = line_len;
-        if(hashes > 0 && hashes < (int)line_len && line[hashes] == ' ') {
-            header = true;
-            content = &line[hashes + 1];
-            content_len = line_len - (size_t)hashes - 1;
+        int hashes = 0;
+
+        if(line_len >= 3 && strncmp(line, "```", 3) == 0) {
+            in_code_block = !in_code_block;
+            md_add_text_span("\n", &Font_Geist_Light_20);
+            goto next_line;
         }
 
-        lv_span_t *sp = lv_spangroup_new_span(md_span);
+        if(!in_code_block) {
+            while(hashes < (int)line_len && hashes < 5 && line[hashes] == '#') hashes++;
+            if(hashes > 0 && hashes < (int)line_len && line[hashes] == ' ') {
+                header = true;
+                content_offset = (size_t)hashes + 1;
+                content_len = line_len - content_offset;
+            } else if(md_is_unordered_list(line, line_len, &content_offset)) {
+                char bullet[8] = "• ";
+                md_add_text_span(bullet, &Font_Geist_Light_20);
+                content_len = line_len - content_offset;
+            } else if(md_is_ordered_list(line, line_len, &content_offset)) {
+                char prefix[24];
+                lv_snprintf(prefix, sizeof(prefix), "%.*s. ", (int)(content_offset - 2), line);
+                md_add_text_span(prefix, &Font_Geist_Light_20);
+                content_len = line_len - content_offset;
+            } else if(line_len > 0 && line[0] == '|') {
+                table = true;
+                content_offset = 0;
+            }
+        }
+
         if(header) {
-            lv_span_set_text_static(sp, "");
-            lv_style_set_text_font(&sp->style, md_header_font_from_level(hashes));
+            if(!first_header) md_add_text_span("\n", &Font_Geist_Light_20);
+            md_add_line_with_bold(&line[content_offset], content_len, md_header_font_from_level(hashes), md_header_font_from_level(hashes));
+            md_add_text_span("\n\n", &Font_Geist_Light_20);
+            first_header = false;
+        } else if(in_code_block) {
+            char code_line[512];
+            lv_snprintf(code_line, sizeof(code_line), "%.*s\n", (int)line_len, line);
+            md_add_text_span(code_line, &Font_Mono_Bold_20);
+        } else if(table) {
+            char table_line[512];
+            lv_snprintf(table_line, sizeof(table_line), "%.*s\n", (int)line_len, line);
+            md_add_text_span(table_line, &Font_Mono_Bold_20);
         } else {
-            lv_style_set_text_font(&sp->style, &Font_Geist_Light_20);
+            md_add_line_with_bold(&line[content_offset], content_len, &Font_Geist_Light_20, &Font_Geist_Bold_20);
+            md_add_text_span("\n", &Font_Geist_Light_20);
         }
-        lv_style_set_text_color(&sp->style, lv_color_hex(EPD_COLOR_FG));
-        char span_line[512];
-        lv_snprintf(span_line, sizeof(span_line), "%.*s\n", (int)content_len, content);
-        lv_span_set_text(sp, span_line);
 
+next_line:
         if(!line_end) break;
         line = line_end + 1;
     }
@@ -3119,6 +3290,7 @@ static void scr11_btn_event_cb(lv_event_t * e)
 static void md_load_file(const char *path)
 {
     md_text_buf[0] = '\0';
+    md_doc_type = DOC_TYPE_MD;
     if(path == NULL || path[0] == '\0') {
         lv_snprintf(md_text_buf, sizeof(md_text_buf), "No markdown file selected from SD browser.");
         return;
@@ -3135,6 +3307,9 @@ static void md_load_file(const char *path)
     }
     md_text_buf[idx] = '\0';
     f.close();
+    if(md_path_ends_with(path, ".txt")) md_doc_type = DOC_TYPE_TEXT;
+    else if(md_path_ends_with(path, ".html") || md_path_ends_with(path, ".htm")) md_doc_type = DOC_TYPE_HTML;
+    else if(md_path_ends_with(path, ".csv")) md_doc_type = DOC_TYPE_CSV;
 }
 
 static void create11(lv_obj_t *parent)
