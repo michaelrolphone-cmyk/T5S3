@@ -24,6 +24,7 @@ void ui_nvs_set_defaulat_param(void)
     ui_setting_backlight = nvs_param_get_u8(NVS_ID_BACKLIGHT);
     epd_vcom_default = nvs_param_get_u16(NVS_ID_EPD_VCOM);
     refresh_mode = nvs_param_get_u8(NVS_ID_REFRESH_MODE);
+    refresh_mode = UI_REFRESH_MODE_NORMAL;
 
     printf("ui_setting_backlight = %d\n", ui_setting_backlight );
     printf("epd_vcom_default = %d\n", epd_vcom_default );
