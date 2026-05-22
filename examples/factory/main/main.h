@@ -83,6 +83,7 @@ void disp_full_refresh(void);
 void disp_full_clean(void);
 void dips_clean(void);
 void disp_refresh_screen(void);
+void disp_request_full_clear(void);
 
 void indev_touch_en();
 void indev_touch_dis();

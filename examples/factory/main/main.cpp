@@ -72,6 +72,7 @@ static volatile uint32_t touch_ignore_start_ms = 0;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
+static volatile bool disp_force_clear_next_flush = false;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 
@@ -326,6 +327,20 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         int32_t h = lv_area_get_height(area);
         int32_t screen_w = epd_rotated_display_width();
         int32_t screen_h = epd_rotated_display_height();
+        bool full_area =
+            area->x1 == 0 &&
+            area->y1 == 0 &&
+            area->x2 == screen_w - 1 &&
+            area->y2 == screen_h - 1;
+        Serial.printf("[LVGL flush] full=%d force_clear=%d area=(%d,%d)-(%d,%d) w=%d h=%d\n",
+                      full_area, disp_force_clear_next_flush,
+                      area->x1, area->y1, area->x2, area->y2,
+                      w, h);
+        if (disp_force_clear_next_flush || full_area) {
+            memset(decodebuffer, 0x00, EPD_IMAGE_BUF_SIZE);
+            disp_force_clear_next_flush = false;
+            Serial.printf("[LVGL flush] logical framebuffer cleared full=%d\n", full_area);
+        }
 
         for(int32_t y = 0; y < h; y++) {
             int32_t dst_y = area->y1 + y;
@@ -339,9 +354,6 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
                 epd_image_set_pixel_4bpp(decodebuffer, screen_w, dst_x, dst_y, gray4);
             }
         }
-        Serial.printf("[LVGL flush] area=(%d,%d)-(%d,%d) w=%d h=%d\n",
-                      area->x1, area->y1, area->x2, area->y2,
-                      lv_area_get_width(area), lv_area_get_height(area));
         if (framebuffer_mutex) {
             xSemaphoreGive(framebuffer_mutex);
         }
@@ -350,6 +362,11 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
 
     disp_flush_pending = true;
     lv_disp_flush_ready(disp);
+}
+
+void disp_request_full_clear(void)
+{
+    disp_force_clear_next_flush = true;
 }
 
 static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
