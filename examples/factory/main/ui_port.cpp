@@ -556,6 +556,18 @@ void ui_gps_get_speed(double *speed)
 {
     gps_get_speed(speed);
 }
+bool ui_gps_is_ready(void)
+{
+    return gps_is_ready();
+}
+bool ui_gps_has_serial_data(void)
+{
+    return gps_has_serial_data();
+}
+bool ui_gps_has_fix(void)
+{
+    return gps_has_fix();
+}
 
 //************************************[ screen 8 ]****************************************** shutdown
 void ui_shutdown_vcom(int v)
