@@ -4013,6 +4013,7 @@ static bool maps_render_png_magic_ok = false;
 static bool maps_render_from_cache = false;
 static char maps_render_path[128] = {0};
 static PNG maps_png_decoder;
+static const int MAPS_TILE_SIZE = 256;
 
 static bool maps_coord_valid(double lat, double lon)
 {
@@ -4032,8 +4033,8 @@ static void maps_tile_for(double lat,double lon,int z,int *tx,int *ty,int *px,in
     double y=(1.0-log(tan(r)+1.0/cos(r))/M_PI)/2.0*n;
     int ix=(int)floor(x), iy=(int)floor(y);
     if(ix<0)ix=0; if(iy<0)iy=0; if(ix>= (int)n) ix=(int)n-1; if(iy>=(int)n) iy=(int)n-1;
-    int ipx=(int)floor((x-ix)*256.0), ipy=(int)floor((y-iy)*256.0);
-    if(ipx<0)ipx=0; if(ipx>255)ipx=255; if(ipy<0)ipy=0; if(ipy>255)ipy=255;
+    int ipx=(int)floor((x-ix)*MAPS_TILE_SIZE), ipy=(int)floor((y-iy)*MAPS_TILE_SIZE);
+    if(ipx<0)ipx=0; if(ipx>=MAPS_TILE_SIZE)ipx=MAPS_TILE_SIZE-1; if(ipy<0)ipy=0; if(ipy>=MAPS_TILE_SIZE)ipy=MAPS_TILE_SIZE-1;
     *tx=ix;*ty=iy;*px=ipx;*py=ipy;
 }
 
@@ -4112,7 +4113,7 @@ static bool maps_decode_png_to_canvas(const char *path, String &decode_result)
     auto maps_png_draw_cb = [](PNGDRAW *pDraw) -> int {
         if (!pDraw || !maps_canvas_buf || !maps_png_line_buf) return 0;
         maps_png_decoder.getLineAsRGB565(pDraw, maps_png_line_buf, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
-        for (int x = 0; x < pDraw->iWidth && x < 256; ++x) {
+        for (int x = 0; x < pDraw->iWidth && x < MAPS_TILE_SIZE; ++x) {
             uint16_t c = maps_png_line_buf[x];
             int r = ((c >> 11) & 0x1F) * 255 / 31;
             int g = ((c >> 5) & 0x3F) * 255 / 63;
@@ -4120,20 +4121,20 @@ static bool maps_decode_png_to_canvas(const char *path, String &decode_result)
             int gray = (299 * r + 587 * g + 114 * b) / 1000;
             bool black = gray < 180;
             if (black) maps_nonwhite_pixels++;
-            if (pDraw->y >= 0 && pDraw->y < 256) {
-                maps_canvas_buf[pDraw->y * 256 + x] = black ? lv_color_black() : lv_color_white();
+            if (pDraw->y >= 0 && pDraw->y < MAPS_TILE_SIZE) {
+                maps_canvas_buf[pDraw->y * MAPS_TILE_SIZE + x] = black ? lv_color_black() : lv_color_white();
             }
         }
         return 1;
     };
     int rc = maps_png_decoder.openRAM(maps_png_raw, (int)maps_png_raw_size, maps_png_draw_cb);
     if (rc != PNG_SUCCESS) { decode_result = "open_png_failed"; return false; }
-    if (maps_png_decoder.getWidth() != 256 || maps_png_decoder.getHeight() != 256) { maps_png_decoder.close(); decode_result = "tile_not_256"; return false; }
+    if (maps_png_decoder.getWidth() != MAPS_TILE_SIZE || maps_png_decoder.getHeight() != MAPS_TILE_SIZE) { maps_png_decoder.close(); decode_result = "tile_not_256"; return false; }
     maps_nonwhite_pixels = 0;
     rc = maps_png_decoder.decode(NULL, 0);
     maps_png_decoder.close();
     if (rc != PNG_SUCCESS) { decode_result = "decode_failed"; return false; }
-    lv_canvas_set_buffer(maps_canvas, maps_canvas_buf, 256, 256, LV_IMG_CF_TRUE_COLOR);
+    lv_canvas_set_buffer(maps_canvas, maps_canvas_buf, MAPS_TILE_SIZE, MAPS_TILE_SIZE, LV_IMG_CF_TRUE_COLOR);
     lv_obj_invalidate(maps_canvas);
     decode_result = "ok";
     Serial.printf("[MAP] nonwhite_pixels=%d\n", maps_nonwhite_pixels);
@@ -4227,30 +4228,30 @@ static void create13(lv_obj_t *p){
     scr_back_btn_create(p, "Maps", maps_back);
     maps_status=lv_label_create(p); lv_obj_align(maps_status, LV_ALIGN_TOP_LEFT, 20, 80); lv_obj_set_width(maps_status, lv_pct(95));
     maps_canvas=lv_canvas_create(p);
-    lv_obj_set_size(maps_canvas, 256, 256);
+    lv_obj_set_size(maps_canvas, MAPS_TILE_SIZE, MAPS_TILE_SIZE);
     lv_obj_set_style_bg_color(maps_canvas, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(maps_canvas, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(maps_canvas, 2, 0);
     lv_obj_set_style_border_color(maps_canvas, lv_color_black(), 0);
     lv_obj_align(maps_canvas, LV_ALIGN_TOP_MID, 0, 130);
-    if (!maps_canvas_buf) maps_canvas_buf = (lv_color_t *)ps_malloc(256 * 256 * sizeof(lv_color_t));
-    if (!maps_png_line_buf) maps_png_line_buf = (uint16_t *)ps_malloc(256 * sizeof(uint16_t));
+    if (!maps_canvas_buf) maps_canvas_buf = (lv_color_t *)ps_malloc(MAPS_TILE_SIZE * MAPS_TILE_SIZE * sizeof(lv_color_t));
+    if (!maps_png_line_buf) maps_png_line_buf = (uint16_t *)ps_malloc(MAPS_TILE_SIZE * sizeof(uint16_t));
     if (!maps_canvas_buf || !maps_png_line_buf) {
         if (!maps_canvas_buf) Serial.println("[MAP] maps_canvas_buf allocation failed");
         if (!maps_png_line_buf) Serial.println("[MAP] maps_png_line_buf allocation failed");
         maps_set_status("Map buffer allocation failed");
     }
     if (maps_canvas_buf) {
-        lv_canvas_set_buffer(maps_canvas, maps_canvas_buf, 256, 256, LV_IMG_CF_TRUE_COLOR);
+        lv_canvas_set_buffer(maps_canvas, maps_canvas_buf, MAPS_TILE_SIZE, MAPS_TILE_SIZE, LV_IMG_CF_TRUE_COLOR);
         lv_canvas_fill_bg(maps_canvas, lv_color_white(), LV_OPA_COVER);
         lv_draw_line_dsc_t line; lv_draw_line_dsc_init(&line); line.color = lv_color_black(); line.width = 2;
-        lv_point_t d1[2] = {{0,0},{255,255}}; lv_point_t d2[2] = {{255,0},{0,255}};
+        lv_point_t d1[2] = {{0,0},{MAPS_TILE_SIZE-1,MAPS_TILE_SIZE-1}}; lv_point_t d2[2] = {{MAPS_TILE_SIZE-1,0},{0,MAPS_TILE_SIZE-1}};
         lv_canvas_draw_line(maps_canvas, d1, 2, &line);
         lv_canvas_draw_line(maps_canvas, d2, 2, &line);
         lv_draw_rect_dsc_t rect; lv_draw_rect_dsc_init(&rect); rect.border_color=lv_color_black(); rect.border_width=2; rect.bg_opa=LV_OPA_TRANSP;
-        lv_canvas_draw_rect(maps_canvas, 0, 0, 256, 256, &rect);
+        lv_canvas_draw_rect(maps_canvas, 0, 0, MAPS_TILE_SIZE, MAPS_TILE_SIZE, &rect);
         lv_draw_label_dsc_t lab; lv_draw_label_dsc_init(&lab); lab.color=lv_color_black();
-        lv_canvas_draw_text(maps_canvas, 10, 8, 236, &lab, "MAP RENDER TEST");
+        lv_canvas_draw_text(maps_canvas, 10, 8, MAPS_TILE_SIZE - 20, &lab, "MAP RENDER TEST");
     }
     maps_marker=lv_obj_create(p); lv_obj_set_size(maps_marker, 32, 32); lv_obj_set_style_radius(maps_marker, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_opa(maps_marker, LV_OPA_TRANSP, 0); lv_obj_set_style_border_width(maps_marker, 3, 0);
     maps_info=lv_label_create(p); lv_obj_align(maps_info, LV_ALIGN_BOTTOM_LEFT, 20, -30); lv_obj_set_width(maps_info, lv_pct(95));
