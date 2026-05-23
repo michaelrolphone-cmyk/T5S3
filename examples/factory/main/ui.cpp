@@ -4848,7 +4848,7 @@ static uint8_t *system_sleep_png_raw = NULL;
 static size_t system_sleep_png_raw_size = 0;
 static uint16_t *system_sleep_png_line_buf = NULL;
 static lv_img_dsc_t system_sleep_canvas_dsc = {
-    .header = {.always_zero = 0, .cf = LV_IMG_CF_TRUE_COLOR, .w = (uint32_t)LV_HOR_RES, .h = (uint32_t)LV_VER_RES},
+    .header = {.cf = LV_IMG_CF_TRUE_COLOR, .always_zero = 0, .w = (uint32_t)LV_HOR_RES, .h = (uint32_t)LV_VER_RES},
     .data_size = LV_HOR_RES * LV_VER_RES * sizeof(lv_color_t),
     .data = NULL,
 };
