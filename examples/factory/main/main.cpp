@@ -1423,6 +1423,14 @@ static bool display_have_vbus_provisional(void)
 #define CONFIG_EPD_HARD_CLEAN_MIN_VBAT 0.0f
 #endif
 
+
+static bool display_i2c_heap_ready()
+{
+    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    return (free_internal >= 12 * 1024) && (largest_internal >= 1024);
+}
+
 static bool display_safe_for_hard_clean_boot(void)
 {
     if (peri_buf[E_PERI_BQ25896]) {
@@ -1434,6 +1442,9 @@ static bool display_safe_for_hard_clean_boot(void)
 static bool display_safe_for_hard_clean(void)
 {
     if (!peri_buf[E_PERI_BQ25896]) return false;
+    if (!display_i2c_heap_ready()) {
+        return false;
+    }
     if (display_have_vbus()) return true;
     return battery_25896_get_VBAT() >= CONFIG_EPD_HARD_CLEAN_MIN_VBAT;
 }
@@ -1749,6 +1760,10 @@ static void display_log_power(const char *phase, DisplayUpdateKind kind)
         Serial.printf("[EPD POWER] %s kind=%d bq25896_unavailable\n", phase, (int)kind);
         return;
     }
+    if (!display_i2c_heap_ready()) {
+        Serial.printf("[EPD POWER] %s kind=%d skip_i2c_low_heap\n", phase, (int)kind);
+        return;
+    }
 
     Serial.printf("[EPD POWER] %s kind=%d usb=%d vbus=%.3f vsys=%.3f vbat=%.3f charging=%d\n",
                   phase,
@@ -1765,9 +1780,14 @@ static bool display_safe_for_recovery_clean()
     if (!peri_buf[E_PERI_BQ25896]) return true;
 
     if (!display_safe_for_hard_clean()) {
-        Serial.printf("[EPD POWER] hard clean unsafe: vbat=%.3f threshold=%.3f\n",
-                      battery_25896_get_VBAT(),
-                      (float)CONFIG_EPD_HARD_CLEAN_MIN_VBAT);
+        if (!display_i2c_heap_ready()) {
+            Serial.printf("[EPD POWER] hard clean unsafe: low internal heap threshold=%.3f\n",
+                          (float)CONFIG_EPD_HARD_CLEAN_MIN_VBAT);
+        } else {
+            Serial.printf("[EPD POWER] hard clean unsafe: vbat=%.3f threshold=%.3f\n",
+                          battery_25896_get_VBAT(),
+                          (float)CONFIG_EPD_HARD_CLEAN_MIN_VBAT);
+        }
         return false;
     }
 
