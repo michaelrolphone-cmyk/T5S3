@@ -64,6 +64,7 @@ SensorPCF8563 rtc;
 #define EPD_IMAGE_BUF_SIZE (((epd_rotated_display_width() + 1) / 2) * epd_rotated_display_height())
 uint8_t *decodebuffer = NULL;
 uint8_t *displaybuffer = NULL;
+static constexpr uint8_t EPD_LOGICAL_WHITE_BYTE = 0xFF;
 volatile bool disp_flush_enabled = true;
 volatile bool indev_touch_enabled = true;
 static volatile bool touch_ignore_until_release = false;
@@ -80,6 +81,7 @@ static lv_indev_t *touch_indev = NULL;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
+static volatile bool disp_force_clear_next_flush = false;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 
@@ -313,6 +315,18 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         int32_t h = lv_area_get_height(area);
         int32_t screen_w = epd_rotated_display_width();
         int32_t screen_h = epd_rotated_display_height();
+        bool full_area = (area->x1 == 0 && area->y1 == 0 &&
+                          area->x2 == (screen_w - 1) &&
+                          area->y2 == (screen_h - 1));
+        bool force_clear_this_flush = disp_force_clear_next_flush;
+
+        if (force_clear_this_flush || full_area) {
+            memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
+            disp_force_clear_next_flush = false;
+            Serial.printf("[LVGL flush] logical framebuffer WHITE cleared full=%d force=%d\n",
+                          full_area, force_clear_this_flush);
+            Serial.printf("[LVGL flush] WHITE clear byte=0x%02X\n", EPD_LOGICAL_WHITE_BYTE);
+        }
 
         for(int32_t y = 0; y < h; y++) {
             int32_t dst_y = area->y1 + y;
@@ -351,8 +365,7 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
 
 void disp_request_full_clear(void)
 {
-    // No-op: do not clear decodebuffer here.
-    // Clearing decodebuffer to 0x00 paints black in this 4bpp path.
+    disp_force_clear_next_flush = true;
 }
 
 static void touch_cancel_current_press(const char *reason)
@@ -496,6 +509,12 @@ static void lv_port_disp_init(void)
     lv_color_t *lv_disp_buf_2 = (lv_color_t *)ps_calloc(sizeof(lv_color_t), DISP_BUF_SIZE);
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
+    if (decodebuffer) {
+        memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
+    }
+    if (displaybuffer) {
+        memset(displaybuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
+    }
     framebuffer_mutex = xSemaphoreCreateMutex();
     lv_disp_draw_buf_init(&draw_buf, lv_disp_buf_1, lv_disp_buf_2, DISP_BUF_SIZE);
 
@@ -508,6 +527,7 @@ static void lv_port_disp_init(void)
     disp_drv.draw_buf = &draw_buf;
     disp_drv.full_refresh = 1;
     lv_disp_drv_register(&disp_drv);
+    disp_request_full_clear();
 
     static lv_indev_drv_t indev_drv;
     lv_indev_drv_init(&indev_drv);      /*Basic initialization*/
