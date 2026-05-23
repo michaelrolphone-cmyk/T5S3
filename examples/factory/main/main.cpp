@@ -470,6 +470,11 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
     } else if (!published && requested_kind != DISPLAY_UPDATE_NONE) {
         Serial.printf("[DISPLAY QUEUE ERROR] publish failed; retaining pending replace kind=%d\n", (int)requested_kind);
         Serial.println("[DISPLAY QUEUE] pending kind retained after publish failure");
+        lv_obj_t *act = lv_scr_act();
+        if (act) {
+            lv_obj_invalidate(act);
+        }
+        Serial.printf("[DISPLAY QUEUE] retry scheduled for pending kind=%d\n", (int)requested_kind);
     }
     /* Inform the graphics library that you are ready with the flushing */
     lv_disp_flush_ready(disp);
