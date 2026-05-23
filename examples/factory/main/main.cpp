@@ -35,6 +35,8 @@
 #include "firasans_20.h"
 #include "ui_port.h"
 #include "nvs_param.h"
+#include <PNGdec.h>
+#include <math.h>
 
 char global_buf[GLOBAL_BUF_LEN];
 
@@ -158,6 +160,49 @@ static void release_snapshot(uint32_t seq, uint8_t *snapshot);
 static inline int display_update_kind_priority(DisplayUpdateKind kind);
 static void display_set_next_snapshot_kind(DisplayUpdateKind kind);
 static void ensure_display_flush_task_started(void);
+bool disp_show_sleep_png_from_sd(const char *preferred_path);
+static inline void epd_image_set_pixel_4bpp(uint8_t *buf, int32_t width, int32_t x, int32_t y, uint8_t gray4);
+
+static inline uint8_t rgb565_to_gray4(uint16_t rgb565)
+{
+    uint8_t r = ((rgb565 >> 11) & 0x1F) * 255 / 31;
+    uint8_t g = ((rgb565 >> 5) & 0x3F) * 255 / 63;
+    uint8_t b = (rgb565 & 0x1F) * 255 / 31;
+    uint8_t gray = (uint8_t)((299 * r + 587 * g + 114 * b) / 1000);
+    return (uint8_t)(gray >> 4);
+}
+
+static PNG *sleep_png_decoder_ctx = NULL;
+static uint16_t *sleep_png_line_buf_ctx = NULL;
+static float sleep_png_scale_ctx = 1.0f;
+static int sleep_png_offset_x_ctx = 0;
+static int sleep_png_offset_y_ctx = 0;
+static int sleep_png_screen_w_ctx = 0;
+static int sleep_png_screen_h_ctx = 0;
+
+static int sleep_png_draw_cb(PNGDRAW *pDraw)
+{
+    if (!pDraw || !sleep_png_decoder_ctx || !sleep_png_line_buf_ctx || !decodebuffer) return 0;
+    sleep_png_decoder_ctx->getLineAsRGB565(pDraw, sleep_png_line_buf_ctx, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
+    const int src_y = pDraw->y;
+    int dst_y0 = sleep_png_offset_y_ctx + (int)floorf(src_y * sleep_png_scale_ctx);
+    int dst_y1 = sleep_png_offset_y_ctx + (int)floorf((src_y + 1) * sleep_png_scale_ctx);
+    if (dst_y1 <= dst_y0) dst_y1 = dst_y0 + 1;
+    for (int src_x = 0; src_x < pDraw->iWidth; ++src_x) {
+        uint8_t gray4 = rgb565_to_gray4(sleep_png_line_buf_ctx[src_x]);
+        int dst_x0 = sleep_png_offset_x_ctx + (int)floorf(src_x * sleep_png_scale_ctx);
+        int dst_x1 = sleep_png_offset_x_ctx + (int)floorf((src_x + 1) * sleep_png_scale_ctx);
+        if (dst_x1 <= dst_x0) dst_x1 = dst_x0 + 1;
+        for (int y = dst_y0; y < dst_y1; ++y) {
+            if (y < 0 || y >= sleep_png_screen_h_ctx) continue;
+            for (int x = dst_x0; x < dst_x1; ++x) {
+                if (x < 0 || x >= sleep_png_screen_w_ctx) continue;
+                epd_image_set_pixel_4bpp(decodebuffer, sleep_png_screen_w_ctx, x, y, gray4);
+            }
+        }
+    }
+    return 1;
+}
 
 void sd_guard_init()
 {
@@ -172,6 +217,136 @@ bool sd_guard_lock(uint32_t timeout_ms)
 void sd_guard_unlock()
 {
     if (sd_mutex) xSemaphoreGive(sd_mutex);
+}
+
+bool disp_show_sleep_png_from_sd(const char *preferred_path)
+{
+    if (!peri_buf[E_PERI_SD_CARD] || !decodebuffer || !framebuffer_mutex) {
+        return false;
+    }
+
+    const char *path = (preferred_path && preferred_path[0]) ? preferred_path : "/sleep.png";
+    if (!sd_guard_lock(3000)) {
+        Serial.println("[SLEEP IMG] sd lock timeout");
+        return false;
+    }
+
+    File f = SD.open(path, FILE_READ);
+    if (!f || f.isDirectory()) {
+        sd_guard_unlock();
+        Serial.printf("[SLEEP IMG] open failed: %s\n", path);
+        return false;
+    }
+
+    const size_t png_size = (size_t)f.size();
+    if (png_size < 8 || png_size > (8 * 1024 * 1024)) {
+        f.close();
+        sd_guard_unlock();
+        Serial.printf("[SLEEP IMG] invalid size=%u path=%s\n", (unsigned)png_size, path);
+        return false;
+    }
+
+    uint8_t *png_raw = (uint8_t *)ps_malloc(png_size);
+    if (!png_raw) {
+        f.close();
+        sd_guard_unlock();
+        Serial.println("[SLEEP IMG] raw alloc failed");
+        return false;
+    }
+    const size_t read_n = f.read(png_raw, png_size);
+    f.close();
+    sd_guard_unlock();
+    if (read_n != png_size) {
+        free(png_raw);
+        Serial.println("[SLEEP IMG] short read");
+        return false;
+    }
+
+    const uint8_t png_magic[8] = {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
+    if (memcmp(png_raw, png_magic, sizeof(png_magic)) != 0) {
+        free(png_raw);
+        Serial.println("[SLEEP IMG] invalid png header");
+        return false;
+    }
+
+    const int screen_w = epd_rotated_display_width();
+    const int screen_h = epd_rotated_display_height();
+    uint16_t *line_buf = (uint16_t *)ps_malloc(4096 * sizeof(uint16_t));
+    if (!line_buf) {
+        free(png_raw);
+        Serial.println("[SLEEP IMG] line buffer alloc failed");
+        return false;
+    }
+
+    PNG png;
+    auto open_cb = [](PNGDRAW *pDraw) -> int { (void)pDraw; return 1; };
+    int rc = png.openRAM(png_raw, (int)png_size, open_cb);
+    if (rc != PNG_SUCCESS) {
+        free(line_buf);
+        free(png_raw);
+        Serial.printf("[SLEEP IMG] png open failed rc=%d\n", rc);
+        return false;
+    }
+    int src_w = png.getWidth();
+    int src_h = png.getHeight();
+    png.close();
+    if (src_w <= 0 || src_h <= 0 || src_w > 4096 || src_h > 4096) {
+        free(line_buf);
+        free(png_raw);
+        Serial.printf("[SLEEP IMG] invalid dims %dx%d\n", src_w, src_h);
+        return false;
+    }
+
+    float scale = (float)screen_w / (float)src_w;
+    int scaled_w = screen_w;
+    int scaled_h = (int)((float)src_h * scale);
+    if (scaled_h > screen_h) {
+        scale = (float)screen_h / (float)src_h;
+        scaled_h = screen_h;
+        scaled_w = (int)((float)src_w * scale);
+    }
+    if (scaled_w < 1) scaled_w = 1;
+    if (scaled_h < 1) scaled_h = 1;
+    const int offset_x = (screen_w - scaled_w) / 2;
+    const int offset_y = (screen_h - scaled_h) / 2;
+
+    if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        free(line_buf);
+        free(png_raw);
+        return false;
+    }
+    memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
+
+    sleep_png_decoder_ctx = &png;
+    sleep_png_line_buf_ctx = line_buf;
+    sleep_png_scale_ctx = scale;
+    sleep_png_offset_x_ctx = offset_x;
+    sleep_png_offset_y_ctx = offset_y;
+    sleep_png_screen_w_ctx = screen_w;
+    sleep_png_screen_h_ctx = screen_h;
+
+    rc = png.openRAM(png_raw, (int)png_size, sleep_png_draw_cb);
+    if (rc == PNG_SUCCESS) {
+        rc = png.decode(NULL, 0);
+    }
+    png.close();
+    free(line_buf);
+    free(png_raw);
+
+    if (rc != PNG_SUCCESS) {
+        sleep_png_decoder_ctx = NULL;
+        sleep_png_line_buf_ctx = NULL;
+        xSemaphoreGive(framebuffer_mutex);
+        Serial.printf("[SLEEP IMG] decode failed rc=%d\n", rc);
+        return false;
+    }
+
+    display_commit_frame(DISPLAY_UPDATE_SCREEN_REPLACE, decodebuffer);
+    sleep_png_decoder_ctx = NULL;
+    sleep_png_line_buf_ctx = NULL;
+    xSemaphoreGive(framebuffer_mutex);
+    Serial.printf("[SLEEP IMG] rendered: %s\n", path);
+    return true;
 }
 
 /*********************************************************************************
