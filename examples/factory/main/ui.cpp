@@ -387,8 +387,9 @@ static const springboard_app_registry_entry springboard_apps[] = {
     {"browser","browser",SCREEN12_ID,&img_wifi,1,195,240,"/icons/apps/browser.png",{NULL}},
     {"maps","maps",SCREEN13_ID,&img_gps,1,365,240,"/icons/apps/maps.png",{NULL}},
 };
-static springboard_layout_icon springboard_layout_icons[SPRINGBOARD_MAX_ICONS];
-static springboard_runtime_icon springboard_runtime_icons[SPRINGBOARD_MAX_ICONS];
+static const size_t SPRINGBOARD_LAYOUT_CAPACITY = ARRAY_LEN(springboard_apps);
+static springboard_layout_icon springboard_layout_icons[ARRAY_LEN(springboard_apps)];
+static springboard_runtime_icon springboard_runtime_icons[ARRAY_LEN(springboard_apps)];
 static size_t springboard_layout_count = 0;
 static PNG springboard_png_decoder;
 static lv_color_t *springboard_decode_buf = NULL;
@@ -621,7 +622,7 @@ static const springboard_app_registry_entry *springboard_find_app(const char *ap
 static void springboard_build_default_layout(void)
 {
     springboard_layout_count = 0;
-    for (size_t i = 0; i < ARRAY_LEN(springboard_apps) && springboard_layout_count < SPRINGBOARD_MAX_ICONS; ++i) {
+    for (size_t i = 0; i < ARRAY_LEN(springboard_apps) && springboard_layout_count < SPRINGBOARD_LAYOUT_CAPACITY; ++i) {
         springboard_layout_icon *e = &springboard_layout_icons[springboard_layout_count++];
         memset(e, 0, sizeof(*e));
         e->app = &springboard_apps[i]; e->page = e->app->default_page; e->x = e->app->default_x; e->y = e->app->default_y; e->label = e->app->default_label;
@@ -656,7 +657,7 @@ static void springboard_overlay_json_layout(void)
             const char *app_id = ic["app"] | ""; const springboard_app_registry_entry *app = springboard_find_app(app_id);
             int x = ic["x"] | -1, y = ic["y"] | -1; const char *icon = ic["icon"] | "";
             if (!app) { Serial.printf("[SPRINGBOARD] unknown app=%s\n", app_id); continue; }
-            if (x < 0 || y < 0 || !icon[0] || strlen(icon) >= SPRINGBOARD_MAX_PATH_LEN || springboard_layout_count >= SPRINGBOARD_MAX_ICONS) { Serial.printf("[SPRINGBOARD] skip invalid icon for %s\n", app_id); continue; }
+            if (x < 0 || y < 0 || !icon[0] || strlen(icon) >= SPRINGBOARD_MAX_PATH_LEN || springboard_layout_count >= SPRINGBOARD_LAYOUT_CAPACITY) { Serial.printf("[SPRINGBOARD] skip invalid icon for %s\n", app_id); continue; }
             size_t idx = (size_t)(app - springboard_apps); if (seen[idx]) { Serial.printf("[SPRINGBOARD] duplicate app=%s\n", app_id); continue; }
             springboard_layout_icon *e = &springboard_layout_icons[springboard_layout_count++]; memset(e, 0, sizeof(*e));
             e->app = app; e->page = page; e->x = x; e->y = y; e->label = ic["label"] | app->default_label; lv_snprintf(e->icon_path, sizeof(e->icon_path), "%s", icon);
@@ -666,7 +667,7 @@ static void springboard_overlay_json_layout(void)
             seen[idx] = true;
         }
     }
-    for (size_t i = 0; i < ARRAY_LEN(springboard_apps) && springboard_layout_count < SPRINGBOARD_MAX_ICONS; ++i) {
+    for (size_t i = 0; i < ARRAY_LEN(springboard_apps) && springboard_layout_count < SPRINGBOARD_LAYOUT_CAPACITY; ++i) {
         if (seen[i]) continue;
         springboard_layout_icon *e = &springboard_layout_icons[springboard_layout_count++]; memset(e, 0, sizeof(*e));
         e->app = &springboard_apps[i]; e->page = e->app->default_page; e->x = e->app->default_x; e->y = e->app->default_y; e->label = e->app->default_label;
@@ -867,7 +868,7 @@ static void exit0(void) {
 }
 static void destroy0(void) 
 {
-    for (size_t i = 0; i < SPRINGBOARD_MAX_ICONS; ++i) {
+    for (size_t i = 0; i < ARRAY_LEN(springboard_runtime_icons); ++i) {
         if (springboard_runtime_icons[i].buf) { free(springboard_runtime_icons[i].buf); springboard_runtime_icons[i].buf = NULL; }
         springboard_runtime_icons[i].canvas = NULL;
         springboard_runtime_icons[i].loaded_png = false;
