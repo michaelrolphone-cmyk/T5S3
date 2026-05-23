@@ -1,6 +1,5 @@
 
 #include "scr_mrg.h"
-#include "main.h"
 
 /* 记录所有的屏幕卡片 */ 
 scr_card_t *scr_mgr_head;
@@ -153,9 +152,6 @@ bool scr_mgr_switch(int id, bool anim)  // 清空栈，然后切换到指定 id�
         scr_stack_top = stack_scr;
     }
 
-    Serial.printf("[SCR] request full clear before screen create id=%d\n", tgt_card->id);
-    disp_request_full_clear();
-
     stack_scr = (scr_card_t *)lv_mem_alloc(sizeof(scr_card_t));
     stack_scr->id = tgt_card->id;
     // stack_scr->obj = tgt_card->life->create(NULL);
@@ -170,15 +166,9 @@ bool scr_mgr_switch(int id, bool anim)  // 清空栈，然后切换到指定 id�
     scr_mgr_active(stack_scr); // 设置屏幕卡片为活跃状态
 
     if(scr_anim_sw != LV_SCR_LOAD_ANIM_NONE && anim){
-        Serial.printf("[SCR] request full clear for screen load id=%d\n", stack_scr->id);
-        disp_request_full_clear();
         lv_scr_load_anim(stack_scr->obj, scr_anim_sw, scr_anim_time, 0, true);
-        lv_obj_invalidate(lv_scr_act());
     } else{
-        Serial.printf("[SCR] request full clear for screen load id=%d\n", stack_scr->id);
-        disp_request_full_clear();
         lv_scr_load(stack_scr->obj);
-        lv_obj_invalidate(lv_scr_act());
         if(curr_obj)
             lv_obj_del(curr_obj);
     }
@@ -220,15 +210,9 @@ bool scr_mgr_push(int id, bool anim)
     scr_mgr_active(stack_scr);
 
     if(scr_anim_push != LV_SCR_LOAD_ANIM_NONE && anim){
-        Serial.printf("[SCR] request full clear for screen load id=%d\n", stack_scr->id);
-        disp_request_full_clear();
         lv_scr_load_anim(stack_scr->obj, scr_anim_push, scr_anim_time, 0, false);
-        lv_obj_invalidate(lv_scr_act());
     } else{
-        Serial.printf("[SCR] request full clear for screen load id=%d\n", stack_scr->id);
-        disp_request_full_clear();
         lv_scr_load(stack_scr->obj);
-        lv_obj_invalidate(lv_scr_act());
     }
     return true;
 }
@@ -251,15 +235,9 @@ bool scr_mgr_pop(bool anim)
     scr_mgr_active(dst_item);
 
     if(scr_anim_pop != LV_SCR_LOAD_ANIM_NONE && anim){
-        Serial.printf("[SCR] request full clear for screen load id=%d\n", dst_item->id);
-        disp_request_full_clear();
         lv_scr_load_anim(dst_item->obj, scr_anim_pop, scr_anim_time, 0, true);
-        lv_obj_invalidate(lv_scr_act());
     } else{
-        Serial.printf("[SCR] request full clear for screen load id=%d\n", dst_item->id);
-        disp_request_full_clear();
         lv_scr_load(dst_item->obj);
-        lv_obj_invalidate(lv_scr_act());
         if (cur_obj) {
             lv_obj_del(cur_obj);
         }
