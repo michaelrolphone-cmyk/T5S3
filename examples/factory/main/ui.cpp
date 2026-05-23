@@ -4173,6 +4173,7 @@ static bool maps_download_tile(const char *path, MapsTileProvider provider, int 
     if(code!=200){ http.end(); Serial.printf("[MAP] provider=%s http=%d\n", maps_provider_name(provider), code); return false; }
     WiFiClient *stream=http.getStreamPtr();
     if (!sd_guard_lock(3000)) { http.end(); return false; }
+    if (SD.exists(path)) SD.remove(path);
     File f=SD.open(path, FILE_WRITE);
     if(!f){ sd_guard_unlock(); http.end(); return false;}
     uint8_t buf[512]; int total=0;
