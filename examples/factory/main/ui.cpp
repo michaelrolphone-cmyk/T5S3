@@ -4286,7 +4286,7 @@ static lv_obj_t *maps_tile_canvas[MAPS_GRID_ROWS][MAPS_GRID_COLS] = {};
 static lv_color_t *maps_tile_buf[MAPS_GRID_ROWS][MAPS_GRID_COLS] = {};
 static lv_color_t *maps_decode_tile_dst = NULL;
 static int maps_bw_threshold = 180;
-static MapsTileProvider maps_tile_provider = MAPS_PROVIDER_STADIA_STAMEN_TONER;
+static MapsTileProvider maps_tile_provider = MAPS_PROVIDER_OSM_STANDARD;
 static String maps_stadia_api_key;
 static bool maps_coord_valid(double lat, double lon);
 static const bool MAPS_DEBUG_LOCATION_ENABLE = false;
@@ -4579,7 +4579,7 @@ static void maps_write_debug(const String &dbg_text)
 static bool maps_try_render(double lat,double lon)
 {
     const int zooms[] = {18, 17, 16};
-    const MapsTileProvider providers[] = {MAPS_PROVIDER_STADIA_STAMEN_TONER, MAPS_PROVIDER_CARTO_LIGHT, MAPS_PROVIDER_OSM_STANDARD};
+    const MapsTileProvider providers[] = {MAPS_PROVIDER_OSM_STANDARD, MAPS_PROVIDER_CARTO_LIGHT};
     bool has_sd = peri_buf[E_PERI_SD_CARD];
     if (!has_sd) { maps_show_loading("SD unavailable"); return false; }
     maps_show_loading("Loading map...");
