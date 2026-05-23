@@ -67,10 +67,12 @@ enum {
 typedef void (*ui_indev_read_cb)(int);
 
 struct menu_icon {
-    const void *icon_src;
+    const void *fallback_src;
     const char *icon_str;
     lv_coord_t offs_x;
     lv_coord_t offs_y;
+    const char *png_path;
+    const char *png_alias_path;
 };
 
 enum{

@@ -350,24 +350,155 @@ void ui_list_btn_create(lv_obj_t *parent, lv_event_cb_t event_cb)
 #endif
 //************************************[ screen 0 ]****************************************** menu
 #if 1
+static const int SPRINGBOARD_ICON_W = 96;
+static const int SPRINGBOARD_ICON_H = 96;
+static const size_t SPRINGBOARD_ICON_MAX_PNG_SIZE = 512 * 1024;
+static int springboard_icon_bw_threshold = 180;
+
+struct springboard_runtime_icon {
+    lv_color_t *buf;
+    lv_obj_t *canvas;
+    bool loaded_png;
+    char source_path[96];
+};
+
+/* Expected SD icon files:
+ * /icons/apps/clock.png
+ * /icons/apps/lora.png
+ * /icons/apps/sd_card.png
+ * /icons/apps/gps.png
+ * /icons/apps/reader.png
+ * /icons/apps/wifi.png
+ * /icons/apps/battery.png
+ * /icons/apps/settings.png
+ * /icons/apps/power.png
+ * /icons/apps/sleep.png
+ * /icons/apps/test.png
+ * /icons/apps/browser.png
+ * /icons/apps/maps.png
+ */
 const struct menu_icon icon_buf[] = {
-    {&img_clock,    "clock"   , 45,   45  }, 
-    {&img_lora,     "lora"    , 210,  45  },
-    {&img_sd_card,  "sd card" , 375,  45  },
-    {&img_gps,      "gps"     , 45,   250 },
-    {&img_test,     "Reader"  , 210,  250 },
-    {&img_wifi,     "wifi"    , 375,  250 },
-    {&img_battery,  "battery" , 45,   455 },
+    {&img_clock,    "clock"   , 45,   45,  "/icons/apps/clock.png",   NULL},
+    {&img_lora,     "lora"    , 210,  45,  "/icons/apps/lora.png",    NULL},
+    {&img_sd_card,  "sd card" , 375,  45,  "/icons/apps/sd_card.png", "/icons/apps/sd.png"},
+    {&img_gps,      "gps"     , 45,   250, "/icons/apps/gps.png",     NULL},
+    {&img_test,     "Reader"  , 210,  250, "/icons/apps/reader.png",  "/icons/apps/markdown_reader.png"},
+    {&img_wifi,     "wifi"    , 375,  250, "/icons/apps/wifi.png",    NULL},
+    {&img_battery,  "battery" , 45,   455, "/icons/apps/battery.png", NULL},
 };
 
 const struct menu_icon icon_buf2[] = {
-    {&img_setting,  "setting" , 45,   45  },
-    {&img_shutdown, "shutdown", 210,  45  },
-    {&img_sleep,    "sleep"   , 375,  45  },
-    {&img_test,     "test"    , 45,   250 },
-    {&img_wifi,     "browser" , 210,  250 },
-    {&img_gps,      "maps"    , 375,  250 },
+    {&img_setting,  "setting" , 45,   45,  "/icons/apps/settings.png", "/icons/apps/setting.png"},
+    {&img_shutdown, "shutdown", 210,  45,  "/icons/apps/power.png",    "/icons/apps/shutdown.png"},
+    {&img_sleep,    "sleep"   , 375,  45,  "/icons/apps/sleep.png",    NULL},
+    {&img_test,     "test"    , 45,   250, "/icons/apps/test.png",     NULL},
+    {&img_wifi,     "browser" , 210,  250, "/icons/apps/browser.png",  NULL},
+    {&img_gps,      "maps"    , 375,  250, "/icons/apps/maps.png",     NULL},
 };
+static springboard_runtime_icon springboard_icons_page1[ARRAY_LEN(icon_buf)];
+static springboard_runtime_icon springboard_icons_page2[ARRAY_LEN(icon_buf2)];
+static PNG springboard_png_decoder;
+static lv_color_t *springboard_decode_buf = NULL;
+static uint16_t *springboard_decode_line = NULL;
+static int springboard_decode_src_w = 0;
+static int springboard_decode_src_h = 0;
+static int springboard_decode_draw_w = 0;
+static int springboard_decode_draw_h = 0;
+static int springboard_decode_offset_x = 0;
+static int springboard_decode_offset_y = 0;
+
+static int springboard_png_draw_cb(PNGDRAW *pDraw)
+{
+    if (!pDraw || !springboard_decode_buf || !springboard_decode_line || springboard_decode_src_w <= 0 || springboard_decode_src_h <= 0) return 0;
+    springboard_png_decoder.getLineAsRGB565(pDraw, springboard_decode_line, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
+    if (pDraw->y < 0 || pDraw->y >= springboard_decode_src_h) return 1;
+    int dst_y = springboard_decode_offset_y + ((pDraw->y * springboard_decode_draw_h) / springboard_decode_src_h);
+    if (dst_y < 0 || dst_y >= SPRINGBOARD_ICON_H) return 1;
+    for (int dst_x = 0; dst_x < springboard_decode_draw_w; dst_x++) {
+        int src_x = (dst_x * springboard_decode_src_w) / springboard_decode_draw_w;
+        if (src_x < 0 || src_x >= springboard_decode_src_w) continue;
+        uint16_t c = springboard_decode_line[src_x];
+        uint8_t r = ((c >> 11) & 0x1f) << 3;
+        uint8_t g = ((c >> 5) & 0x3f) << 2;
+        uint8_t b = (c & 0x1f) << 3;
+        int gray = (r * 30 + g * 59 + b * 11) / 100;
+        springboard_decode_buf[dst_y * SPRINGBOARD_ICON_W + springboard_decode_offset_x + dst_x] =
+            (gray < springboard_icon_bw_threshold) ? lv_color_black() : lv_color_white();
+    }
+    return 1;
+}
+
+static bool springboard_icon_png_exists(const char *path)
+{
+    if (!path || !path[0]) return false;
+    int sd_ok = 0;
+    ui_test_get_sd(&sd_ok);
+    if (sd_ok != 1) return false;
+    bool ok = false;
+    sd_guard_lock();
+    if (SD.exists(path)) {
+        File f = SD.open(path, FILE_READ);
+        if (f) {
+            size_t sz = f.size();
+            if (sz >= 8 && sz <= SPRINGBOARD_ICON_MAX_PNG_SIZE) {
+                uint8_t sig[8] = {0};
+                if (f.read(sig, sizeof(sig)) == sizeof(sig)) {
+                    const uint8_t png_magic[8] = {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
+                    ok = (memcmp(sig, png_magic, sizeof(sig)) == 0);
+                }
+            }
+            f.close();
+        }
+    }
+    sd_guard_unlock();
+    return ok;
+}
+
+static bool springboard_decode_png_to_buf(const char *path, lv_color_t *dst, char *reason, size_t reason_len)
+{
+    if (!path || !dst) { lv_snprintf(reason, reason_len, "invalid_argument"); return false; }
+    memset(dst, 0xFF, SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t));
+    sd_guard_lock();
+    File f = SD.open(path, FILE_READ);
+    if (!f) { sd_guard_unlock(); lv_snprintf(reason, reason_len, "open_failed"); return false; }
+    size_t sz = f.size();
+    if (sz < 8 || sz > SPRINGBOARD_ICON_MAX_PNG_SIZE) { f.close(); sd_guard_unlock(); lv_snprintf(reason, reason_len, "invalid_size"); return false; }
+    uint8_t *raw = (uint8_t *)ps_malloc(sz);
+    if (!raw) { f.close(); sd_guard_unlock(); lv_snprintf(reason, reason_len, "png_raw_alloc_failed"); return false; }
+    size_t n = f.read(raw, sz);
+    f.close();
+    sd_guard_unlock();
+    if (n != sz) { free(raw); lv_snprintf(reason, reason_len, "short_read"); return false; }
+
+    uint16_t *line = (uint16_t *)malloc(SPRINGBOARD_ICON_W * sizeof(uint16_t));
+    if (!line) { free(raw); lv_snprintf(reason, reason_len, "line_alloc_failed"); return false; }
+    int rc = springboard_png_decoder.openRAM(raw, (int)sz, springboard_png_draw_cb);
+    if (rc != PNG_SUCCESS) { free(raw); free(line); lv_snprintf(reason, reason_len, "png_open_failed:%d", rc); return false; }
+    int src_w = springboard_png_decoder.getWidth(), src_h = springboard_png_decoder.getHeight();
+    if (src_w <= 0 || src_h <= 0) { springboard_png_decoder.close(); free(raw); free(line); lv_snprintf(reason, reason_len, "invalid_dim"); return false; }
+    float scale = (float)SPRINGBOARD_ICON_W / (float)src_w;
+    float scale_h = (float)SPRINGBOARD_ICON_H / (float)src_h;
+    if (scale_h < scale) scale = scale_h;
+    springboard_decode_draw_w = (int)(src_w * scale);
+    springboard_decode_draw_h = (int)(src_h * scale);
+    if (springboard_decode_draw_w < 1) springboard_decode_draw_w = 1;
+    if (springboard_decode_draw_h < 1) springboard_decode_draw_h = 1;
+    springboard_decode_offset_x = (SPRINGBOARD_ICON_W - springboard_decode_draw_w) / 2;
+    springboard_decode_offset_y = (SPRINGBOARD_ICON_H - springboard_decode_draw_h) / 2;
+    springboard_decode_src_w = src_w;
+    springboard_decode_src_h = src_h;
+    springboard_decode_buf = dst;
+    springboard_decode_line = line;
+    rc = springboard_png_decoder.decode(NULL, 0);
+    springboard_png_decoder.close();
+    springboard_decode_buf = NULL;
+    springboard_decode_line = NULL;
+    free(raw);
+    free(line);
+    if (rc != PNG_SUCCESS) { lv_snprintf(reason, reason_len, "png_decode_failed:%d", rc); return false; }
+    lv_snprintf(reason, reason_len, "ok");
+    return true;
+}
 
 static lv_obj_t *ui_Panel4;
 static lv_obj_t *menu_screen1;
@@ -586,16 +717,49 @@ static void create0(lv_obj_t *parent)
 
     int icon_buf_len = ARRAY_LEN(icon_buf);
     int icon_buf2_len = ARRAY_LEN(icon_buf2);
+    memset(springboard_icons_page1, 0, sizeof(springboard_icons_page1));
+    memset(springboard_icons_page2, 0, sizeof(springboard_icons_page2));
 
     for(int i = 0; i < icon_buf_len; i++) {
-        lv_obj_t *img = lv_img_create(menu_screen1);
-        lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_bg_opa(img, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_border_width(img, 0, LV_PART_MAIN);
-        lv_obj_set_x(img, icon_buf[i].offs_x);
-        lv_obj_set_y(img, icon_buf[i].offs_y);
-        lv_img_set_src(img, icon_buf[i].icon_src);
-        lv_obj_add_event_cb(img, menu_btn_event, LV_EVENT_CLICKED, (void *)i);
+        const char *path_used = NULL;
+        bool alias_used = false;
+        if (springboard_icon_png_exists(icon_buf[i].png_path)) path_used = icon_buf[i].png_path;
+        else if (springboard_icon_png_exists(icon_buf[i].png_alias_path)) { path_used = icon_buf[i].png_alias_path; alias_used = true; }
+        bool png_loaded = false;
+        if (path_used) {
+            springboard_icons_page1[i].buf = (lv_color_t *)ps_malloc(SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t));
+            if (springboard_icons_page1[i].buf) {
+                char reason[64] = {0};
+                png_loaded = springboard_decode_png_to_buf(path_used, springboard_icons_page1[i].buf, reason, sizeof(reason));
+                if (png_loaded) {
+                    lv_obj_t *canvas = lv_canvas_create(menu_screen1);
+                    lv_canvas_set_buffer(canvas, springboard_icons_page1[i].buf, SPRINGBOARD_ICON_W, SPRINGBOARD_ICON_H, LV_IMG_CF_TRUE_COLOR);
+                    lv_obj_add_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
+                    lv_obj_set_style_bg_opa(canvas, LV_OPA_TRANSP, LV_PART_MAIN);
+                    lv_obj_set_style_border_width(canvas, 0, LV_PART_MAIN);
+                    lv_obj_set_pos(canvas, icon_buf[i].offs_x, icon_buf[i].offs_y);
+                    lv_obj_add_event_cb(canvas, menu_btn_event, LV_EVENT_CLICKED, (void *)i);
+                    springboard_icons_page1[i].canvas = canvas;
+                    springboard_icons_page1[i].loaded_png = true;
+                    lv_snprintf(springboard_icons_page1[i].source_path, sizeof(springboard_icons_page1[i].source_path), "%s", path_used);
+                    Serial.printf(alias_used ? "[ICON] alias loaded %s\n" : "[ICON] loaded %s\n", path_used);
+                } else {
+                    Serial.printf("[ICON] decode failed %s: %s; using fallback img_test\n", path_used, reason);
+                    free(springboard_icons_page1[i].buf);
+                    springboard_icons_page1[i].buf = NULL;
+                }
+            } else Serial.printf("[ICON] decode failed %s: icon_buf_alloc_failed; using fallback img_test\n", path_used);
+        }
+        if (!png_loaded) {
+            lv_obj_t *img = lv_img_create(menu_screen1);
+            lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_style_bg_opa(img, LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_border_width(img, 0, LV_PART_MAIN);
+            lv_obj_set_pos(img, icon_buf[i].offs_x, icon_buf[i].offs_y);
+            lv_img_set_src(img, &img_test);
+            lv_obj_add_event_cb(img, menu_btn_event, LV_EVENT_CLICKED, (void *)i);
+            if (!path_used) Serial.printf("[ICON] missing %s; using fallback img_test\n", icon_buf[i].png_path);
+        }
 
         // lv_obj_t *btn = lv_btn_create(menu_screen1);
         // lv_obj_set_size(btn, 120, 120);
@@ -605,14 +769,45 @@ static void create0(lv_obj_t *parent)
     }
 
     for(int i = 0; i < icon_buf2_len; i++) {
-        lv_obj_t *img = lv_img_create(menu_screen2);
-        lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_bg_opa(img, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_border_width(img, 0, LV_PART_MAIN);
-        lv_obj_set_x(img, icon_buf2[i].offs_x);
-        lv_obj_set_y(img, icon_buf2[i].offs_y);
-        lv_img_set_src(img, icon_buf2[i].icon_src);
-        lv_obj_add_event_cb(img, menu_btn_event, LV_EVENT_CLICKED, (void *)(icon_buf_len + i));
+        const char *path_used = NULL;
+        bool alias_used = false;
+        if (springboard_icon_png_exists(icon_buf2[i].png_path)) path_used = icon_buf2[i].png_path;
+        else if (springboard_icon_png_exists(icon_buf2[i].png_alias_path)) { path_used = icon_buf2[i].png_alias_path; alias_used = true; }
+        bool png_loaded = false;
+        if (path_used) {
+            springboard_icons_page2[i].buf = (lv_color_t *)ps_malloc(SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t));
+            if (springboard_icons_page2[i].buf) {
+                char reason[64] = {0};
+                png_loaded = springboard_decode_png_to_buf(path_used, springboard_icons_page2[i].buf, reason, sizeof(reason));
+                if (png_loaded) {
+                    lv_obj_t *canvas = lv_canvas_create(menu_screen2);
+                    lv_canvas_set_buffer(canvas, springboard_icons_page2[i].buf, SPRINGBOARD_ICON_W, SPRINGBOARD_ICON_H, LV_IMG_CF_TRUE_COLOR);
+                    lv_obj_add_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
+                    lv_obj_set_style_bg_opa(canvas, LV_OPA_TRANSP, LV_PART_MAIN);
+                    lv_obj_set_style_border_width(canvas, 0, LV_PART_MAIN);
+                    lv_obj_set_pos(canvas, icon_buf2[i].offs_x, icon_buf2[i].offs_y);
+                    lv_obj_add_event_cb(canvas, menu_btn_event, LV_EVENT_CLICKED, (void *)(icon_buf_len + i));
+                    springboard_icons_page2[i].canvas = canvas;
+                    springboard_icons_page2[i].loaded_png = true;
+                    lv_snprintf(springboard_icons_page2[i].source_path, sizeof(springboard_icons_page2[i].source_path), "%s", path_used);
+                    Serial.printf(alias_used ? "[ICON] alias loaded %s\n" : "[ICON] loaded %s\n", path_used);
+                } else {
+                    Serial.printf("[ICON] decode failed %s: %s; using fallback img_test\n", path_used, reason);
+                    free(springboard_icons_page2[i].buf);
+                    springboard_icons_page2[i].buf = NULL;
+                }
+            } else Serial.printf("[ICON] decode failed %s: icon_buf_alloc_failed; using fallback img_test\n", path_used);
+        }
+        if (!png_loaded) {
+            lv_obj_t *img = lv_img_create(menu_screen2);
+            lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_style_bg_opa(img, LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_border_width(img, 0, LV_PART_MAIN);
+            lv_obj_set_pos(img, icon_buf2[i].offs_x, icon_buf2[i].offs_y);
+            lv_img_set_src(img, &img_test);
+            lv_obj_add_event_cb(img, menu_btn_event, LV_EVENT_CLICKED, (void *)(icon_buf_len + i));
+            if (!path_used) Serial.printf("[ICON] missing %s; using fallback img_test\n", icon_buf2[i].png_path);
+        }
 
         // lv_obj_t *btn = lv_btn_create(menu_screen2);
         // lv_obj_set_size(btn, 120, 120);
@@ -687,6 +882,18 @@ static void exit0(void) {
 }
 static void destroy0(void) 
 {
+    for (size_t i = 0; i < ARRAY_LEN(springboard_icons_page1); ++i) {
+        if (springboard_icons_page1[i].buf) { free(springboard_icons_page1[i].buf); springboard_icons_page1[i].buf = NULL; }
+        springboard_icons_page1[i].canvas = NULL;
+        springboard_icons_page1[i].loaded_png = false;
+        springboard_icons_page1[i].source_path[0] = '\0';
+    }
+    for (size_t i = 0; i < ARRAY_LEN(springboard_icons_page2); ++i) {
+        if (springboard_icons_page2[i].buf) { free(springboard_icons_page2[i].buf); springboard_icons_page2[i].buf = NULL; }
+        springboard_icons_page2[i].canvas = NULL;
+        springboard_icons_page2[i].loaded_png = false;
+        springboard_icons_page2[i].source_path[0] = '\0';
+    }
 }
 
 static scr_lifecycle_t screen0 = {
