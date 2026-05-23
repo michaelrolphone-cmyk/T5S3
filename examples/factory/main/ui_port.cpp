@@ -570,8 +570,8 @@ void ui_shutdown_vcom(int v)
 
 void ui_shutdown(void)
 {
-    bool ok = disp_show_sleep_png_from_sd("/system/display/sleep.png");
-    Serial.printf("[SLEEP IMG] pre-shutdown display %s\n", ok ? "ok" : "failed");
+    // Shutdown screen already renders the sleep image in LVGL before calling ui_shutdown().
+    // Skip direct EPD PNG rendering here to avoid re-entrant display work during power-off.
 
     touch.sleep();
     lora_sleep();
