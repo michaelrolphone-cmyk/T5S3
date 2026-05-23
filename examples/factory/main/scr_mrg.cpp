@@ -133,29 +133,28 @@ bool scr_mgr_switch(int id, bool anim)  // 清空栈，然后切换到指定 id�
 {
     scr_card_t *tgt_card = scr_mgr_find_by_id(id);
     scr_card_t *stack_scr = NULL;
-    lv_obj_t *curr_obj = NULL;
+    lv_obj_t *old_objs[16] = {0};
+    int old_count = 0;
 
     if(tgt_card == NULL) // 没有找到该屏幕
         return false;
 
-    if(scr_stack_top != NULL) { // 如果有多张屏幕卡片叠在一起，就先记录顶层卡片
-        curr_obj = scr_stack_top->obj;
-        stack_scr = scr_stack_top->prev;
-        scr_mgr_remove(scr_stack_top);
-        lv_mem_free((void *)scr_stack_top);
-        scr_stack_top = stack_scr;
+    while(scr_stack_top != NULL) {
+        scr_card_t *old = scr_stack_top;
+        scr_stack_top = old->prev;
+
+        if (old->obj && old_count < 16) {
+            old_objs[old_count++] = old->obj;
+        }
+
+        scr_mgr_remove(old);
+        lv_mem_free((void *)old);
     }
-    while(scr_stack_top != NULL) { // 然后清除所有卡片
-        stack_scr = scr_stack_top->prev;
-        curr_obj = scr_stack_top->obj;
-        scr_mgr_remove(scr_stack_top);
-        lv_mem_free((void *)scr_stack_top);
-        scr_stack_top = stack_scr;
-    }
+
+    scr_stack_root = NULL;
 
     stack_scr = (scr_card_t *)lv_mem_alloc(sizeof(scr_card_t));
     stack_scr->id = tgt_card->id;
-    // stack_scr->obj = tgt_card->life->create(NULL);
     stack_scr->obj = scr_mgr_default_style(tgt_card);
     stack_scr->st = SCR_MGR_STATE_CREATED;
     stack_scr->life = tgt_card->life;
@@ -168,14 +167,19 @@ bool scr_mgr_switch(int id, bool anim)  // 清空栈，然后切换到指定 id�
 
     disp_request_full_clear();
     if(scr_anim_sw != LV_SCR_LOAD_ANIM_NONE && anim){
-        lv_scr_load_anim(stack_scr->obj, scr_anim_sw, scr_anim_time, 0, true);
+        lv_scr_load_anim(stack_scr->obj, scr_anim_sw, scr_anim_time, 0, false);
         lv_obj_invalidate(lv_scr_act());
     } else{
         lv_scr_load(stack_scr->obj);
         lv_obj_invalidate(lv_scr_act());
-        if(curr_obj)
-            lv_obj_del(curr_obj);
     }
+
+    for (int i = 0; i < old_count; ++i) {
+        if (old_objs[i] && old_objs[i] != stack_scr->obj) {
+            lv_obj_del(old_objs[i]);
+        }
+    }
+
     return true;
 }
 
