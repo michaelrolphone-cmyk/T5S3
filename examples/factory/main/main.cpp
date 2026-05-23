@@ -137,6 +137,8 @@ static uint32_t disp_replace_commit_count = 0;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 static SemaphoreHandle_t sd_mutex = NULL;
+static bool display_have_vbus(void);
+static bool display_safe_for_hard_clean(void);
 void disp_request_normal_frame(void);
 void disp_request_screen_replace(void);
 void disp_request_boot_replace(void);
@@ -855,10 +857,14 @@ static bool screen_init(void)
     heap_caps_print_heap_info(MALLOC_CAP_INTERNAL);
     heap_caps_print_heap_info(MALLOC_CAP_SPIRAM);
 
-    epd_poweron();
-    epd_clear();
-    epd_poweroff();
-    Serial.println("[EPD INIT] boot epd_clear complete");
+    if (display_safe_for_hard_clean()) {
+        epd_poweron();
+        epd_clear();
+        epd_poweroff();
+        Serial.println("[EPD INIT] boot epd_clear complete");
+    } else {
+        Serial.println("[EPD POWER] boot epd_clear skipped due to low power margin");
+    }
 
     int cursor_x = 250;
     int cursor_y = epd_rotated_display_height() / 2 - 250;
@@ -905,40 +911,28 @@ static bool bq25896_init(void)
     // Set the minimum operating voltage. Below this voltage, the PPM will protect
     PPM.setSysPowerDownVoltage(3300);
 
-    // Set input current limit, default is 500mA
-    PPM.setInputCurrentLimit(3250);
-
-    Serial.printf("getInputCurrentLimit: %d mA\n", PPM.getInputCurrentLimit());
-
-    // Disable current limit pin
-    PPM.disableCurrentLimitPin();
-
-    // Set the charging target voltage, Range:3840 ~ 4608mV ,step:16 mV
-    PPM.setChargeTargetVoltage(4208);
-
-    // Set the precharge current , Range: 64mA ~ 1024mA ,step:64mA
-    PPM.setPrechargeCurr(64);
-
-    // The premise is that Limit Pin is disabled, or it will only follow the maximum charging current set by Limi tPin.
-    // Set the charging current , Range:0~5056mA ,step:64mA
-    PPM.setChargerConstantCurr(1024);
-
-    // Get the set charging current
-    PPM.getChargerConstantCurr();
-    Serial.printf("getChargerConstantCurr: %d mA\n", PPM.getChargerConstantCurr());
-
-
     // To obtain voltage data, the ADC must be enabled first
     PPM.enableMeasure();
 
     PPM.disableOTG();
 
-    if (battery_25896_is_vbus_in()) {
+    if (display_have_vbus()) {
+        // Configure aggressive input/charge policy only when VBUS is actually present.
+        PPM.setInputCurrentLimit(3250);
+        Serial.printf("getInputCurrentLimit: %d mA\n", PPM.getInputCurrentLimit());
+        PPM.disableCurrentLimitPin();
+        PPM.setChargeTargetVoltage(4208);
+        PPM.setPrechargeCurr(64);
+        PPM.setChargerConstantCurr(1024);
+        Serial.printf("getChargerConstantCurr: %d mA\n", PPM.getChargerConstantCurr());
         PPM.enableCharge();
         Serial.println("[PMIC] VBUS present: charging enabled");
     } else {
+        // Conservative battery-only boot: keep charger path disabled and avoid
+        // forcing high-input/high-charge startup policy.
+        PPM.setInputCurrentLimit(500);
         PPM.disableCharge();
-        Serial.println("[PMIC] battery-only: charging disabled");
+        Serial.println("[PMIC] battery-only: charging disabled; conservative startup policy");
     }
 
     // pinMode(OTG_ENABLE_PIN, OUTPUT);
@@ -950,6 +944,22 @@ static bool bq25896_init(void)
 static bool bq27220_init(void)
 {
     return bq27220.init();
+}
+
+static bool display_have_vbus(void)
+{
+    return peri_buf[E_PERI_BQ25896] && battery_25896_is_vbus_in();
+}
+
+#ifndef CONFIG_EPD_HARD_CLEAN_MIN_VBAT
+#define CONFIG_EPD_HARD_CLEAN_MIN_VBAT 0.0f
+#endif
+
+static bool display_safe_for_hard_clean(void)
+{
+    if (display_have_vbus()) return true;
+    if (!peri_buf[E_PERI_BQ25896]) return false;
+    return battery_25896_get_VBAT() >= CONFIG_EPD_HARD_CLEAN_MIN_VBAT;
 }
 
 static bool sd_card_init(void)
@@ -1267,6 +1277,13 @@ static void display_log_power(const char *phase, DisplayUpdateKind kind)
 static bool display_safe_for_recovery_clean()
 {
     if (!peri_buf[E_PERI_BQ25896]) return true;
+
+    if (!display_safe_for_hard_clean()) {
+        Serial.printf("[EPD POWER] hard clean unsafe: vbat=%.3f threshold=%.3f\n",
+                      battery_25896_get_VBAT(),
+                      (float)CONFIG_EPD_HARD_CLEAN_MIN_VBAT);
+        return false;
+    }
 
     bool usb = battery_25896_is_vbus_in();
     float vsys = battery_25896_get_VSYS();
