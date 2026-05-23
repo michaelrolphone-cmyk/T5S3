@@ -136,6 +136,9 @@ static uint32_t disp_lvgl_flush_count = 0;
 static uint32_t disp_physical_commit_count = 0;
 static uint32_t disp_replace_commit_count = 0;
 static TaskHandle_t disp_flush_handle = NULL;
+static constexpr uint32_t DISP_FLUSH_STACK_BYTES = 8 * 1024;
+static StackType_t disp_flush_stack[DISP_FLUSH_STACK_BYTES / sizeof(StackType_t)];
+static StaticTask_t disp_flush_task_tcb;
 static volatile bool disp_flush_task_started = false;
 static volatile bool disp_flush_task_create_failed = false;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
@@ -424,27 +427,61 @@ static void release_snapshot(uint32_t seq, uint8_t *snapshot)
     xSemaphoreGive(display_snapshot_mutex);
 }
 
+static void queue_or_replace(DisplayCmd &slot, bool &has_slot, const DisplayCmd &incoming, const char *tag)
+{
+    if (has_slot) {
+        Serial.printf("[DISPLAY QUEUE] %s dropped seq=%lu kind=%d\n", tag,
+                      (unsigned long)slot.seq, (int)slot.kind);
+        release_snapshot(slot.seq, slot.snapshot);
+    }
+    slot = incoming;
+    has_slot = true;
+}
+
+static void absorb_cmd(DisplayCmd &pending_normal, bool &has_pending_normal,
+                       DisplayCmd &pending_reliable, bool &has_pending_reliable,
+                       const DisplayCmd &in)
+{
+    if (in.kind == DISPLAY_UPDATE_NONE) {
+        release_snapshot(in.seq, in.snapshot);
+        return;
+    }
+    if (display_cmd_is_reliable(in.kind)) {
+        if (has_pending_normal) {
+            Serial.printf("[DISPLAY QUEUE] reliable supersedes normal seq=%lu reliable_kind=%d\n",
+                          (unsigned long)pending_normal.seq, (int)in.kind);
+            release_snapshot(pending_normal.seq, pending_normal.snapshot);
+            has_pending_normal = false;
+        }
+        queue_or_replace(pending_reliable, has_pending_reliable, in, "replace reliable");
+        return;
+    }
+    if (has_pending_reliable) {
+        Serial.printf("[DISPLAY QUEUE] drop normal seq=%lu while reliable kind=%d pending\n",
+                      (unsigned long)in.seq, (int)pending_reliable.kind);
+        release_snapshot(in.seq, in.snapshot);
+        return;
+    }
+    DisplayUpdateKind reliable_pending = display_reliable_pending_kind;
+    if (display_cmd_is_reliable(reliable_pending)) {
+        Serial.println("[DISPLAY QUEUE] normal suppressed while reliable publish pending");
+        release_snapshot(in.seq, in.snapshot);
+        return;
+    }
+    queue_or_replace(pending_normal, has_pending_normal, in, "coalesce normal");
+}
+
 static void disp_flush_task(void *param)
 {
     (void)param;
     disp_flush_task_started = true;
-    Serial.printf("[DISPLAY TASK] started core=%d stack_high_water=%lu\n",
-                  xPortGetCoreID(), (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+    Serial.printf("[DISPLAY TASK] started stack_hwm=%lu core=%d\n",
+                  (unsigned long)uxTaskGetStackHighWaterMark(NULL), xPortGetCoreID());
     DisplayCmd cmd = {};
     DisplayCmd pending_normal = {};
     DisplayCmd pending_reliable = {};
     bool has_pending_normal = false;
     bool has_pending_reliable = false;
-
-    auto queue_or_replace = [&](DisplayCmd &slot, bool &has_slot, const DisplayCmd &incoming, const char *tag) {
-        if (has_slot) {
-            Serial.printf("[DISPLAY QUEUE] %s dropped seq=%lu kind=%d\n", tag,
-                          (unsigned long)slot.seq, (int)slot.kind);
-            release_snapshot(slot.seq, slot.snapshot);
-        }
-        slot = incoming;
-        has_slot = true;
-    };
 
     while (1) {
         if (xQueueReceive(display_q, &cmd, pdMS_TO_TICKS(50)) != pdTRUE) {
@@ -452,37 +489,7 @@ static void disp_flush_task(void *param)
         }
         Serial.printf("[DISPLAY QUEUE] received seq=%lu kind=%d\n", (unsigned long)cmd.seq, (int)cmd.kind);
 
-        auto absorb_cmd = [&](const DisplayCmd &in) {
-            if (in.kind == DISPLAY_UPDATE_NONE) {
-                release_snapshot(in.seq, in.snapshot);
-                return;
-            }
-            if (display_cmd_is_reliable(in.kind)) {
-                if (has_pending_normal) {
-                    Serial.printf("[DISPLAY QUEUE] reliable supersedes normal seq=%lu reliable_kind=%d\n",
-                                  (unsigned long)pending_normal.seq, (int)in.kind);
-                    release_snapshot(pending_normal.seq, pending_normal.snapshot);
-                    has_pending_normal = false;
-                }
-                queue_or_replace(pending_reliable, has_pending_reliable, in, "replace reliable");
-                return;
-            }
-            if (has_pending_reliable) {
-                Serial.printf("[DISPLAY QUEUE] drop normal seq=%lu while reliable kind=%d pending\n",
-                              (unsigned long)in.seq, (int)pending_reliable.kind);
-                release_snapshot(in.seq, in.snapshot);
-                return;
-            }
-            DisplayUpdateKind reliable_pending = display_reliable_pending_kind;
-            if (display_cmd_is_reliable(reliable_pending)) {
-                Serial.println("[DISPLAY QUEUE] normal suppressed while reliable publish pending");
-                release_snapshot(in.seq, in.snapshot);
-                return;
-            }
-            queue_or_replace(pending_normal, has_pending_normal, in, "coalesce normal");
-        };
-
-        absorb_cmd(cmd);
+        absorb_cmd(pending_normal, has_pending_normal, pending_reliable, has_pending_reliable, cmd);
 
         Serial.printf("[DISPLAY QUEUE] settle wait begin ms=%lu window=%lu\n",
                       (unsigned long)millis(), (unsigned long)EPD_FRAME_SETTLE_MS);
@@ -495,14 +502,20 @@ static void disp_flush_task(void *param)
                 break;
             }
             if (xQueueReceive(display_q, &cmd, pdMS_TO_TICKS(20)) == pdTRUE) {
-                absorb_cmd(cmd);
+                absorb_cmd(pending_normal, has_pending_normal, pending_reliable, has_pending_reliable, cmd);
             }
         }
 
         if (has_pending_reliable) {
             Serial.printf("[DISPLAY QUEUE] commit reliable seq=%lu kind=%d\n",
                           (unsigned long)pending_reliable.seq, (int)pending_reliable.kind);
+            UBaseType_t hwm_before = uxTaskGetStackHighWaterMark(NULL);
+            if (hwm_before < 256) {
+                Serial.printf("[DISPLAY TASK WARN] low stack high water mark=%lu\n", (unsigned long)hwm_before);
+            }
+            Serial.printf("[DISPLAY TASK] before_commit stack_hwm=%lu\n", (unsigned long)hwm_before);
             display_commit_frame(pending_reliable.kind, pending_reliable.snapshot);
+            Serial.printf("[DISPLAY TASK] after_commit stack_hwm=%lu\n", (unsigned long)uxTaskGetStackHighWaterMark(NULL));
             if (display_reliable_pending_kind == pending_reliable.kind) {
                 display_reliable_pending_kind = DISPLAY_UPDATE_NONE;
                 Serial.println("[DISPLAY QUEUE] reliable physical commit complete; pending cleared");
@@ -518,7 +531,13 @@ static void disp_flush_task(void *param)
             }
             Serial.printf("[DISPLAY QUEUE] commit normal seq=%lu kind=%d\n",
                           (unsigned long)pending_normal.seq, (int)pending_normal.kind);
+            UBaseType_t hwm_before = uxTaskGetStackHighWaterMark(NULL);
+            if (hwm_before < 256) {
+                Serial.printf("[DISPLAY TASK WARN] low stack high water mark=%lu\n", (unsigned long)hwm_before);
+            }
+            Serial.printf("[DISPLAY TASK] before_commit stack_hwm=%lu\n", (unsigned long)hwm_before);
             display_commit_frame(pending_normal.kind, pending_normal.snapshot);
+            Serial.printf("[DISPLAY TASK] after_commit stack_hwm=%lu\n", (unsigned long)uxTaskGetStackHighWaterMark(NULL));
             release_snapshot(pending_normal.seq, pending_normal.snapshot);
             has_pending_normal = false;
         }
@@ -592,10 +611,13 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         }
         if (!worker_ready && disp_flush_task_create_failed &&
             display_cmd_is_reliable(requested_kind) &&
-            (requested_kind == DISPLAY_UPDATE_BOOT_REPLACE || requested_kind == DISPLAY_UPDATE_SCREEN_REPLACE || requested_kind == DISPLAY_UPDATE_RECOVERY_CLEAN)) {
-            Serial.println("[DISPLAY TASK ERROR] using synchronous boot display fallback");
+            (requested_kind == DISPLAY_UPDATE_BOOT_REPLACE)) {
+            Serial.println("[DISPLAY TASK ERROR] create failed; using synchronous boot replacement");
             if (framebuffer_mutex && xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                display_commit_frame(requested_kind, decodebuffer);
+                if (displaybuffer && decodebuffer) {
+                    memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
+                    display_commit_frame(requested_kind, displaybuffer);
+                }
                 xSemaphoreGive(framebuffer_mutex);
                 display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
                 if (disp_force_clear_next_flush) {
@@ -863,14 +885,18 @@ static void ensure_display_flush_task_started(void)
 
     size_t free_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     size_t largest_before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    Serial.printf("[DISPLAY TASK] create precheck free_internal=%u largest_internal=%u\n",
-                  (unsigned)free_before, (unsigned)largest_before);
+    size_t free_psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    Serial.printf("[DISPLAY TASK] create precheck free_internal=%u largest_internal=%u free_psram=%u\n",
+                  (unsigned)free_before, (unsigned)largest_before, (unsigned)free_psram_before);
 
-    // ESP32 Arduino/ESP-IDF FreeRTOS task stack depth is in words, not bytes.
-    // 1024 words == 4096 bytes.
-    const uint32_t disp_flush_stack_words = 3072;
-    BaseType_t rc = xTaskCreatePinnedToCore(disp_flush_task, "disp_flush_task",
-                                            disp_flush_stack_words, NULL, 2, &disp_flush_handle, 0);
+    BaseType_t rc = pdFAIL;
+    disp_flush_handle = xTaskCreateStaticPinnedToCore(disp_flush_task, "disp_flush_task",
+                                                       DISP_FLUSH_STACK_BYTES / sizeof(StackType_t),
+                                                       NULL, 2, disp_flush_stack, &disp_flush_task_tcb, 0);
+    if (disp_flush_handle != NULL) {
+        rc = pdPASS;
+        Serial.printf("[DISPLAY TASK] static create ok stack_bytes=%u\n", (unsigned)DISP_FLUSH_STACK_BYTES);
+    }
 
     size_t free_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     size_t largest_after = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
@@ -879,8 +905,8 @@ static void ensure_display_flush_task_started(void)
 
     if (rc != pdPASS || disp_flush_handle == NULL) {
         disp_flush_task_create_failed = true;
-        Serial.printf("[DISPLAY TASK ERROR] create failed rc=%ld free_heap=%u largest_internal=%u\n",
-                      (long)rc, (unsigned)free_after, (unsigned)largest_after);
+        Serial.printf("[DISPLAY TASK ERROR] create failed rc=%ld handle=%p free_internal=%u largest_internal=%u\n",
+                      (long)rc, (void *)disp_flush_handle, (unsigned)free_after, (unsigned)largest_after);
     }
 }
 
@@ -1250,11 +1276,6 @@ void idf_setup()
     cursor_y = epd_rotated_display_height() / 2 - 100 + 250;
     disp_init_status("SD Card Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_SD_CARD]);
 
-    peri_buf[E_PERI_GPS]        = gps_init();
-    cursor_x = 100;
-    cursor_y = epd_rotated_display_height() / 2 - 100 +300;
-    disp_init_status("GPS Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_GPS]);
-
     printf("LVGL Init\n");
     lv_port_disp_init();
     Serial.println("[BOOT] after lv_port_disp_init()");
@@ -1264,6 +1285,11 @@ void idf_setup()
     ui_entry();
     Serial.printf("[EPD SAFE] screen root bg=0x%06X\n", EPD_COLOR_BG);
     Serial.println("[BOOT] after ui_entry()");
+
+    peri_buf[E_PERI_GPS]        = gps_init();
+    cursor_x = 100;
+    cursor_y = epd_rotated_display_height() / 2 - 100 +300;
+    disp_init_status("GPS Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_GPS]);
 
     // task
     xTaskCreate(btn_task, "lora_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
