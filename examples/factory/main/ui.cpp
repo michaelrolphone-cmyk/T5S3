@@ -350,8 +350,8 @@ void ui_list_btn_create(lv_obj_t *parent, lv_event_cb_t event_cb)
 #endif
 //************************************[ screen 0 ]****************************************** menu
 #if 1
-static const int SPRINGBOARD_ICON_W = 96;
-static const int SPRINGBOARD_ICON_H = 96;
+static const int SPRINGBOARD_ICON_W = 150;
+static const int SPRINGBOARD_ICON_H = 150;
 static const size_t SPRINGBOARD_ICON_MAX_PNG_SIZE = 512 * 1024;
 static const int SPRINGBOARD_ICON_MAX_SRC_DIM = 512;
 static int springboard_icon_bw_threshold = 180;
@@ -363,38 +363,38 @@ struct springboard_runtime_icon {
     char source_path[96];
 };
 
-/* Expected SD icon files:
- * /icons/apps/clock.png
- * /icons/apps/lora.png
- * /icons/apps/sd_card.png
- * /icons/apps/gps.png
- * /icons/apps/reader.png
- * /icons/apps/wifi.png
- * /icons/apps/battery.png
- * /icons/apps/settings.png
- * /icons/apps/power.png
- * /icons/apps/sleep.png
- * /icons/apps/test.png
- * /icons/apps/browser.png
- * /icons/apps/maps.png
+/* Expected SD icon files (150x150 PNG):
+ * /icons/apps/clock.png        150x150
+ * /icons/apps/lora.png         150x150
+ * /icons/apps/sd_card.png      150x150
+ * /icons/apps/gps.png          150x150
+ * /icons/apps/reader.png       150x150
+ * /icons/apps/wifi.png         150x150
+ * /icons/apps/battery.png      150x150
+ * /icons/apps/settings.png     150x150
+ * /icons/apps/power.png        150x150
+ * /icons/apps/sleep.png        150x150
+ * /icons/apps/test.png         150x150
+ * /icons/apps/browser.png      150x150
+ * /icons/apps/maps.png         150x150
  */
 const struct menu_icon icon_buf[] = {
-    {&img_clock,    "clock"   , 45,   45,  "/icons/apps/clock.png",   NULL},
-    {&img_lora,     "lora"    , 210,  45,  "/icons/apps/lora.png",    NULL},
-    {&img_sd_card,  "sd card" , 375,  45,  "/icons/apps/sd_card.png", "/icons/apps/sd.png"},
-    {&img_gps,      "gps"     , 45,   250, "/icons/apps/gps.png",     NULL},
-    {&img_test,     "Reader"  , 210,  250, "/icons/apps/reader.png",  "/icons/apps/markdown_reader.png"},
-    {&img_wifi,     "wifi"    , 375,  250, "/icons/apps/wifi.png",    NULL},
-    {&img_battery,  "battery" , 45,   455, "/icons/apps/battery.png", NULL},
+    {&img_clock,    "clock"   , 25,   40,  "/icons/apps/clock.png",   NULL},
+    {&img_lora,     "lora"    , 195,  40,  "/icons/apps/lora.png",    NULL},
+    {&img_sd_card,  "sd card" , 365,  40,  "/icons/apps/sd_card.png", "/icons/apps/sd.png"},
+    {&img_gps,      "gps"     , 25,   240, "/icons/apps/gps.png",     NULL},
+    {&img_test,     "Reader"  , 195,  240, "/icons/apps/reader.png",  "/icons/apps/markdown_reader.png"},
+    {&img_wifi,     "wifi"    , 365,  240, "/icons/apps/wifi.png",    NULL},
+    {&img_battery,  "battery" , 25,   440, "/icons/apps/battery.png", NULL},
 };
 
 const struct menu_icon icon_buf2[] = {
-    {&img_setting,  "setting" , 45,   45,  "/icons/apps/settings.png", "/icons/apps/setting.png"},
-    {&img_shutdown, "shutdown", 210,  45,  "/icons/apps/power.png",    "/icons/apps/shutdown.png"},
-    {&img_sleep,    "sleep"   , 375,  45,  "/icons/apps/sleep.png",    NULL},
-    {&img_test,     "test"    , 45,   250, "/icons/apps/test.png",     NULL},
-    {&img_wifi,     "browser" , 210,  250, "/icons/apps/browser.png",  NULL},
-    {&img_gps,      "maps"    , 375,  250, "/icons/apps/maps.png",     NULL},
+    {&img_setting,  "setting" , 25,   40,  "/icons/apps/settings.png", "/icons/apps/setting.png"},
+    {&img_shutdown, "shutdown", 195,  40,  "/icons/apps/power.png",    "/icons/apps/shutdown.png"},
+    {&img_sleep,    "sleep"   , 365,  40,  "/icons/apps/sleep.png",    NULL},
+    {&img_test,     "test"    , 25,   240, "/icons/apps/test.png",     NULL},
+    {&img_wifi,     "browser" , 195,  240, "/icons/apps/browser.png",  NULL},
+    {&img_gps,      "maps"    , 365,  240, "/icons/apps/maps.png",     NULL},
 };
 static springboard_runtime_icon springboard_icons_page1[ARRAY_LEN(icon_buf)];
 static springboard_runtime_icon springboard_icons_page2[ARRAY_LEN(icon_buf2)];
@@ -407,6 +407,8 @@ static int springboard_decode_draw_w = 0;
 static int springboard_decode_draw_h = 0;
 static int springboard_decode_offset_x = 0;
 static int springboard_decode_offset_y = 0;
+static int springboard_decode_last_src_w = 0;
+static int springboard_decode_last_src_h = 0;
 
 static int springboard_png_draw_cb(PNGDRAW *pDraw)
 {
@@ -489,6 +491,8 @@ static bool springboard_decode_png_to_buf(const char *path, lv_color_t *dst, cha
     int rc = springboard_png_decoder.openRAM(raw, (int)sz, springboard_png_draw_cb);
     if (rc != PNG_SUCCESS) { free(raw); lv_snprintf(reason, reason_len, "png_open_failed:%d", rc); return false; }
     int src_w = springboard_png_decoder.getWidth(), src_h = springboard_png_decoder.getHeight();
+    springboard_decode_last_src_w = src_w;
+    springboard_decode_last_src_h = src_h;
     if (src_w <= 0 || src_h <= 0) { springboard_png_decoder.close(); free(raw); lv_snprintf(reason, reason_len, "invalid_dim"); return false; }
     if (src_w > SPRINGBOARD_ICON_MAX_SRC_DIM || src_h > SPRINGBOARD_ICON_MAX_SRC_DIM) { springboard_png_decoder.close(); free(raw); lv_snprintf(reason, reason_len, "source_too_large"); return false; }
     uint16_t *line = (uint16_t *)malloc(src_w * sizeof(uint16_t));
@@ -759,7 +763,9 @@ static void create0(lv_obj_t *parent)
                     springboard_icons_page1[i].canvas = canvas;
                     springboard_icons_page1[i].loaded_png = true;
                     lv_snprintf(springboard_icons_page1[i].source_path, sizeof(springboard_icons_page1[i].source_path), "%s", path_used);
-                    Serial.printf(alias_used ? "[ICON] alias loaded %s\n" : "[ICON] loaded %s\n", path_used);
+                    Serial.printf(alias_used ? "[ICON] alias loaded %s src=%dx%d dst=%dx%d\n" : "[ICON] loaded %s src=%dx%d dst=%dx%d\n",
+                                  path_used, springboard_decode_last_src_w, springboard_decode_last_src_h,
+                                  springboard_decode_draw_w, springboard_decode_draw_h);
                 } else {
                     Serial.printf("[ICON] decode failed %s: %s; using fallback img_test\n", path_used, reason);
                     free(springboard_icons_page1[i].buf);
@@ -807,7 +813,9 @@ static void create0(lv_obj_t *parent)
                     springboard_icons_page2[i].canvas = canvas;
                     springboard_icons_page2[i].loaded_png = true;
                     lv_snprintf(springboard_icons_page2[i].source_path, sizeof(springboard_icons_page2[i].source_path), "%s", path_used);
-                    Serial.printf(alias_used ? "[ICON] alias loaded %s\n" : "[ICON] loaded %s\n", path_used);
+                    Serial.printf(alias_used ? "[ICON] alias loaded %s src=%dx%d dst=%dx%d\n" : "[ICON] loaded %s src=%dx%d dst=%dx%d\n",
+                                  path_used, springboard_decode_last_src_w, springboard_decode_last_src_h,
+                                  springboard_decode_draw_w, springboard_decode_draw_h);
                 } else {
                     Serial.printf("[ICON] decode failed %s: %s; using fallback img_test\n", path_used, reason);
                     free(springboard_icons_page2[i].buf);
