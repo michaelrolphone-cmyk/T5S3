@@ -1524,9 +1524,27 @@ static lv_obj_t *sd_info;
 static lv_obj_t *ui_photos_img;
 static char sd_curr_path[128] = "/";
 static char md_open_path[128] = {0};
+static char image_open_path[128] = {0};
 static lv_point_t scr3_press_point = {0, 0};
 static bool scr3_drag_detected = false;
 static void sd_file_list_populate(void);
+
+static bool path_has_ext_ci(const char *path, const char *ext)
+{
+    if (!path || !ext) return false;
+    size_t path_len = strlen(path);
+    size_t ext_len = strlen(ext);
+    if (path_len < ext_len) return false;
+    const char *tail = path + path_len - ext_len;
+    for (size_t i = 0; i < ext_len; ++i) {
+        char a = tail[i];
+        char b = ext[i];
+        if (a >= 'A' && a <= 'Z') a = a - 'A' + 'a';
+        if (b >= 'A' && b <= 'Z') b = b - 'A' + 'a';
+        if (a != b) return false;
+    }
+    return true;
+}
 
 static void read_img_btn_event(lv_event_t * e)
 {
@@ -1569,6 +1587,12 @@ static void read_img_btn_event(lv_event_t * e)
        (strstr(&full_path[3], ".md") || strstr(&full_path[3], ".markdown") || strstr(&full_path[3], ".txt") || strstr(&full_path[3], ".html") || strstr(&full_path[3], ".htm") || strstr(&full_path[3], ".csv"))) {
         lv_snprintf(md_open_path, sizeof(md_open_path), "%s", &full_path[3]);
         scr_mgr_push(SCREEN11_ID, false);
+        return;
+    }
+
+    if (strncmp(full_path, "FS:", 3) == 0 && path_has_ext_ci(&full_path[3], ".png")) {
+        lv_snprintf(image_open_path, sizeof(image_open_path), "%s", &full_path[3]);
+        scr_mgr_push(SCREEN14_ID, false);
         return;
     }
 
@@ -4397,6 +4421,163 @@ static void destroy13(void){ if(maps_canvas_buf){ free(maps_canvas_buf); maps_ca
 static scr_lifecycle_t screen13 = {.create=create13,.entry=entry13,.exit=exit13,.destroy=destroy13};
 #endif
 
+//************************************[ screen 14 ]****************************************** image preview
+#if 1
+static lv_obj_t *image_preview_canvas = NULL;
+static lv_obj_t *image_preview_status = NULL;
+static lv_color_t *image_preview_buf = NULL;
+static uint8_t *image_preview_png_raw = NULL;
+static size_t image_preview_png_raw_size = 0;
+static uint16_t *image_preview_line_buf = NULL;
+static PNG image_preview_decoder;
+static float image_preview_scale = 1.0f;
+static int image_preview_offset_x = 0;
+static int image_preview_offset_y = 0;
+static int image_preview_scaled_w = 0;
+static int image_preview_scaled_h = 0;
+static const int IMAGE_PREVIEW_TOP_MARGIN = 70;
+
+static bool png_read_file_to_psram(const char *path, uint8_t **out_data, size_t *out_size, String &err)
+{
+    if (!out_data || !out_size) { err = "Image memory error"; return false; }
+    *out_data = NULL;
+    *out_size = 0;
+    if (!peri_buf[E_PERI_SD_CARD]) { err = "SD unavailable"; return false; }
+    if (!sd_guard_lock(3000)) { err = "SD unavailable"; return false; }
+    File f = SD.open(path, FILE_READ);
+    if (!f || f.isDirectory()) { sd_guard_unlock(); err = "PNG open failed"; return false; }
+    size_t sz = (size_t)f.size();
+    if (sz < 16) { f.close(); sd_guard_unlock(); err = "PNG open failed"; return false; }
+    uint8_t *raw = (uint8_t *)ps_malloc(sz);
+    if (!raw) { f.close(); sd_guard_unlock(); err = "Image memory error"; return false; }
+    size_t n = f.read(raw, sz);
+    f.close();
+    sd_guard_unlock();
+    if (n != sz) { free(raw); err = "PNG open failed"; return false; }
+    *out_data = raw;
+    *out_size = sz;
+    Serial.printf("[IMAGE] open path=%s\n", path);
+    Serial.printf("[IMAGE] png size=%u\n", (unsigned)sz);
+    return true;
+}
+
+static bool png_decode_scaled_to_canvas(const char *path, lv_color_t *canvas_buf, int canvas_w, int canvas_h, int *out_img_w, int *out_img_h, String &err)
+{
+    if (!canvas_buf || canvas_w <= 0 || canvas_h <= 0) { err = "Image memory error"; return false; }
+    if (image_preview_png_raw) { free(image_preview_png_raw); image_preview_png_raw = NULL; image_preview_png_raw_size = 0; }
+    if (!png_read_file_to_psram(path, &image_preview_png_raw, &image_preview_png_raw_size, err)) return false;
+    if (!image_preview_line_buf) image_preview_line_buf = (uint16_t *)ps_malloc(4096 * sizeof(uint16_t));
+    if (!image_preview_line_buf) { err = "Image memory error"; return false; }
+
+    auto open_cb = [](PNGDRAW *pDraw) -> int { (void)pDraw; return 1; };
+    int rc = image_preview_decoder.openRAM(image_preview_png_raw, (int)image_preview_png_raw_size, open_cb);
+    if (rc != PNG_SUCCESS) { err = "PNG open failed"; return false; }
+
+    int src_w = image_preview_decoder.getWidth();
+    int src_h = image_preview_decoder.getHeight();
+    if (src_w <= 0 || src_h <= 0) { image_preview_decoder.close(); err = "PNG decode failed"; return false; }
+    if (src_w > 4096 || src_h > 4096) { image_preview_decoder.close(); err = "Image too large"; return false; }
+    if (src_w > 4096) { image_preview_decoder.close(); err = "Image too large"; return false; }
+    Serial.printf("[IMAGE] source w/h=%d/%d\n", src_w, src_h);
+
+    float scale = (float)canvas_w / (float)src_w;
+    int scaled_w = canvas_w;
+    int scaled_h = (int)((float)src_h * scale);
+    if (scaled_h > canvas_h) {
+        scale = (float)canvas_h / (float)src_h;
+        scaled_h = canvas_h;
+        scaled_w = (int)((float)src_w * scale);
+    }
+    if (scaled_w < 1) scaled_w = 1;
+    if (scaled_h < 1) scaled_h = 1;
+    image_preview_scale = scale;
+    image_preview_scaled_w = scaled_w;
+    image_preview_scaled_h = scaled_h;
+    image_preview_offset_x = (canvas_w - scaled_w) / 2;
+    image_preview_offset_y = (canvas_h - scaled_h) / 2;
+    Serial.printf("[IMAGE] scaled w/h=%d/%d\n", scaled_w, scaled_h);
+
+    auto draw_cb = [](PNGDRAW *pDraw) -> int {
+        if (!pDraw || !image_preview_buf || !image_preview_line_buf) return 0;
+        image_preview_decoder.getLineAsRGB565(pDraw, image_preview_line_buf, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
+        int src_y = pDraw->y;
+        int dst_y0 = image_preview_offset_y + (int)floorf(src_y * image_preview_scale);
+        int dst_y1 = image_preview_offset_y + (int)floorf((src_y + 1) * image_preview_scale);
+        if (dst_y1 <= dst_y0) dst_y1 = dst_y0 + 1;
+        for (int src_x = 0; src_x < pDraw->iWidth; ++src_x) {
+            uint16_t c = image_preview_line_buf[src_x];
+            int r = ((c >> 11) & 0x1F) * 255 / 31;
+            int g = ((c >> 5) & 0x3F) * 255 / 63;
+            int b = (c & 0x1F) * 255 / 31;
+            int gray = (299 * r + 587 * g + 114 * b) / 1000;
+            lv_color_t pix = (gray < 128) ? lv_color_black() : lv_color_white();
+            int dst_x0 = image_preview_offset_x + (int)floorf(src_x * image_preview_scale);
+            int dst_x1 = image_preview_offset_x + (int)floorf((src_x + 1) * image_preview_scale);
+            if (dst_x1 <= dst_x0) dst_x1 = dst_x0 + 1;
+            for (int yy = dst_y0; yy < dst_y1; ++yy) {
+                if (yy < 0 || yy >= (LV_VER_RES - IMAGE_PREVIEW_TOP_MARGIN)) continue;
+                for (int xx = dst_x0; xx < dst_x1; ++xx) {
+                    if (xx < 0 || xx >= LV_HOR_RES) continue;
+                    image_preview_buf[yy * LV_HOR_RES + xx] = pix;
+                }
+            }
+        }
+        return 1;
+    };
+
+    rc = image_preview_decoder.openRAM(image_preview_png_raw, (int)image_preview_png_raw_size, draw_cb);
+    if (rc != PNG_SUCCESS) { err = "PNG open failed"; return false; }
+    rc = image_preview_decoder.decode(NULL, 0);
+    image_preview_decoder.close();
+    if (rc != PNG_SUCCESS) { err = "PNG decode failed"; return false; }
+    if (out_img_w) *out_img_w = scaled_w;
+    if (out_img_h) *out_img_h = scaled_h;
+    Serial.printf("[IMAGE] decode result=ok\n");
+    return true;
+}
+
+static void screen14_back(lv_event_t *e){ if(e->code == LV_EVENT_CLICKED) scr_mgr_pop(false); }
+static void create14(lv_obj_t *parent)
+{
+    scr_back_btn_create(parent, "Image", screen14_back);
+    image_preview_status = lv_label_create(parent);
+    lv_obj_align(image_preview_status, LV_ALIGN_TOP_LEFT, 20, 72);
+    lv_label_set_text(image_preview_status, "");
+    image_preview_canvas = lv_canvas_create(parent);
+    lv_obj_set_size(image_preview_canvas, LV_HOR_RES, LV_VER_RES - IMAGE_PREVIEW_TOP_MARGIN);
+    lv_obj_align(image_preview_canvas, LV_ALIGN_BOTTOM_MID, 0, 0);
+    if (!image_preview_buf) image_preview_buf = (lv_color_t *)ps_malloc(LV_HOR_RES * (LV_VER_RES - IMAGE_PREVIEW_TOP_MARGIN) * sizeof(lv_color_t));
+    if (image_preview_buf) {
+        lv_canvas_set_buffer(image_preview_canvas, image_preview_buf, LV_HOR_RES, LV_VER_RES - IMAGE_PREVIEW_TOP_MARGIN, LV_IMG_CF_TRUE_COLOR);
+        lv_canvas_fill_bg(image_preview_canvas, lv_color_white(), LV_OPA_COVER);
+    }
+}
+static void entry14(void)
+{
+    if (!image_preview_canvas || !image_preview_status || !image_preview_buf) return;
+    lv_canvas_fill_bg(image_preview_canvas, lv_color_white(), LV_OPA_COVER);
+    if (image_open_path[0] == '\0') { lv_label_set_text(image_preview_status, "No image selected"); return; }
+    lv_label_set_text(image_preview_status, "Loading image...");
+    String err = "";
+    int out_w = 0, out_h = 0;
+    if (png_decode_scaled_to_canvas(image_open_path, image_preview_buf, LV_HOR_RES, LV_VER_RES - IMAGE_PREVIEW_TOP_MARGIN, &out_w, &out_h, err)) {
+        lv_label_set_text(image_preview_status, "");
+    } else {
+        lv_label_set_text(image_preview_status, err.c_str());
+        Serial.printf("[IMAGE] decode result=%s\n", err.c_str());
+    }
+    lv_obj_invalidate(image_preview_canvas);
+}
+static void exit14(void) {}
+static void destroy14(void)
+{
+    if (image_preview_buf) { free(image_preview_buf); image_preview_buf = NULL; }
+    if (image_preview_line_buf) { free(image_preview_line_buf); image_preview_line_buf = NULL; }
+    if (image_preview_png_raw) { free(image_preview_png_raw); image_preview_png_raw = NULL; image_preview_png_raw_size = 0; }
+}
+static scr_lifecycle_t screen14 = {.create=create14,.entry=entry14,.exit=exit14,.destroy=destroy14};
+#endif
+
 //************************************[ screen 9 ]****************************************** shutdown
 #if 1
 static void scr8_btn_event_cb(lv_event_t * e)
@@ -4600,6 +4781,7 @@ void ui_entry(void)
     scr_mgr_register(SCREEN11_ID,  &screen11);  // markdown
     scr_mgr_register(SCREEN12_ID,  &screen12);  // web browser
     scr_mgr_register(SCREEN13_ID,  &screen13);  // maps
+    scr_mgr_register(SCREEN14_ID,  &screen14);  // image preview
 
     scr_mgr_switch(SCREEN0_ID, false); // set root screen
     disp_request_boot_replace();
