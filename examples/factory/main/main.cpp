@@ -1412,6 +1412,12 @@ void idf_setup()
     cursor_y = epd_rotated_display_height() / 2 - 100 + 250;
     disp_init_status("SD Card Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_SD_CARD]);
 
+    Serial.println("[BOOT PHASE] before GPS");
+    peri_buf[E_PERI_GPS]        = gps_init();
+    cursor_x = 100;
+    cursor_y = epd_rotated_display_height() / 2 - 100 +300;
+    disp_init_status("GPS Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_GPS]);
+
     printf("LVGL Init\n");
     lv_port_disp_init();
     Serial.println("[BOOT] after lv_port_disp_init()");
@@ -1421,12 +1427,6 @@ void idf_setup()
     ui_entry();
     Serial.printf("[EPD SAFE] screen root bg=0x%06X\n", EPD_COLOR_BG);
     Serial.println("[BOOT] after ui_entry()");
-
-    Serial.println("[BOOT PHASE] before GPS");
-    peri_buf[E_PERI_GPS]        = gps_init();
-    cursor_x = 100;
-    cursor_y = epd_rotated_display_height() / 2 - 100 +300;
-    disp_init_status("GPS Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_GPS]);
 
 }
 
