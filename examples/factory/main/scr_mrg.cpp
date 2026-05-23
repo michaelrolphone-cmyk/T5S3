@@ -181,6 +181,7 @@ bool scr_mgr_switch(int id, bool anim)  // 清空栈，然后切换到指定 id�
         lv_scr_load(stack_scr->obj);
         lv_obj_invalidate(lv_scr_act());
     }
+    lv_refr_now(NULL);
     disp_request_screen_replace();
 
     for (int i = 0; i < old_count; ++i) {
@@ -234,6 +235,7 @@ bool scr_mgr_push(int id, bool anim)
         lv_scr_load(stack_scr->obj);
         lv_obj_invalidate(lv_scr_act());
     }
+    lv_refr_now(NULL);
     disp_request_screen_replace();
     return true;
 }
@@ -269,6 +271,7 @@ bool scr_mgr_pop(bool anim)
             lv_obj_del(cur_obj);
         }
     }
+    lv_refr_now(NULL);
     disp_request_screen_replace();
     return true;
 }

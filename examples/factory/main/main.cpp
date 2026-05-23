@@ -836,10 +836,14 @@ static bool screen_init(void)
     heap_caps_print_heap_info(MALLOC_CAP_INTERNAL);
     heap_caps_print_heap_info(MALLOC_CAP_SPIRAM);
 
-    epd_poweron();
-    epd_clear();
-    epd_poweroff();
-    Serial.println("[EPD INIT] boot epd_clear complete");
+    if (display_safe_for_hard_clean()) {
+        epd_poweron();
+        epd_clear();
+        epd_poweroff();
+        Serial.println("[EPD INIT] boot epd_clear complete");
+    } else {
+        Serial.println("[EPD POWER] boot epd_clear skipped due to low power margin");
+    }
 
     int cursor_x = 250;
     int cursor_y = epd_rotated_display_height() / 2 - 250;
@@ -931,6 +935,22 @@ static bool bq25896_init(void)
 static bool bq27220_init(void)
 {
     return bq27220.init();
+}
+
+static bool display_have_vbus(void)
+{
+    return peri_buf[E_PERI_BQ25896] && battery_25896_is_vbus_in();
+}
+
+#ifndef CONFIG_EPD_HARD_CLEAN_MIN_VBAT
+#define CONFIG_EPD_HARD_CLEAN_MIN_VBAT 0.0f
+#endif
+
+static bool display_safe_for_hard_clean(void)
+{
+    if (display_have_vbus()) return true;
+    if (!peri_buf[E_PERI_BQ25896]) return false;
+    return battery_25896_get_VBAT() >= CONFIG_EPD_HARD_CLEAN_MIN_VBAT;
 }
 
 static bool sd_card_init(void)
@@ -1221,6 +1241,13 @@ static void display_log_power(const char *phase, DisplayUpdateKind kind)
 static bool display_safe_for_recovery_clean()
 {
     if (!peri_buf[E_PERI_BQ25896]) return true;
+
+    if (!display_safe_for_hard_clean()) {
+        Serial.printf("[EPD POWER] hard clean unsafe: vbat=%.3f threshold=%.3f\n",
+                      battery_25896_get_VBAT(),
+                      (float)CONFIG_EPD_HARD_CLEAN_MIN_VBAT);
+        return false;
+    }
 
     bool usb = battery_25896_is_vbus_in();
     float vsys = battery_25896_get_VSYS();
