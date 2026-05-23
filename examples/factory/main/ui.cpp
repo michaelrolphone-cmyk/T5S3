@@ -4281,9 +4281,35 @@ static const int MAPS_CANVAS_W = MAPS_TILE_SIZE * MAPS_GRID_COLS;
 static const int MAPS_CANVAS_H = MAPS_TILE_SIZE * MAPS_GRID_ROWS;
 static lv_obj_t *maps_tile_canvas[MAPS_GRID_ROWS][MAPS_GRID_COLS] = {};
 static lv_color_t *maps_tile_buf[MAPS_GRID_ROWS][MAPS_GRID_COLS] = {};
+static lv_color_t *maps_decode_tile_dst = NULL;
 static int maps_bw_threshold = 180;
 static MapsTileProvider maps_tile_provider = MAPS_PROVIDER_STADIA_STAMEN_TONER;
 static String maps_stadia_api_key;
+
+static int maps_png_tile_draw_cb(PNGDRAW *pDraw)
+{
+    if (!pDraw || !maps_png_line_buf || !maps_decode_tile_dst) return 0;
+    maps_png_decoder.getLineAsRGB565(
+        pDraw,
+        maps_png_line_buf,
+        PNG_RGB565_LITTLE_ENDIAN,
+        0xffffffff
+    );
+    for (int x = 0; x < pDraw->iWidth && x < MAPS_TILE_SIZE; ++x) {
+        uint16_t c = maps_png_line_buf[x];
+        int r = ((c >> 11) & 0x1F) * 255 / 31;
+        int g = ((c >> 5) & 0x3F) * 255 / 63;
+        int b = (c & 0x1F) * 255 / 31;
+        int gray = (299 * r + 587 * g + 114 * b) / 1000;
+        bool black = gray < maps_bw_threshold;
+        if (black) maps_nonwhite_pixels++;
+        int dst_y = pDraw->y;
+        if (dst_y >= 0 && dst_y < MAPS_TILE_SIZE) {
+            maps_decode_tile_dst[dst_y * MAPS_TILE_SIZE + x] = black ? lv_color_black() : lv_color_white();
+        }
+    }
+    return 1;
+}
 
 static const char *maps_provider_name(MapsTileProvider p)
 {
@@ -4388,6 +4414,7 @@ static void maps_clear_tiles()
             if (maps_tile_canvas[row][col]) lv_canvas_fill_bg(maps_tile_canvas[row][col], lv_color_white(), LV_OPA_COVER);
         }
     }
+    if (maps_marker) lv_obj_add_flag(maps_marker, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void maps_tile_for(double lat,double lon,int z,int *tx,int *ty,int *px,int *py)
@@ -4470,60 +4497,48 @@ static bool maps_check_png_file(const char *path, size_t *file_size, bool *magic
 
 static bool maps_decode_png_to_tile(int row, int col, const char *path, String &decode_result)
 {
+    maps_decode_tile_dst = NULL;
     if (row < 0 || row >= MAPS_GRID_ROWS || col < 0 || col >= MAPS_GRID_COLS) { decode_result = "tile_index_invalid"; return false; }
     if (!maps_tile_canvas[row][col] || !maps_tile_buf[row][col] || !maps_png_line_buf) { decode_result = "canvas_buffer_missing"; return false; }
-    lv_color_t *dst = maps_tile_buf[row][col];
+    maps_decode_tile_dst = maps_tile_buf[row][col];
+    lv_canvas_fill_bg(maps_tile_canvas[row][col], lv_color_white(), LV_OPA_COVER);
     if (!sd_guard_lock(3000)) { decode_result = "sd_lock_failed"; return false; }
     File f = SD.open(path, FILE_READ);
-    if (!f) { decode_result = "open_failed"; sd_guard_unlock(); return false; }
+    if (!f) { decode_result = "open_failed"; sd_guard_unlock(); maps_decode_tile_dst = NULL; return false; }
     size_t sz = (size_t)f.size();
-    if (sz < 16 || sz > 1024 * 1024) { f.close(); sd_guard_unlock(); decode_result = "size_invalid"; return false; }
+    if (sz < 16 || sz > 1024 * 1024) { f.close(); sd_guard_unlock(); decode_result = "size_invalid"; maps_decode_tile_dst = NULL; return false; }
     if (maps_png_raw) { free(maps_png_raw); maps_png_raw = NULL; maps_png_raw_size = 0; }
     maps_png_raw = (uint8_t*)ps_malloc(sz);
-    if (!maps_png_raw) { f.close(); sd_guard_unlock(); decode_result = "psram_alloc_failed"; return false; }
+    if (!maps_png_raw) { f.close(); sd_guard_unlock(); decode_result = "psram_alloc_failed"; maps_decode_tile_dst = NULL; return false; }
     size_t n = f.read(maps_png_raw, sz);
     f.close();
     sd_guard_unlock();
-    if (n != sz) { decode_result = "read_failed"; return false; }
+    if (n != sz) { decode_result = "read_failed"; maps_decode_tile_dst = NULL; return false; }
     maps_png_raw_size = sz;
-    auto maps_png_draw_cb = [](PNGDRAW *pDraw) -> int {
-        if (!pDraw || !maps_png_line_buf || !dst) return 0;
-        maps_png_decoder.getLineAsRGB565(pDraw, maps_png_line_buf, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
-        for (int x = 0; x < pDraw->iWidth && x < MAPS_TILE_SIZE; ++x) {
-            uint16_t c = maps_png_line_buf[x];
-            int r = ((c >> 11) & 0x1F) * 255 / 31;
-            int g = ((c >> 5) & 0x3F) * 255 / 63;
-            int b = (c & 0x1F) * 255 / 31;
-            int gray = (299 * r + 587 * g + 114 * b) / 1000;
-            bool black = gray < maps_bw_threshold;
-            if (black) maps_nonwhite_pixels++;
-            int dst_y = pDraw->y;
-            if (dst_y >= 0 && dst_y < MAPS_TILE_SIZE) {
-                dst[dst_y * MAPS_TILE_SIZE + x] = black ? lv_color_black() : lv_color_white();
-            }
-        }
-        return 1;
-    };
-    int rc = maps_png_decoder.openRAM(maps_png_raw, (int)maps_png_raw_size, maps_png_draw_cb);
-    if (rc != PNG_SUCCESS) { decode_result = "open_png_failed"; return false; }
-    if (maps_png_decoder.getWidth() != MAPS_TILE_SIZE || maps_png_decoder.getHeight() != MAPS_TILE_SIZE) { maps_png_decoder.close(); decode_result = "tile_not_256"; return false; }
+    int rc = maps_png_decoder.openRAM(maps_png_raw, (int)maps_png_raw_size, maps_png_tile_draw_cb);
+    if (rc != PNG_SUCCESS) { decode_result = "open_png_failed"; maps_decode_tile_dst = NULL; return false; }
+    if (maps_png_decoder.getWidth() != MAPS_TILE_SIZE || maps_png_decoder.getHeight() != MAPS_TILE_SIZE) { maps_png_decoder.close(); decode_result = "tile_not_256"; maps_decode_tile_dst = NULL; return false; }
     maps_nonwhite_pixels = 0;
     rc = maps_png_decoder.decode(NULL, 0);
     maps_png_decoder.close();
-    if (rc != PNG_SUCCESS) { decode_result = "decode_failed"; return false; }
+    if (rc != PNG_SUCCESS) { decode_result = "decode_failed"; maps_decode_tile_dst = NULL; return false; }
     lv_obj_invalidate(maps_tile_canvas[row][col]);
     decode_result = "ok";
+    maps_decode_tile_dst = NULL;
     Serial.printf("[MAP] nonwhite_pixels=%d\n", maps_nonwhite_pixels);
     return true;
 }
 
 static void maps_write_debug(const String &dbg_text)
 {
+    if (!peri_buf[E_PERI_SD_CARD]) return;
+    if (!sd_guard_lock(1000)) return;
     File dbg = SD.open("/cache/maps/latest_debug.txt", FILE_WRITE);
     if (dbg) {
         dbg.print(dbg_text);
         dbg.close();
     }
+    sd_guard_unlock();
 }
 
 static bool maps_try_render(double lat,double lon)
@@ -4584,16 +4599,17 @@ static bool maps_try_render(double lat,double lon)
         }
     }
 render_done:
-    if (accepted_z < 0) { maps_show_loading("Map unavailable"); maps_write_debug(dbg); return false; }
+    if (accepted_z < 0) { maps_show_loading("Map unavailable"); if (maps_marker) lv_obj_add_flag(maps_marker, LV_OBJ_FLAG_HIDDEN); maps_write_debug(dbg); return false; }
     int marker_canvas_x = (accepted_base_x - accepted_left_x) * MAPS_TILE_SIZE + accepted_px;
     int marker_canvas_y = (accepted_base_y - accepted_top_y) * MAPS_TILE_SIZE + accepted_py;
-    if (maps_marker) { lv_obj_set_pos(maps_marker, marker_canvas_x - 16, marker_canvas_y - 16); lv_obj_move_foreground(maps_marker); }
+    if (maps_marker) { lv_obj_set_pos(maps_marker, marker_canvas_x - 16, marker_canvas_y - 16); lv_obj_clear_flag(maps_marker, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(maps_marker); }
     Serial.printf("[MAP] marker x=%d y=%d\n", marker_canvas_x, marker_canvas_y);
     dbg += "accepted_zoom=" + String(accepted_z) + "\naccepted_provider=" + accepted_provider + "\ndecoded_count=" + String(accepted_decoded) + "\nmarker_x=" + String(marker_canvas_x) + "\nmarker_y=" + String(marker_canvas_y) + "\n";
     maps_write_debug(dbg);
     maps_hide_loading();
     if (maps_status) lv_obj_add_flag(maps_status, LV_OBJ_FLAG_HIDDEN);
     if (maps_info) lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN);
+    if (maps_view) lv_obj_invalidate(maps_view);
     Serial.println("[MAP] render complete");
     return true;
 }
@@ -4615,7 +4631,7 @@ static void maps_timer_cb(lv_timer_t *t)
 }
 static void maps_back(lv_event_t *e){ if(e->code==LV_EVENT_CLICKED) scr_mgr_pop(false);}
 static void create13(lv_obj_t *p){
-    scr_back_btn_create(p, "Maps", maps_back);
+    scr_back_btn_create(p, "", maps_back);
     maps_status=lv_label_create(p); lv_obj_add_flag(maps_status, LV_OBJ_FLAG_HIDDEN);
     maps_view=lv_obj_create(p);
     lv_obj_set_size(maps_view, MAPS_CANVAS_W, MAPS_CANVAS_H);
@@ -4641,7 +4657,7 @@ static void create13(lv_obj_t *p){
         }
         Serial.printf("[MAP] tile canvas row=%d col=%d allocated=%d\n", row, col, maps_tile_buf[row][col] ? 1 : 0);
     }
-    maps_marker=lv_obj_create(maps_view); lv_obj_set_size(maps_marker, 32, 32); lv_obj_set_style_radius(maps_marker, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_opa(maps_marker, LV_OPA_TRANSP, 0); lv_obj_set_style_border_width(maps_marker, 3, 0);
+    maps_marker=lv_obj_create(maps_view); lv_obj_set_size(maps_marker, 32, 32); lv_obj_set_style_radius(maps_marker, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_opa(maps_marker, LV_OPA_TRANSP, 0); lv_obj_set_style_border_width(maps_marker, 3, 0); lv_obj_add_flag(maps_marker, LV_OBJ_FLAG_HIDDEN);
     maps_info=lv_label_create(p); lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN);
     maps_loading = lv_label_create(maps_view); lv_label_set_text(maps_loading, "Loading map..."); lv_obj_center(maps_loading); lv_obj_add_flag(maps_loading, LV_OBJ_FLAG_HIDDEN);
 }
