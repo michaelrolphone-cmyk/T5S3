@@ -243,15 +243,18 @@ void ui_setting_set_vcom(int v)
 
 void ui_setting_set_backlight(int bl)
 {
+    int pwm = 0;
     switch (bl)
     {
-        case 0: analogWrite(BOARD_BL_EN, 0); break;
-        case 1: analogWrite(BOARD_BL_EN, 50); break;
-        case 2: analogWrite(BOARD_BL_EN, 100); break;
-        case 3: analogWrite(BOARD_BL_EN, 230); break;
+        case 0: pwm = 0; break;
+        case 1: pwm = 50; break;
+        case 2: pwm = 100; break;
+        case 3: pwm = 230; break;
         default:
             break;
     }
+    analogWrite(BOARD_BL_EN, pwm);
+    Serial.printf("[BACKLIGHT] set level=%d pwm=%d gpio=%d\n", bl, pwm, BOARD_BL_EN);
     ui_setting_backlight = bl;
 }
 
