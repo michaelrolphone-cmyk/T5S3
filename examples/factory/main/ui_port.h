@@ -116,19 +116,8 @@ void ui_gps_get_data(uint16_t *year, uint8_t *month, uint8_t *day);
 void ui_gps_get_time(uint8_t *hour, uint8_t *minute, uint8_t *second);
 void ui_gps_get_satellites(uint32_t *vsat);
 void ui_gps_get_speed(double *speed);
-bool ui_gps_is_ready(void);
-bool ui_gps_has_serial_data(void);
-bool ui_gps_has_fix(void);
 // shutdown
 void ui_shutdown_vcom(int v);
 void ui_shutdown(void);
 
 void ui_sleep(void);
-
-
-
-
-
-
-
-
