@@ -353,6 +353,7 @@ void ui_list_btn_create(lv_obj_t *parent, lv_event_cb_t event_cb)
 static const int SPRINGBOARD_ICON_W = 96;
 static const int SPRINGBOARD_ICON_H = 96;
 static const size_t SPRINGBOARD_ICON_MAX_PNG_SIZE = 512 * 1024;
+static const int SPRINGBOARD_ICON_MAX_SRC_DIM = 512;
 static int springboard_icon_bw_threshold = 180;
 
 struct springboard_runtime_icon {
@@ -410,20 +411,35 @@ static int springboard_decode_offset_y = 0;
 static int springboard_png_draw_cb(PNGDRAW *pDraw)
 {
     if (!pDraw || !springboard_decode_buf || !springboard_decode_line || springboard_decode_src_w <= 0 || springboard_decode_src_h <= 0) return 0;
+    if (pDraw->iWidth > springboard_decode_src_w) return 0;
     springboard_png_decoder.getLineAsRGB565(pDraw, springboard_decode_line, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
     if (pDraw->y < 0 || pDraw->y >= springboard_decode_src_h) return 1;
-    int dst_y = springboard_decode_offset_y + ((pDraw->y * springboard_decode_draw_h) / springboard_decode_src_h);
-    if (dst_y < 0 || dst_y >= SPRINGBOARD_ICON_H) return 1;
-    for (int dst_x = 0; dst_x < springboard_decode_draw_w; dst_x++) {
-        int src_x = (dst_x * springboard_decode_src_w) / springboard_decode_draw_w;
-        if (src_x < 0 || src_x >= springboard_decode_src_w) continue;
-        uint16_t c = springboard_decode_line[src_x];
+    int y0 = springboard_decode_offset_y + ((pDraw->y * springboard_decode_draw_h) / springboard_decode_src_h);
+    int y1 = springboard_decode_offset_y + (((pDraw->y + 1) * springboard_decode_draw_h) / springboard_decode_src_h);
+    if (y1 <= y0) y1 = y0 + 1;
+    if (y0 < 0) y0 = 0;
+    if (y1 > SPRINGBOARD_ICON_H) y1 = SPRINGBOARD_ICON_H;
+    if (y0 >= SPRINGBOARD_ICON_H || y1 <= 0) return 1;
+    int src_limit = pDraw->iWidth;
+    if (src_limit > springboard_decode_src_w) src_limit = springboard_decode_src_w;
+    for (int x = 0; x < src_limit; x++) {
+        int x0 = springboard_decode_offset_x + ((x * springboard_decode_draw_w) / springboard_decode_src_w);
+        int x1 = springboard_decode_offset_x + (((x + 1) * springboard_decode_draw_w) / springboard_decode_src_w);
+        if (x1 <= x0) x1 = x0 + 1;
+        if (x0 < 0) x0 = 0;
+        if (x1 > SPRINGBOARD_ICON_W) x1 = SPRINGBOARD_ICON_W;
+        if (x0 >= SPRINGBOARD_ICON_W || x1 <= 0) continue;
+        uint16_t c = springboard_decode_line[x];
         uint8_t r = ((c >> 11) & 0x1f) << 3;
         uint8_t g = ((c >> 5) & 0x3f) << 2;
         uint8_t b = (c & 0x1f) << 3;
         int gray = (r * 30 + g * 59 + b * 11) / 100;
-        springboard_decode_buf[dst_y * SPRINGBOARD_ICON_W + springboard_decode_offset_x + dst_x] =
-            (gray < springboard_icon_bw_threshold) ? lv_color_black() : lv_color_white();
+        lv_color_t px = (gray < springboard_icon_bw_threshold) ? lv_color_black() : lv_color_white();
+        for (int dy = y0; dy < y1; ++dy) {
+            for (int dx = x0; dx < x1; ++dx) {
+                springboard_decode_buf[dy * SPRINGBOARD_ICON_W + dx] = px;
+            }
+        }
     }
     return 1;
 }
@@ -435,7 +451,7 @@ static bool springboard_icon_png_exists(const char *path)
     ui_test_get_sd(&sd_ok);
     if (sd_ok != 1) return false;
     bool ok = false;
-    sd_guard_lock();
+    if (!sd_guard_lock(1000)) return false;
     if (SD.exists(path)) {
         File f = SD.open(path, FILE_READ);
         if (f) {
@@ -458,7 +474,7 @@ static bool springboard_decode_png_to_buf(const char *path, lv_color_t *dst, cha
 {
     if (!path || !dst) { lv_snprintf(reason, reason_len, "invalid_argument"); return false; }
     memset(dst, 0xFF, SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t));
-    sd_guard_lock();
+    if (!sd_guard_lock(1000)) { lv_snprintf(reason, reason_len, "sd_lock_timeout"); return false; }
     File f = SD.open(path, FILE_READ);
     if (!f) { sd_guard_unlock(); lv_snprintf(reason, reason_len, "open_failed"); return false; }
     size_t sz = f.size();
@@ -470,12 +486,13 @@ static bool springboard_decode_png_to_buf(const char *path, lv_color_t *dst, cha
     sd_guard_unlock();
     if (n != sz) { free(raw); lv_snprintf(reason, reason_len, "short_read"); return false; }
 
-    uint16_t *line = (uint16_t *)malloc(SPRINGBOARD_ICON_W * sizeof(uint16_t));
-    if (!line) { free(raw); lv_snprintf(reason, reason_len, "line_alloc_failed"); return false; }
     int rc = springboard_png_decoder.openRAM(raw, (int)sz, springboard_png_draw_cb);
-    if (rc != PNG_SUCCESS) { free(raw); free(line); lv_snprintf(reason, reason_len, "png_open_failed:%d", rc); return false; }
+    if (rc != PNG_SUCCESS) { free(raw); lv_snprintf(reason, reason_len, "png_open_failed:%d", rc); return false; }
     int src_w = springboard_png_decoder.getWidth(), src_h = springboard_png_decoder.getHeight();
-    if (src_w <= 0 || src_h <= 0) { springboard_png_decoder.close(); free(raw); free(line); lv_snprintf(reason, reason_len, "invalid_dim"); return false; }
+    if (src_w <= 0 || src_h <= 0) { springboard_png_decoder.close(); free(raw); lv_snprintf(reason, reason_len, "invalid_dim"); return false; }
+    if (src_w > SPRINGBOARD_ICON_MAX_SRC_DIM || src_h > SPRINGBOARD_ICON_MAX_SRC_DIM) { springboard_png_decoder.close(); free(raw); lv_snprintf(reason, reason_len, "source_too_large"); return false; }
+    uint16_t *line = (uint16_t *)malloc(src_w * sizeof(uint16_t));
+    if (!line) { springboard_png_decoder.close(); free(raw); lv_snprintf(reason, reason_len, "line_alloc_failed"); return false; }
     float scale = (float)SPRINGBOARD_ICON_W / (float)src_w;
     float scale_h = (float)SPRINGBOARD_ICON_H / (float)src_h;
     if (scale_h < scale) scale = scale_h;
