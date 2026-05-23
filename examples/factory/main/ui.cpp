@@ -3506,7 +3506,7 @@ static scr_lifecycle_t screen7 = {
 #define line_max 32
 static lv_obj_t *scr3_cont;
 static lv_obj_t *scr3_cnt_lab;
-static lv_obj_t *scr8_lab_buf[9];
+static lv_obj_t *scr8_lab_buf[8];
 static lv_timer_t *GPS_loop_timer = NULL;
 
 static void scr_label_line_algin(lv_obj_t *label, int line_len, const char *str1, const char *str2)
@@ -3545,18 +3545,7 @@ static void scr3_GPS_updata(void)
 
     static int cnt = 0;
 
-    uint32_t chars = ui_gps_get_charsProcessed();
-    lv_label_set_text_fmt(scr3_cnt_lab, " %05d ", chars);
-
-    if (!ui_gps_is_ready()) {
-        lv_label_set_text(scr8_lab_buf[0], "GPS hardware failed");
-    } else if (!ui_gps_has_serial_data()) {
-        lv_label_set_text(scr8_lab_buf[0], "No GPS serial data");
-    } else if (!ui_gps_has_fix()) {
-        lv_label_set_text(scr8_lab_buf[0], "Waiting for fix");
-    } else {
-        lv_label_set_text(scr8_lab_buf[0], "GPS active");
-    }
+    lv_label_set_text_fmt(scr3_cnt_lab, " %05d ", ui_gps_get_charsProcessed());
 
     ui_gps_get_coord(&lat, &lon);
     ui_gps_get_data(&year, &month, &day);
@@ -3565,28 +3554,28 @@ static void scr3_GPS_updata(void)
     ui_gps_get_speed(&speed);
 
     lv_snprintf(global_buf, GLOBAL_BUF_LEN, "%0.3f", lat);
-    scr_label_line_algin(scr8_lab_buf[1], line_max, "latitude:", global_buf);
+    scr_label_line_algin(scr8_lab_buf[0], line_max, "latitude:", global_buf);
 
     lv_snprintf(global_buf, GLOBAL_BUF_LEN, "%0.3f", lon);
-    scr_label_line_algin(scr8_lab_buf[2], line_max, "longitude:", global_buf);
+    scr_label_line_algin(scr8_lab_buf[1], line_max, "longitude:", global_buf);
 
     lv_snprintf(global_buf, GLOBAL_BUF_LEN, "%d", year);
-    scr_label_line_algin(scr8_lab_buf[3], line_max, "year:", global_buf);
+    scr_label_line_algin(scr8_lab_buf[2], line_max, "year:", global_buf);
 
     lv_snprintf(global_buf, GLOBAL_BUF_LEN, "%d", month);
-    scr_label_line_algin(scr8_lab_buf[4], line_max, "month:", global_buf);
+    scr_label_line_algin(scr8_lab_buf[3], line_max, "month:", global_buf);
 
     lv_snprintf(global_buf, GLOBAL_BUF_LEN, "%d", day);
-    scr_label_line_algin(scr8_lab_buf[5], line_max, "day:", global_buf);
+    scr_label_line_algin(scr8_lab_buf[4], line_max, "day:", global_buf);
 
     lv_snprintf(global_buf, GLOBAL_BUF_LEN, "%02d:%02d:%02d", hour, min, sec);
-    scr_label_line_algin(scr8_lab_buf[6], line_max, "time:", global_buf);
+    scr_label_line_algin(scr8_lab_buf[5], line_max, "time:", global_buf);
 
     lv_snprintf(global_buf, GLOBAL_BUF_LEN, "%0.2f kmph", speed);
-    scr_label_line_algin(scr8_lab_buf[7], line_max, "Speed:", global_buf);
+    scr_label_line_algin(scr8_lab_buf[6], line_max, "Speed:", global_buf);
 
     lv_snprintf(global_buf, GLOBAL_BUF_LEN, "%d", vsat);
-    scr_label_line_algin(scr8_lab_buf[8], line_max, "satellites:", global_buf);
+    scr_label_line_algin(scr8_lab_buf[7], line_max, "satellites:", global_buf);
 
     // lv_snprintf(global_buf, GLOBAL_BUF_LEN, "%0.1f", alt);
     // scr_label_line_algin(scr8_lab_buf[8], line_max, "alt:", global_buf);
@@ -4848,7 +4837,7 @@ static void scr8_btn_event_cb(lv_event_t * e)
 static void scr8_shutdown_timer_event(lv_timer_t *t)
 {
     lv_timer_del(t);
-    // Keep the rendered power-off image on EPD until power is removed.
+    ui_epd_clean();
     ui_shutdown();
 }
 
@@ -4868,7 +4857,6 @@ static float system_sleep_scale = 1.0f;
 static int system_sleep_offset_x = 0;
 static int system_sleep_offset_y = 0;
 static lv_timer_t *scr8_shutdown_timer = NULL;
-static const uint32_t SCR8_SHUTDOWN_DELAY_MS = 7000;
 
 static void system_sleep_release_buffers(void)
 {
@@ -4997,17 +4985,11 @@ static void create8(lv_obj_t *parent)
         }
         lv_obj_center(img);
 
-        // Force one immediate LVGL refresh so the power-off image is pushed to EPD
-        // before shutdown removes panel power.
-        lv_obj_invalidate(parent);
-        lv_refr_now(NULL);
-
         if (scr8_shutdown_timer) {
             lv_timer_del(scr8_shutdown_timer);
             scr8_shutdown_timer = NULL;
         }
-        scr8_shutdown_timer = lv_timer_create(scr8_shutdown_timer_event, SCR8_SHUTDOWN_DELAY_MS, (void *)parent);
-        Serial.printf("[POWER_OFF] waiting %lu ms before shutdown to let EPD update complete\n", (unsigned long)SCR8_SHUTDOWN_DELAY_MS);
+        scr8_shutdown_timer = lv_timer_create(scr8_shutdown_timer_event, 2000, (void *)parent);
     }
 }
 
