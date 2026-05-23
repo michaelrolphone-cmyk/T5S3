@@ -89,6 +89,22 @@ static volatile bool disp_force_clear_next_flush = false;
 static volatile bool disp_force_hl_white_next_update = false;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
+static SemaphoreHandle_t sd_mutex = NULL;
+
+void sd_guard_init()
+{
+    if (!sd_mutex) sd_mutex = xSemaphoreCreateMutex();
+}
+
+bool sd_guard_lock(uint32_t timeout_ms)
+{
+    return sd_mutex && xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
+void sd_guard_unlock()
+{
+    if (sd_mutex) xSemaphoreGive(sd_mutex);
+}
 
 /*********************************************************************************
  *                                   TASK
@@ -914,6 +930,7 @@ void idf_setup()
     disp_init_status("LoRa (SX1262) Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_LORA]);
 
     peri_buf[E_PERI_SD_CARD]    = sd_card_init();
+    sd_guard_init();
     cursor_x = 100;
     cursor_y = epd_rotated_display_height() / 2 - 100 + 250;
     disp_init_status("SD Card Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_SD_CARD]);

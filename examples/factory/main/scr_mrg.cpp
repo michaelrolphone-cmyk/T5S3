@@ -211,7 +211,7 @@ bool scr_mgr_push(int id, bool anim)
         scr_mgr_inactive(scr_stack_top);
         scr_stack_top->next = stack_scr;
         stack_scr->prev = scr_stack_top;
-        scr_stack_top->next = NULL;
+        stack_scr->next = NULL;
         scr_stack_top = stack_scr;
     }
 
@@ -247,8 +247,11 @@ bool scr_mgr_pop(bool anim)
 
     disp_request_full_clear();
     if(scr_anim_pop != LV_SCR_LOAD_ANIM_NONE && anim){
-        lv_scr_load_anim(dst_item->obj, scr_anim_pop, scr_anim_time, 0, true);
+        lv_scr_load_anim(dst_item->obj, scr_anim_pop, scr_anim_time, 0, false);
         lv_obj_invalidate(lv_scr_act());
+        if (cur_obj) {
+            lv_obj_del(cur_obj);
+        }
     } else{
         lv_scr_load(dst_item->obj);
         lv_obj_invalidate(lv_scr_act());

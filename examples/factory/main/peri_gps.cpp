@@ -394,8 +394,13 @@ static bool gps_csv_ensure_dir()
         gps_debug_log("[GPS CSV] SD unavailable");
         return false;
     }
+    if (!sd_guard_lock(2000)) {
+        gps_debug_log("[GPS CSV] SD lock failed");
+        return false;
+    }
     if (!SD.exists("/gps")) {
         if (!SD.mkdir("/gps")) {
+            sd_guard_unlock();
             gps_debug_log("[GPS CSV] failed to create /gps directory");
             return false;
         }
@@ -403,9 +408,11 @@ static bool gps_csv_ensure_dir()
             gps_debug_log("[GPS CSV] created /gps directory");
         } else {
             gps_debug_log("[GPS CSV] /gps directory still missing after mkdir");
+            sd_guard_unlock();
             return false;
         }
     }
+    sd_guard_unlock();
     return true;
 }
 
@@ -519,12 +526,14 @@ static bool gps_csv_append_snapshot_fix(const gps_fix_snapshot_t *snapshot)
     gps_csv_make_path(path, sizeof(path), &dated, snapshot);
     gps_csv_make_timestamp(timestamp, sizeof(timestamp), snapshot);
 
+    if (!sd_guard_lock(3000)) { gps_debug_log("[GPS CSV] SD lock failed for append"); return false; }
     bool exists = SD.exists(path);
     File f = SD.open(path, FILE_APPEND);
     if (!f) {
         char msg[96];
         snprintf(msg, sizeof(msg), "[GPS CSV] failed to open %s", path);
         gps_debug_log(msg);
+        sd_guard_unlock();
         return false;
     }
 
@@ -543,6 +552,7 @@ static bool gps_csv_append_snapshot_fix(const gps_fix_snapshot_t *snapshot)
              dated ? 1 : 0);
 
     f.close();
+    sd_guard_unlock();
 
     char msg[128];
     snprintf(msg, sizeof(msg), "[GPS CSV] wrote %s lat=%.8f lon=%.8f sats=%u",
@@ -607,10 +617,12 @@ static void gps_status_csv_append(const gps_fix_snapshot_t *snapshot)
     }
 
     const char *path = "/gps/gps_status.csv";
+    if (!sd_guard_lock(2000)) { gps_debug_log("[GPS STATUS] SD lock failed"); return; }
     bool exists = SD.exists(path);
     File f = SD.open(path, FILE_APPEND);
     if (!f) {
         gps_debug_log("[GPS STATUS] failed to open /gps/gps_status.csv");
+        sd_guard_unlock();
         return;
     }
 
@@ -628,6 +640,7 @@ static void gps_status_csv_append(const gps_fix_snapshot_t *snapshot)
              (unsigned long)snapshot->satellites,
              peri_buf[E_PERI_SD_CARD] ? 1U : 0U);
     f.close();
+    sd_guard_unlock();
 }
 
 static void gps_debug_log(const char *msg)
@@ -638,17 +651,20 @@ static void gps_debug_log(const char *msg)
         return;
     }
 
+    if (!sd_guard_lock(2000)) return;
     if (!SD.exists("/gps")) {
         SD.mkdir("/gps");
     }
 
     File f = SD.open("/gps/gps_debug.txt", FILE_APPEND);
     if (!f) {
+        sd_guard_unlock();
         return;
     }
 
     f.printf("%lu,%s\n", (unsigned long)millis(), msg);
     f.close();
+    sd_guard_unlock();
 }
 /* clang-format off */
 
