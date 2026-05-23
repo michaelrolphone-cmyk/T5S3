@@ -868,7 +868,7 @@ static void ensure_display_flush_task_started(void)
 
     // ESP32 Arduino/ESP-IDF FreeRTOS task stack depth is in words, not bytes.
     // 1024 words == 4096 bytes.
-    const uint32_t disp_flush_stack_words = 1024;
+    const uint32_t disp_flush_stack_words = 3072;
     BaseType_t rc = xTaskCreatePinnedToCore(disp_flush_task, "disp_flush_task",
                                             disp_flush_stack_words, NULL, 2, &disp_flush_handle, 0);
 
