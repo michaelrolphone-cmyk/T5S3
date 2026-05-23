@@ -1082,7 +1082,15 @@ static void disp_init_status(const char *name, int *x, int *y, bool init_st)
 
 static bool screen_init(void)
 {
+    Serial.printf("[EPD INIT] pre epd_init free_internal=%u largest_internal=%u free_psram=%u\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_64K);
+    Serial.printf("[EPD INIT] epd_init complete free_internal=%u largest_internal=%u free_psram=%u\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     // Set VCOM for boards that allow to set this in software (in mV).
     // This will print an error if unsupported. In this case,
     // set VCOM using the hardware potentiometer and delete this line.
@@ -1333,13 +1341,13 @@ void idf_setup()
     Wire.begin(BOARD_SDA, BOARD_SCL);
     io_extend_lora_gps_power_on(true);
     BaseType_t btn_rc = xTaskCreate(btn_task, "btn_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
-    Serial.printf("[BUTTON TASK] create rc=%ld handle=%p free_internal=%u largest_internal=%u\n",
+    Serial.printf("[BUTTON TASK] deferred create after epd_init rc=%ld handle=%p free_internal=%u largest_internal=%u\n",
                   (long)btn_rc,
                   (void*)btn_handle,
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     if (btn_rc != pdPASS) {
-        Serial.printf("[BUTTON TASK ERROR] create failed rc=%ld free_internal=%u largest_internal=%u\n",
+        Serial.printf("[BUTTON TASK ERROR] create failed after epd_init rc=%ld free_internal=%u largest_internal=%u\n",
                       (long)btn_rc,
                       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
