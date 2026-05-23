@@ -422,6 +422,11 @@ static void menu_get_gesture_dir(int dir)
 
 static void menu_gesture_event(lv_event_t *e)
 {
+    if (touch_reject_stale_home_event()) {
+        Serial.println("[MENU] ignored stale gesture after Home");
+        return;
+    }
+
     lv_indev_t * touch_indev = lv_indev_get_next(NULL);
     lv_dir_t dir = lv_indev_get_gesture_dir(touch_indev);
 
@@ -437,8 +442,8 @@ static void menu_gesture_event(lv_event_t *e)
 
 static void menu_btn_event(lv_event_t *e)
 {
-    if (touch_home_transition_guard_active()) {
-        Serial.println("[MENU] ignored click during Home transition guard");
+    if (touch_reject_stale_home_event()) {
+        Serial.println("[MENU] ignored stale click after Home");
         return;
     }
     int data = (int)e->user_data;
@@ -491,6 +496,8 @@ static void menu_btn_event(lv_event_t *e)
 
 static void create0(lv_obj_t *parent) 
 {
+    page_curr = 0;
+
     int status_bar_height = 60;
 
     menu_taskbar = lv_obj_create(parent);

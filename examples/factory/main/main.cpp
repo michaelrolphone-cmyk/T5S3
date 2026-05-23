@@ -76,6 +76,10 @@ static volatile bool home_transition_guard_active = false;
 static volatile bool home_transition_wait_release = false;
 static volatile uint32_t home_transition_guard_until_ms = 0;
 static volatile uint32_t home_transition_guard_start_ms = 0;
+static volatile bool home_waiting_for_physical_release = false;
+static volatile bool home_waiting_for_fresh_press = false;
+static volatile bool home_fresh_press_seen = false;
+static volatile uint32_t home_post_release_block_until_ms = 0;
 static lv_indev_t *touch_indev = NULL;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
@@ -383,6 +387,11 @@ void touch_begin_home_transition_guard(uint32_t min_block_ms)
     touch_ignore_max_ms = 3000;
     touch_block_until_ms = now + min_block_ms;
 
+    home_waiting_for_physical_release = true;
+    home_waiting_for_fresh_press = true;
+    home_fresh_press_seen = false;
+    home_post_release_block_until_ms = 0;
+
     if (touch_indev) {
         lv_indev_reset(touch_indev, NULL);
     }
@@ -428,19 +437,62 @@ bool touch_home_transition_guard_active(void)
     return false;
 }
 
+
+bool touch_reject_stale_home_event(void)
+{
+    uint32_t now = millis();
+
+    if (home_transition_guard_active) return true;
+    if (home_waiting_for_physical_release) return true;
+    if (home_post_release_block_until_ms != 0 && now < home_post_release_block_until_ms) return true;
+    if (home_waiting_for_fresh_press && !home_fresh_press_seen) return true;
+
+    return false;
+}
+
 static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
 {
     static int16_t x=0, y=0;
 
     (void)drv;
+
+    uint32_t now = millis();
+
+    if (home_waiting_for_physical_release) {
+        bool still_pressed = indev_touch_enabled && touch.isPressed();
+
+        data->state = LV_INDEV_STATE_RELEASED;
+        data->point.x = x;
+        data->point.y = y;
+
+        if (!still_pressed) {
+            home_waiting_for_physical_release = false;
+            home_post_release_block_until_ms = now + 300;
+            Serial.println("[HOME GUARD] physical release observed; blocking post-release events");
+        }
+
+        return;
+    }
+
+    if (home_post_release_block_until_ms != 0) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        data->point.x = x;
+        data->point.y = y;
+
+        if (now < home_post_release_block_until_ms) {
+            return;
+        }
+
+        home_post_release_block_until_ms = 0;
+        Serial.println("[HOME GUARD] post-release block ended; waiting for fresh press");
+    }
+
     if (touch_home_transition_guard_active()) {
         data->state = LV_INDEV_STATE_RELEASED;
         data->point.x = x;
         data->point.y = y;
         return;
     }
-
-    uint32_t now = millis();
     if (touch_block_until_ms != 0 && now < touch_block_until_ms) {
         data->state = LV_INDEV_STATE_RELEASED;
         data->point.x = x;
@@ -473,6 +525,11 @@ static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
     }
 
     bool pressed = indev_touch_enabled && touch.isPressed();
+    if (pressed && home_waiting_for_fresh_press && !home_fresh_press_seen) {
+        home_fresh_press_seen = true;
+        home_waiting_for_fresh_press = false;
+        Serial.println("[HOME GUARD] fresh touch press accepted");
+    }
     if(pressed) {
         data->state = LV_INDEV_STATE_PRESSED;
         // Keep PRESSED state even if one coordinate sample is missed.
@@ -543,8 +600,6 @@ static bool touch_gt911_init(void)
         home_button_last_ms = now;
 
         Serial.println("[HOME] GT911 home callback; queue springboard");
-
-        touch_begin_home_transition_guard(1200);
         home_button_pending = true;
     }, NULL);
 
@@ -851,19 +906,12 @@ void idf_loop()
 
         Serial.println("[HOME] switching to springboard");
 
-        touch_begin_home_transition_guard(1200);
-
-        if (touch_indev) {
-            lv_indev_reset(touch_indev, NULL);
-        }
-
         scr_mgr_switch(SCREEN0_ID, false);
 
         if (touch_indev) {
             lv_indev_reset(touch_indev, NULL);
         }
 
-        // Keep blocking after screen creation so the release cannot hit a new icon.
         touch_begin_home_transition_guard(1200);
     }
 
