@@ -105,6 +105,9 @@ static SemaphoreHandle_t sd_mutex = NULL;
 void disp_request_normal_frame(void);
 void disp_request_screen_replace(void);
 void disp_request_boot_replace(void);
+static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp);
+static void display_set_pending_update_kind(DisplayUpdateKind kind);
+static inline int display_update_kind_priority(DisplayUpdateKind kind);
 
 void sd_guard_init()
 {
@@ -289,21 +292,26 @@ static void disp_flush_task(void *param)
                 vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
+            if (!(framebuffer_mutex && decodebuffer && displaybuffer)) {
+                Serial.println("[DISPLAY LIFECYCLE] missing framebuffer resources; update deferred");
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+
+            if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+                Serial.println("[DISPLAY LIFECYCLE] framebuffer mutex timeout; update deferred");
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+
             Serial.println("[DISPLAY LIFECYCLE] settled frame");
-            disp_flush_pending = false;
-            framebuffer_dirty = false;
+            memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
+            xSemaphoreGive(framebuffer_mutex);
+
             DisplayUpdateKind kind = disp_pending_update_kind;
             disp_pending_update_kind = DISPLAY_UPDATE_NONE;
-
-            if (framebuffer_mutex && decodebuffer && displaybuffer) {
-                if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
-                    xSemaphoreGive(framebuffer_mutex);
-                } else {
-                    vTaskDelay(pdMS_TO_TICKS(1));
-                    continue;
-                }
-            }
+            disp_flush_pending = false;
+            framebuffer_dirty = false;
 
             display_commit_frame(kind, displaybuffer);
 
@@ -365,9 +373,7 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         // printf("[disp_flush] x1:%d, y1:%d, w:%d, h:%d\n", area->x1, area->y1, w, h);
     }
     disp_last_flush_ms = millis();
-    if (disp_pending_update_kind == DISPLAY_UPDATE_NONE) {
-        disp_pending_update_kind = DISPLAY_UPDATE_NORMAL_FRAME;
-    }
+    display_set_pending_update_kind(DISPLAY_UPDATE_NORMAL_FRAME);
     disp_flush_pending = true;
     /* Inform the graphics library that you are ready with the flushing */
     lv_disp_flush_ready(disp);
@@ -380,9 +386,7 @@ void disp_request_full_clear(void)
 
 void disp_request_normal_frame(void)
 {
-    if (disp_pending_update_kind == DISPLAY_UPDATE_NONE) {
-        disp_pending_update_kind = DISPLAY_UPDATE_NORMAL_FRAME;
-    }
+    display_set_pending_update_kind(DISPLAY_UPDATE_NORMAL_FRAME);
     disp_flush_pending = true;
 }
 
@@ -596,18 +600,18 @@ static void lv_port_disp_init(void)
     lv_color_t *lv_disp_buf_2 = (lv_color_t *)ps_calloc(sizeof(lv_color_t), DISP_BUF_SIZE);
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
+    framebuffer_mutex = xSemaphoreCreateMutex();
+    if (!lv_disp_buf_1 || !lv_disp_buf_2 || !decodebuffer || !displaybuffer || !framebuffer_mutex) {
+        Serial.println("[DISPLAY LIFECYCLE] FATAL: display buffers/mutex allocation failed; LVGL display not registered");
+        return;
+    }
     if (decodebuffer) {
         memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
     }
     if (displaybuffer) {
         memset(displaybuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
     }
-    framebuffer_mutex = xSemaphoreCreateMutex();
     lv_disp_draw_buf_init(&draw_buf, lv_disp_buf_1, lv_disp_buf_2, DISP_BUF_SIZE);
-    if (!lv_disp_buf_1 || !lv_disp_buf_2 || !decodebuffer || !displaybuffer || !framebuffer_mutex) {
-        Serial.println("[DISPLAY LIFECYCLE] FATAL: display buffers/mutex allocation failed; LVGL display not registered");
-        return;
-    }
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
@@ -1003,6 +1007,10 @@ static void display_set_pending_update_kind(DisplayUpdateKind kind)
 
 static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp)
 {
+    if (kind == DISPLAY_UPDATE_NONE) {
+        Serial.println("[DISPLAY LIFECYCLE] no pending update; skipping physical commit");
+        return;
+    }
     EpdRect full_area = {.x = 0, .y = 0, .width = epd_rotated_display_width(), .height = epd_rotated_display_height()};
     disp_physical_commit_count++;
     Serial.printf("[DISPLAY LIFECYCLE] commit=%lu kind=%d lvgl_flushes=%lu\n",
