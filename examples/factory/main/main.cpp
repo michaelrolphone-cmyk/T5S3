@@ -136,6 +136,8 @@ static uint32_t disp_lvgl_flush_count = 0;
 static uint32_t disp_physical_commit_count = 0;
 static uint32_t disp_replace_commit_count = 0;
 static TaskHandle_t disp_flush_handle = NULL;
+static volatile bool disp_flush_task_started = false;
+static volatile bool disp_flush_task_create_failed = false;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 static SemaphoreHandle_t sd_mutex = NULL;
 static bool display_have_vbus(void);
@@ -152,6 +154,7 @@ static bool display_cmd_is_reliable(DisplayUpdateKind kind);
 static void release_snapshot(uint32_t seq, uint8_t *snapshot);
 static inline int display_update_kind_priority(DisplayUpdateKind kind);
 static void display_set_next_snapshot_kind(DisplayUpdateKind kind);
+static void ensure_display_flush_task_started(void);
 
 void sd_guard_init()
 {
@@ -424,6 +427,9 @@ static void release_snapshot(uint32_t seq, uint8_t *snapshot)
 static void disp_flush_task(void *param)
 {
     (void)param;
+    disp_flush_task_started = true;
+    Serial.printf("[DISPLAY TASK] started core=%d stack_high_water=%lu\n",
+                  xPortGetCoreID(), (unsigned long)uxTaskGetStackHighWaterMark(NULL));
     DisplayCmd cmd = {};
     DisplayCmd pending_normal = {};
     DisplayCmd pending_reliable = {};
@@ -444,6 +450,7 @@ static void disp_flush_task(void *param)
         if (xQueueReceive(display_q, &cmd, pdMS_TO_TICKS(50)) != pdTRUE) {
             continue;
         }
+        Serial.printf("[DISPLAY QUEUE] received seq=%lu kind=%d\n", (unsigned long)cmd.seq, (int)cmd.kind);
 
         auto absorb_cmd = [&](const DisplayCmd &in) {
             if (in.kind == DISPLAY_UPDATE_NONE) {
@@ -574,11 +581,29 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
     DisplayUpdateKind requested_kind = display_next_snapshot_kind;
     DisplayUpdateKind kind = requested_kind != DISPLAY_UPDATE_NONE ? requested_kind : DISPLAY_UPDATE_NORMAL_FRAME;
     bool published = publish_snapshot(kind, true, area);
+    bool worker_ready = disp_flush_task_started || (disp_flush_handle != NULL);
     if (published && requested_kind != DISPLAY_UPDATE_NONE) {
-        display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
-        if (display_cmd_is_reliable(requested_kind) && disp_force_clear_next_flush) {
+        if (worker_ready) {
+            display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
+        }
+        if (worker_ready && display_cmd_is_reliable(requested_kind) && disp_force_clear_next_flush) {
             disp_force_clear_next_flush = false;
             Serial.printf("[DISPLAY QUEUE] force-clear consumed by published reliable kind=%d\n", (int)requested_kind);
+        }
+        if (!worker_ready && disp_flush_task_create_failed &&
+            display_cmd_is_reliable(requested_kind) &&
+            (requested_kind == DISPLAY_UPDATE_BOOT_REPLACE || requested_kind == DISPLAY_UPDATE_SCREEN_REPLACE || requested_kind == DISPLAY_UPDATE_RECOVERY_CLEAN)) {
+            Serial.println("[DISPLAY TASK ERROR] using synchronous boot display fallback");
+            if (framebuffer_mutex && xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                display_commit_frame(requested_kind, decodebuffer);
+                xSemaphoreGive(framebuffer_mutex);
+                display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
+                if (disp_force_clear_next_flush) {
+                    disp_force_clear_next_flush = false;
+                }
+            } else {
+                Serial.println("[DISPLAY TASK ERROR] synchronous fallback lock timeout");
+            }
         }
     } else if (!published && requested_kind != DISPLAY_UPDATE_NONE) {
         Serial.printf("[DISPLAY QUEUE] reliable publish failed; retained kind=%d\n", (int)requested_kind);
@@ -801,6 +826,7 @@ static void lv_port_disp_init(void)
         Serial.println("[DISPLAY LIFECYCLE] FATAL: display queue/snapshot allocation failed");
         return;
     }
+    ensure_display_flush_task_started();
     if (decodebuffer) {
         memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
     }
@@ -827,6 +853,35 @@ static void lv_port_disp_init(void)
     /*Register the driver in LVGL and save the created input device object*/
     // static lv_indev_t * my_indev = lv_indev_drv_register(&indev_drv);
     touch_indev = lv_indev_drv_register(&indev_drv);
+}
+
+static void ensure_display_flush_task_started(void)
+{
+    if (disp_flush_handle != NULL || disp_flush_task_started || !display_q || !display_snapshot_mutex) {
+        return;
+    }
+
+    size_t free_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largest_before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    Serial.printf("[DISPLAY TASK] create precheck free_internal=%u largest_internal=%u\n",
+                  (unsigned)free_before, (unsigned)largest_before);
+
+    // ESP32 Arduino/ESP-IDF FreeRTOS task stack depth is in words, not bytes.
+    // 1024 words == 4096 bytes.
+    const uint32_t disp_flush_stack_words = 1024;
+    BaseType_t rc = xTaskCreatePinnedToCore(disp_flush_task, "disp_flush_task",
+                                            disp_flush_stack_words, NULL, 2, &disp_flush_handle, 0);
+
+    size_t free_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largest_after = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    Serial.printf("[DISPLAY TASK] create postcheck free_internal=%u largest_internal=%u\n",
+                  (unsigned)free_after, (unsigned)largest_after);
+
+    if (rc != pdPASS || disp_flush_handle == NULL) {
+        disp_flush_task_create_failed = true;
+        Serial.printf("[DISPLAY TASK ERROR] create failed rc=%ld free_heap=%u largest_internal=%u\n",
+                      (long)rc, (unsigned)free_after, (unsigned)largest_after);
+    }
 }
 
 static bool touch_gt911_init(void)
@@ -1203,7 +1258,6 @@ void idf_setup()
     printf("LVGL Init\n");
     lv_port_disp_init();
     Serial.println("[BOOT] after lv_port_disp_init()");
-    xTaskCreatePinnedToCore(disp_flush_task, "disp_flush_task", 1024 * 6, NULL, 2, &disp_flush_handle, 0);
 
     printf("LVGL UI Entry\n");
     ui_task_handle = xTaskGetCurrentTaskHandle();
