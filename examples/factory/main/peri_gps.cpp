@@ -13,14 +13,14 @@ static bool GPS_Recovery();
 bool setupGPS();
 void displayInfo();
 static bool gps_csv_ensure_dir();
-static bool gps_csv_make_daily_path(char *out, size_t out_len);
-static bool gps_csv_make_timestamp(char *out, size_t out_len);
-static void gps_csv_append_fix(double lat, double lon, double speed_kmph, uint32_t satellites);
+static bool gps_csv_make_path(char *out, size_t out_len, bool *dated);
+static void gps_csv_make_timestamp(char *out, size_t out_len);
+static bool gps_csv_append_current_fix(double lat, double lon, double speed_kmph, uint32_t satellites);
 static void gps_debug_log(const char *msg);
-static void gps_capture_pending_fix();
-static bool gps_csv_time_ready();
-static bool gps_should_log_fix(double lat, double lon);
-static void gps_try_write_pending_fix();
+static bool gps_current_fix_valid();
+static void gps_csv_logger_pump();
+static void gps_log_status();
+static void gps_status_csv_append();
 
 TaskHandle_t gps_handle = NULL;
 double gps_lat=0, gps_lng=0, gps_altitude=0, gps_speed=0;
@@ -32,15 +32,9 @@ static bool gps_ready = false;
 static int gps_last_sync_minute = -1;
 static uint32_t last_gps_diag_ms = 0;
 static uint32_t last_gps_sd_diag_ms = 0;
-static bool gps_pending_fix_valid = false;
-static double gps_pending_lat = 0.0;
-static double gps_pending_lon = 0.0;
-static double gps_pending_speed_kmph = 0.0;
-static uint32_t gps_pending_satellites = 0;
-static uint32_t gps_pending_fix_ms = 0;
-static double gps_last_logged_lat = 999.0;
-static double gps_last_logged_lon = 999.0;
-static uint32_t gps_last_logged_ms = 0;
+static uint32_t gps_last_csv_write_ms = 0;
+static uint32_t gps_last_csv_update_write_ms = 0;
+static const uint32_t GPS_CSV_PERIOD_MS = 10000;
 
 uint8_t buffer[256];
 
@@ -94,13 +88,12 @@ void gps_task(void *param)
             // Serial.write(c);
             if (gps.encode(c)) {
                 displayInfo();
-                if (gps.location.isUpdated() && gps.location.isValid()) {
-                    gps_capture_pending_fix();
-                }
-                gps_try_write_pending_fix();
+                gps_csv_logger_pump();
             }
         }
-        gps_try_write_pending_fix();
+        gps_csv_logger_pump();
+        gps_log_status();
+        gps_status_csv_append();
 
         if (millis() - last_gps_diag_ms > 10000) {
             last_gps_diag_ms = millis();
@@ -117,14 +110,14 @@ void gps_task(void *param)
             last_gps_sd_diag_ms = millis();
             char diag[160] = {0};
             snprintf(diag, sizeof(diag),
-                     "[GPS] chars=%lu fix_valid=%d date_valid=%d time_valid=%d sats=%lu sd=%d pending=%d",
+                     "[GPS] chars=%lu fix_valid=%d date_valid=%d time_valid=%d sats=%lu sd=%d last_csv_ms=%lu",
                      gps.charsProcessed(),
                      gps.location.isValid(),
                      gps.date.isValid(),
                      gps.time.isValid(),
                      gps.satellites.isValid() ? gps.satellites.value() : 0,
                      peri_buf[E_PERI_SD_CARD],
-                     gps_pending_fix_valid);
+                     (unsigned long)gps_last_csv_write_ms);
             gps_debug_log(diag);
         }
 
@@ -356,35 +349,43 @@ static bool gps_csv_ensure_dir()
     return true;
 }
 
-static bool gps_csv_make_daily_path(char *out, size_t out_len)
+static bool gps_csv_make_path(char *out, size_t out_len, bool *dated)
 {
+    *dated = false;
+
     uint16_t year = 0;
     uint8_t month = 0;
     uint8_t day = 0;
 
-    if (gps.date.isValid() && gps.date.year() >= 2000 && gps.date.month() >= 1 && gps.date.month() <= 12 &&
+    if (gps.date.isValid() &&
+        gps.date.year() >= 2000 &&
+        gps.date.month() >= 1 && gps.date.month() <= 12 &&
         gps.date.day() >= 1 && gps.date.day() <= 31) {
         year = gps.date.year();
         month = gps.date.month();
         day = gps.date.day();
     } else if (peri_buf[E_PERI_RTC]) {
         RTC_DateTime dt = rtc.getDateTime();
-        if (dt.year >= 2000 && dt.month >= 1 && dt.month <= 12 && dt.day >= 1 && dt.day <= 31) {
+        if (dt.year >= 2000 &&
+            dt.month >= 1 && dt.month <= 12 &&
+            dt.day >= 1 && dt.day <= 31) {
             year = dt.year;
             month = dt.month;
             day = dt.day;
         }
     }
 
-    if (year == 0 || month == 0 || day == 0) {
-        return false;
+    if (year >= 2000) {
+        snprintf(out, out_len, "/gps/%04u-%02u-%02u.csv", year, month, day);
+        *dated = true;
+        return true;
     }
 
-    snprintf(out, out_len, "/gps/%04u-%02u-%02u.csv", year, month, day);
+    snprintf(out, out_len, "/gps/undated.csv");
     return true;
 }
 
-static bool gps_csv_make_timestamp(char *out, size_t out_len)
+static void gps_csv_make_timestamp(char *out, size_t out_len)
 {
     uint16_t year = 0;
     uint8_t month = 0;
@@ -393,17 +394,26 @@ static bool gps_csv_make_timestamp(char *out, size_t out_len)
     uint8_t minute = 0;
     uint8_t second = 0;
 
-    if (gps.date.isValid() && gps.date.year() >= 2000 && gps.date.month() >= 1 && gps.date.month() <= 12 &&
+    bool have_date = false;
+    bool have_time = false;
+
+    if (gps.date.isValid() &&
+        gps.date.year() >= 2000 &&
+        gps.date.month() >= 1 && gps.date.month() <= 12 &&
         gps.date.day() >= 1 && gps.date.day() <= 31) {
         year = gps.date.year();
         month = gps.date.month();
         day = gps.date.day();
+        have_date = true;
     } else if (peri_buf[E_PERI_RTC]) {
         RTC_DateTime dt = rtc.getDateTime();
-        if (dt.year >= 2000 && dt.month >= 1 && dt.month <= 12 && dt.day >= 1 && dt.day <= 31) {
+        if (dt.year >= 2000 &&
+            dt.month >= 1 && dt.month <= 12 &&
+            dt.day >= 1 && dt.day <= 31) {
             year = dt.year;
             month = dt.month;
             day = dt.day;
+            have_date = true;
         }
     }
 
@@ -411,61 +421,179 @@ static bool gps_csv_make_timestamp(char *out, size_t out_len)
         hour = gps.time.hour();
         minute = gps.time.minute();
         second = gps.time.second();
+        have_time = true;
     } else if (peri_buf[E_PERI_RTC]) {
         RTC_DateTime dt = rtc.getDateTime();
         hour = dt.hour;
         minute = dt.minute;
         second = dt.second;
-    } else {
+        have_time = true;
+    }
+
+    if (have_date && have_time) {
+        snprintf(out, out_len, "%04u-%02u-%02uT%02u:%02u:%02uZ",
+                 year, month, day, hour, minute, second);
+        return;
+    }
+
+    snprintf(out, out_len, "millis:%lu", (unsigned long)millis());
+}
+
+static bool gps_csv_append_current_fix(double lat, double lon, double speed_kmph, uint32_t satellites)
+{
+    if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0 || (lat == 0.0 && lon == 0.0)) {
+        gps_debug_log("[GPS CSV] skipped invalid coordinate");
         return false;
     }
 
-    if (year == 0 || month == 0 || day == 0) {
+    if (!gps_csv_ensure_dir()) {
         return false;
     }
 
-    snprintf(out, out_len, "%04u-%02u-%02uT%02u:%02u:%02uZ", year, month, day, hour, minute, second);
+    char path[40] = {0};
+    char timestamp[40] = {0};
+    bool dated = false;
+
+    gps_csv_make_path(path, sizeof(path), &dated);
+    gps_csv_make_timestamp(timestamp, sizeof(timestamp));
+
+    bool exists = SD.exists(path);
+    File f = SD.open(path, FILE_APPEND);
+    if (!f) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "[GPS CSV] failed to open %s", path);
+        gps_debug_log(msg);
+        return false;
+    }
+
+    if (!exists) {
+        f.println("timestamp,latitude,longitude,speed_kmph,satellites,fix_age_ms,chars_processed,dated_file");
+    }
+
+    f.printf("%s,%.8f,%.8f,%.2f,%u,%lu,%lu,%u\n",
+             timestamp,
+             lat,
+             lon,
+             speed_kmph,
+             satellites,
+             (unsigned long)gps.location.age(),
+             (unsigned long)gps.charsProcessed(),
+             dated ? 1 : 0);
+
+    f.close();
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "[GPS CSV] wrote %s lat=%.8f lon=%.8f sats=%u",
+             path, lat, lon, satellites);
+    gps_debug_log(msg);
+
     return true;
 }
 
-static void gps_csv_append_fix(double lat, double lon, double speed_kmph, uint32_t satellites)
+static bool gps_current_fix_valid()
 {
-    if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0 || (lat == 0.0 && lon == 0.0)) {
-        gps_debug_log("[GPS CSV] skipped invalid passed coordinate");
+    if (!gps.location.isValid()) return false;
+
+    double lat = gps.location.lat();
+    double lon = gps.location.lng();
+
+    if (lat < -90.0 || lat > 90.0) return false;
+    if (lon < -180.0 || lon > 180.0) return false;
+    if (lat == 0.0 && lon == 0.0) return false;
+    if (gps.location.age() > 30000) return false;
+
+    return true;
+}
+
+static void gps_csv_logger_pump()
+{
+    if (!gps_current_fix_valid()) {
         return;
     }
+
+    uint32_t now = millis();
+    bool write_due_to_period = (now - gps_last_csv_write_ms >= GPS_CSV_PERIOD_MS);
+    bool write_due_to_update = gps.location.isUpdated() && (now - gps_last_csv_update_write_ms >= 1000);
+
+    if (!write_due_to_period && !write_due_to_update) {
+        return;
+    }
+
+    double lat = gps.location.lat();
+    double lon = gps.location.lng();
+    double speed = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
+    uint32_t sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
+
+    if (gps_csv_append_current_fix(lat, lon, speed, sats)) {
+        gps_last_csv_write_ms = now;
+        if (gps.location.isUpdated()) {
+            gps_last_csv_update_write_ms = now;
+        }
+    }
+}
+
+static void gps_log_status()
+{
+    static uint32_t last_status_log_ms = 0;
+    if (millis() - last_status_log_ms < 60000) {
+        return;
+    }
+    last_status_log_ms = millis();
+
+    double lat = gps.location.isValid() ? gps.location.lat() : 0.0;
+    double lon = gps.location.isValid() ? gps.location.lng() : 0.0;
+    uint32_t sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
+
+    char msg[220] = {0};
+    snprintf(msg, sizeof(msg),
+             "[GPS STATUS] chars=%lu loc_valid=%d loc_age=%lu lat=%.8f lon=%.8f date_valid=%d time_valid=%d sats=%lu sd=%d last_csv_ms=%lu",
+             (unsigned long)gps.charsProcessed(),
+             gps.location.isValid() ? 1 : 0,
+             (unsigned long)gps.location.age(),
+             lat,
+             lon,
+             gps.date.isValid() ? 1 : 0,
+             gps.time.isValid() ? 1 : 0,
+             (unsigned long)sats,
+             peri_buf[E_PERI_SD_CARD] ? 1 : 0,
+             (unsigned long)gps_last_csv_write_ms);
+    gps_debug_log(msg);
+}
+
+static void gps_status_csv_append()
+{
+    static uint32_t last_status_csv_ms = 0;
+    if (millis() - last_status_csv_ms < 60000) {
+        return;
+    }
+    last_status_csv_ms = millis();
 
     if (!gps_csv_ensure_dir()) {
         return;
     }
 
-    char path[32] = {0};
-    char timestamp[32] = {0};
-    if (!gps_csv_make_daily_path(path, sizeof(path)) || !gps_csv_make_timestamp(timestamp, sizeof(timestamp))) {
-        gps_debug_log("[GPS CSV] date/time invalid");
-        return;
-    }
-
+    const char *path = "/gps/gps_status.csv";
     bool exists = SD.exists(path);
     File f = SD.open(path, FILE_APPEND);
     if (!f) {
-        gps_debug_log("[GPS CSV] CSV open failed");
+        gps_debug_log("[GPS STATUS] failed to open /gps/gps_status.csv");
         return;
     }
 
     if (!exists) {
-        f.println("timestamp,latitude,longitude,speed_kmph,satellites");
+        f.println("timestamp_millis,chars_processed,location_valid,location_age_ms,date_valid,time_valid,satellites,sd_available");
     }
 
-    f.printf("%s,%.8f,%.8f,%.2f,%u\n", timestamp, lat, lon, speed_kmph, satellites);
+    f.printf("%lu,%lu,%u,%lu,%u,%u,%lu,%u\n",
+             (unsigned long)millis(),
+             (unsigned long)gps.charsProcessed(),
+             gps.location.isValid() ? 1U : 0U,
+             (unsigned long)gps.location.age(),
+             gps.date.isValid() ? 1U : 0U,
+             gps.time.isValid() ? 1U : 0U,
+             (unsigned long)(gps.satellites.isValid() ? gps.satellites.value() : 0),
+             peri_buf[E_PERI_SD_CARD] ? 1U : 0U);
     f.close();
-    gps_last_logged_lat = lat;
-    gps_last_logged_lon = lon;
-    gps_last_logged_ms = millis();
-    gps_debug_log("[GPS CSV] CSV row written");
-
-    Serial.printf("[GPS CSV] logged %s lat=%.8f lon=%.8f sat=%u speed=%.2f\n",
-                  path, lat, lon, satellites, speed_kmph);
 }
 
 static void gps_debug_log(const char *msg)
@@ -487,69 +615,6 @@ static void gps_debug_log(const char *msg)
 
     f.printf("%lu,%s\n", (unsigned long)millis(), msg);
     f.close();
-}
-
-static void gps_capture_pending_fix()
-{
-    if (!gps.location.isValid()) {
-        gps_debug_log("[GPS CSV] location invalid");
-        return;
-    }
-    double lat = gps.location.lat();
-    double lon = gps.location.lng();
-    if (lat == 0.0 && lon == 0.0) {
-        gps_debug_log("[GPS CSV] ignored 0,0 coordinate");
-        return;
-    }
-    gps_pending_lat = lat;
-    gps_pending_lon = lon;
-    gps_pending_speed_kmph = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
-    gps_pending_satellites = gps.satellites.isValid() ? gps.satellites.value() : 0;
-    gps_pending_fix_ms = millis();
-    gps_pending_fix_valid = true;
-    gps_debug_log("[GPS CSV] pending fix stored");
-    gps_debug_log("[GPS CSV] pending fix captured");
-}
-
-static bool gps_csv_time_ready()
-{
-    if (gps.date.isValid() && gps.date.year() >= 2000 && gps.time.isValid()) return true;
-    if (peri_buf[E_PERI_RTC]) {
-        RTC_DateTime dt = rtc.getDateTime();
-        if (dt.year >= 2000 && dt.month >= 1 && dt.month <= 12 && dt.day >= 1 && dt.day <= 31) return true;
-    }
-    return false;
-}
-
-static bool gps_should_log_fix(double lat, double lon)
-{
-    uint32_t now = millis();
-    if (gps_last_logged_lat > 900.0 || gps_last_logged_lon > 900.0) return true;
-    double dlat = fabs(lat - gps_last_logged_lat);
-    double dlon = fabs(lon - gps_last_logged_lon);
-    if (dlat > 0.00001 || dlon > 0.00001) return true;
-    if (now - gps_last_logged_ms >= 10000) return true;
-    return false;
-}
-
-static void gps_try_write_pending_fix()
-{
-    if (!gps_pending_fix_valid) return;
-    if (!gps_csv_time_ready()) {
-        static uint32_t last_wait_log_ms = 0;
-        if (millis() - last_wait_log_ms > 10000) {
-            last_wait_log_ms = millis();
-            gps_debug_log("[GPS CSV] pending fix waiting for valid date/time");
-        }
-        return;
-    }
-    if (!gps_should_log_fix(gps_pending_lat, gps_pending_lon)) {
-        gps_pending_fix_valid = false;
-        return;
-    }
-    gps_csv_append_fix(gps_pending_lat, gps_pending_lon, gps_pending_speed_kmph, gps_pending_satellites);
-    gps_debug_log("[GPS CSV] pending fix written");
-    gps_pending_fix_valid = false;
 }
 /* clang-format off */
 
