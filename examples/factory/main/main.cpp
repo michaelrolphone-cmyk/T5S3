@@ -307,19 +307,6 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
     }
 
     if(disp_flush_enabled) {
-        bool force_clear_this_flush = disp_force_clear_next_flush;
-        bool full_area = (area->x1 == 0 && area->y1 == 0 &&
-                          area->x2 == (epd_rotated_display_width() - 1) &&
-                          area->y2 == (epd_rotated_display_height() - 1));
-
-        if (force_clear_this_flush || full_area) {
-            memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
-            disp_force_clear_next_flush = false;
-            Serial.printf("[LVGL flush] logical framebuffer WHITE cleared full=%d force=%d\n",
-                          full_area, force_clear_this_flush);
-            Serial.printf("[LVGL flush] WHITE clear byte=0x%02X\n", EPD_LOGICAL_WHITE_BYTE);
-        }
-
         if (framebuffer_mutex && xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(20)) != pdTRUE) {
             lv_disp_flush_ready(disp);
             return;
@@ -328,6 +315,18 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         int32_t h = lv_area_get_height(area);
         int32_t screen_w = epd_rotated_display_width();
         int32_t screen_h = epd_rotated_display_height();
+        bool full_area = (area->x1 == 0 && area->y1 == 0 &&
+                          area->x2 == (screen_w - 1) &&
+                          area->y2 == (screen_h - 1));
+        bool force_clear_this_flush = disp_force_clear_next_flush;
+
+        if (force_clear_this_flush || full_area) {
+            memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
+            disp_force_clear_next_flush = false;
+            Serial.printf("[LVGL flush] logical framebuffer WHITE cleared full=%d force=%d\n",
+                          full_area, force_clear_this_flush);
+            Serial.printf("[LVGL flush] WHITE clear byte=0x%02X\n", EPD_LOGICAL_WHITE_BYTE);
+        }
 
         for(int32_t y = 0; y < h; y++) {
             int32_t dst_y = area->y1 + y;
