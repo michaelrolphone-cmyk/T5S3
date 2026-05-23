@@ -1,6 +1,7 @@
 
 #include "scr_mrg.h"
 #include "main.h"
+#include <assert.h>
 
 /* 记录所有的屏幕卡片 */ 
 scr_card_t *scr_mgr_head;
@@ -131,6 +132,7 @@ bool scr_mgr_register(int id, scr_lifecycle_t *card_life) // 注册一个屏幕�
 
 bool scr_mgr_switch(int id, bool anim)  // 清空栈，然后切换到指定 id的屏幕卡片上
 {
+    assert(ui_is_ui_thread());
     scr_card_t *tgt_card = scr_mgr_find_by_id(id);
     scr_card_t *stack_scr = NULL;
     lv_obj_t *old_objs[16] = {0};
@@ -185,6 +187,7 @@ bool scr_mgr_switch(int id, bool anim)  // 清空栈，然后切换到指定 id�
 
 bool scr_mgr_push(int id, bool anim)
 {
+    assert(ui_is_ui_thread());
     scr_card_t *tgt_card = scr_mgr_find_by_id(id);
     scr_card_t *stack_scr = NULL;
 
@@ -230,6 +233,7 @@ bool scr_mgr_push(int id, bool anim)
 
 bool scr_mgr_pop(bool anim)
 {
+    assert(ui_is_ui_thread());
     scr_card_t *dst_item = NULL;
     lv_obj_t *cur_obj;
 

@@ -13,6 +13,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <freertos/queue.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -81,6 +82,22 @@ static volatile bool home_button_pending = false;
 static volatile bool home_nav_in_progress = false;
 static volatile uint32_t home_button_last_ms = 0;
 static lv_indev_t *touch_indev = NULL;
+static QueueHandle_t ui_event_q = NULL;
+static TaskHandle_t ui_task_handle = NULL;
+
+enum class UiEvent : uint8_t {
+    BOOT_SLEEP,
+    TOGGLE_BACKLIGHT,
+    HOME_SWITCH_TO_SPRINGBOARD,
+};
+
+static bool ui_post_event(UiEvent event)
+{
+    if (!ui_event_q) {
+        return false;
+    }
+    return xQueueSend(ui_event_q, &event, 0) == pdTRUE;
+}
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
@@ -138,9 +155,7 @@ void btn_task(void *param)
         {
             if (!boot_btn_pressed) {
                 boot_btn_pressed = true;
-                // Use the same button GPIO as deep-sleep wake source
-                scr_mgr_switch(0, false);
-                ui_sleep();
+                ui_post_event(UiEvent::BOOT_SLEEP);
             }
         }
         else {
@@ -154,9 +169,7 @@ void btn_task(void *param)
         }
         else {
             if(ioext_btn_pressed) {
-                int bl = 0;
-                ui_setting_get_backlight(&bl);
-                ui_setting_set_backlight(bl == 0 ? 1 : 0);
+                ui_post_event(UiEvent::TOGGLE_BACKLIGHT);
             }
             ioext_btn_pressed = false;
         }
@@ -597,13 +610,10 @@ static bool touch_gt911_init(void)
         home_button_last_ms = now;
 
         Serial.println("[HOME] callback: schedule springboard");
-        home_button_pending = true;
-        HomeInputState prev = home_input_state;
-        home_input_state = HOME_INPUT_SUPPRESS_UNTIL_RELEASE;
-        home_input_state_start_ms = now;
-        home_input_deadline_ms = now + 1500;
-        Serial.printf("[HOME INPUT] %s -> %s reason=callback\n",
-                      home_input_state_name(prev), home_input_state_name(home_input_state));
+        home_button_pending = ui_post_event(UiEvent::HOME_SWITCH_TO_SPRINGBOARD);
+        if (!home_button_pending) {
+            Serial.println("[HOME] callback: queue full, event dropped");
+        }
     }, NULL);
 
     touch.setInterruptMode(LOW_LEVEL_QUERY);
@@ -891,6 +901,7 @@ void idf_setup()
     disp_init_status("GPS Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_GPS]);
 
     printf("LVGL Init\n");
+    ui_event_q = xQueueCreate(16, sizeof(UiEvent));
     lv_port_disp_init();
     Serial.println("[BOOT] after lv_port_disp_init()");
     xTaskCreatePinnedToCore(disp_flush_task, "disp_flush_task", 1024 * 6, NULL, 2, &disp_flush_handle, 0);
@@ -904,37 +915,55 @@ void idf_setup()
     xTaskCreate(btn_task, "lora_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
 }
 
+bool ui_is_ui_thread()
+{
+    return ui_task_handle != NULL && xTaskGetCurrentTaskHandle() == ui_task_handle;
+}
+
 void idf_loop() 
 {
-    if (home_button_pending && !home_nav_in_progress) {
-        home_button_pending = false;
-        home_nav_in_progress = true;
-
-        Serial.println("[HOME] idf_loop: switching to springboard");
-
-        if (touch_indev) {
-            lv_indev_reset(touch_indev, NULL);
+    ui_task_handle = xTaskGetCurrentTaskHandle();
+    UiEvent event;
+    while (ui_event_q && xQueueReceive(ui_event_q, &event, 0) == pdTRUE) {
+        switch (event) {
+            case UiEvent::BOOT_SLEEP:
+                scr_mgr_switch(SCREEN0_ID, false);
+                ui_sleep();
+                break;
+            case UiEvent::TOGGLE_BACKLIGHT: {
+                int bl = 0;
+                ui_setting_get_backlight(&bl);
+                ui_setting_set_backlight(bl == 0 ? 1 : 0);
+                break;
+            }
+            case UiEvent::HOME_SWITCH_TO_SPRINGBOARD: {
+                if (home_nav_in_progress) {
+                    break;
+                }
+                home_button_pending = false;
+                home_nav_in_progress = true;
+                Serial.println("[HOME] idf_loop: switching to springboard");
+                if (touch_indev) {
+                    lv_indev_reset(touch_indev, NULL);
+                }
+                scr_mgr_switch(SCREEN0_ID, false);
+                if (touch_indev) {
+                    lv_indev_reset(touch_indev, NULL);
+                }
+                uint32_t now = millis();
+                HomeInputState prev = home_input_state;
+                home_input_state = HOME_INPUT_SUPPRESS_UNTIL_RELEASE;
+                home_input_state_start_ms = now;
+                home_input_deadline_ms = now + 1500;
+                Serial.printf("[HOME INPUT] %s -> %s reason=idf_loop_switch\n",
+                              home_input_state_name(prev), home_input_state_name(home_input_state));
+                home_nav_in_progress = false;
+                Serial.println("[HOME] idf_loop: switch complete, skipped one LVGL handler");
+                break;
+            }
         }
-
-        scr_mgr_switch(SCREEN0_ID, false);
-
-        if (touch_indev) {
-            lv_indev_reset(touch_indev, NULL);
-        }
-
-        uint32_t now = millis();
-        HomeInputState prev = home_input_state;
-        home_input_state = HOME_INPUT_SUPPRESS_UNTIL_RELEASE;
-        home_input_state_start_ms = now;
-        home_input_deadline_ms = now + 1500;
-        Serial.printf("[HOME INPUT] %s -> %s reason=idf_loop_switch\n",
-                      home_input_state_name(prev), home_input_state_name(home_input_state));
-
-        home_nav_in_progress = false;
-        Serial.println("[HOME] idf_loop: switch complete, skipped one LVGL handler");
-    } else {
-        lv_task_handler();
     }
+    lv_task_handler();
 
     ui_wifi_service_loop();
     delay(1);
