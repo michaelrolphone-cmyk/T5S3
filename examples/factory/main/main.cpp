@@ -1282,7 +1282,12 @@ void idf_setup()
     Serial.printf("[BOOT] bq25896 init before screen_init: %d\n", peri_buf[E_PERI_BQ25896]);
 
     Serial.println("[BOOT] before screen_init()");
+    // epdiy installs its own I2C driver during panel init. If Arduino Wire keeps
+    // the same bus active here, ESP-IDF returns "i2c driver install error" and
+    // epd_init can abort before LUT allocation.
+    Wire.end();
     screen_init();
+    Wire.begin(BOARD_SDA, BOARD_SCL);
     io_extend_lora_gps_power_on(true);
 
     int cursor_x = 100;
