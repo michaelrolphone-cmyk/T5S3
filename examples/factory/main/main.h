@@ -87,6 +87,7 @@ void disp_request_normal_frame(void);
 void disp_request_screen_replace(void);
 void disp_request_boot_replace(void);
 void disp_request_full_clear(void);
+bool disp_show_sleep_png_from_sd(const char *preferred_path);
 void sd_guard_init();
 bool sd_guard_lock(uint32_t timeout_ms);
 void sd_guard_unlock();
