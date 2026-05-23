@@ -4868,6 +4868,7 @@ static float system_sleep_scale = 1.0f;
 static int system_sleep_offset_x = 0;
 static int system_sleep_offset_y = 0;
 static lv_timer_t *scr8_shutdown_timer = NULL;
+static const uint32_t SCR8_SHUTDOWN_DELAY_MS = 7000;
 
 static void system_sleep_release_buffers(void)
 {
@@ -5005,7 +5006,8 @@ static void create8(lv_obj_t *parent)
             lv_timer_del(scr8_shutdown_timer);
             scr8_shutdown_timer = NULL;
         }
-        scr8_shutdown_timer = lv_timer_create(scr8_shutdown_timer_event, 2000, (void *)parent);
+        scr8_shutdown_timer = lv_timer_create(scr8_shutdown_timer_event, SCR8_SHUTDOWN_DELAY_MS, (void *)parent);
+        Serial.printf("[POWER_OFF] waiting %lu ms before shutdown to let EPD update complete\n", (unsigned long)SCR8_SHUTDOWN_DELAY_MS);
     }
 }
 
