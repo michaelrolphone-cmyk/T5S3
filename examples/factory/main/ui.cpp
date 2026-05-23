@@ -4013,6 +4013,11 @@ static bool maps_render_png_magic_ok = false;
 static bool maps_render_from_cache = false;
 static char maps_render_path[128] = {0};
 static PNG maps_png_decoder;
+enum MapsTileProvider {
+    MAPS_PROVIDER_STADIA_STAMEN_TONER = 0,
+    MAPS_PROVIDER_CARTO_LIGHT = 1,
+    MAPS_PROVIDER_OSM_STANDARD = 2
+};
 static const int MAPS_TILE_SIZE = 256;
 static const int MAPS_GRID_COLS = 2;
 static const int MAPS_GRID_ROWS = 3;
@@ -4020,6 +4025,74 @@ static const int MAPS_CANVAS_W = MAPS_TILE_SIZE * MAPS_GRID_COLS;
 static const int MAPS_CANVAS_H = MAPS_TILE_SIZE * MAPS_GRID_ROWS;
 static int maps_decode_dest_x = 0;
 static int maps_decode_dest_y = 0;
+static int maps_bw_threshold = 180;
+static MapsTileProvider maps_tile_provider = MAPS_PROVIDER_STADIA_STAMEN_TONER;
+static String maps_stadia_api_key;
+
+static const char *maps_provider_name(MapsTileProvider p)
+{
+    switch (p) {
+        case MAPS_PROVIDER_STADIA_STAMEN_TONER: return "stamen_toner";
+        case MAPS_PROVIDER_CARTO_LIGHT: return "carto_light";
+        case MAPS_PROVIDER_OSM_STANDARD: return "osm";
+        default: return "unknown";
+    }
+}
+
+static bool maps_build_tile_url(char *url, size_t url_len, MapsTileProvider provider, int z, int x, int y)
+{
+    switch (provider) {
+        case MAPS_PROVIDER_STADIA_STAMEN_TONER:
+            if (maps_stadia_api_key.length() > 0) {
+                lv_snprintf(url, url_len, "https://tiles.stadiamaps.com/tiles/stamen_toner/%d/%d/%d.png?api_key=%s", z, x, y, maps_stadia_api_key.c_str());
+            } else {
+                lv_snprintf(url, url_len, "https://tiles.stadiamaps.com/tiles/stamen_toner/%d/%d/%d.png", z, x, y);
+            }
+            return true;
+        case MAPS_PROVIDER_CARTO_LIGHT:
+            lv_snprintf(url, url_len, "https://a.basemaps.cartocdn.com/light_all/%d/%d/%d.png", z, x, y);
+            return true;
+        case MAPS_PROVIDER_OSM_STANDARD:
+            lv_snprintf(url, url_len, "https://tile.openstreetmap.org/%d/%d/%d.png", z, x, y);
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void maps_build_tile_url_redacted(char *url, size_t url_len, MapsTileProvider provider, int z, int x, int y)
+{
+    switch (provider) {
+        case MAPS_PROVIDER_STADIA_STAMEN_TONER:
+            lv_snprintf(url, url_len, "https://tiles.stadiamaps.com/tiles/stamen_toner/%d/%d/%d.png", z, x, y);
+            break;
+        case MAPS_PROVIDER_CARTO_LIGHT:
+            lv_snprintf(url, url_len, "https://a.basemaps.cartocdn.com/light_all/%d/%d/%d.png", z, x, y);
+            break;
+        case MAPS_PROVIDER_OSM_STANDARD:
+            lv_snprintf(url, url_len, "https://tile.openstreetmap.org/%d/%d/%d.png", z, x, y);
+            break;
+        default:
+            lv_snprintf(url, url_len, "unknown");
+            break;
+    }
+}
+
+static void maps_load_stadia_key()
+{
+    maps_stadia_api_key = "";
+    if (!peri_buf[E_PERI_SD_CARD]) return;
+    if (!sd_guard_lock(1000)) return;
+    File f = SD.open("/config/maps_stadia_key.txt", FILE_READ);
+    if (f) {
+        maps_stadia_api_key = f.readString();
+        maps_stadia_api_key.trim();
+        f.close();
+    }
+    sd_guard_unlock();
+    if (maps_stadia_api_key.length() > 0) Serial.println("[MAP] Stadia API key loaded");
+    else Serial.println("[MAP] No Stadia API key configured");
+}
 
 static bool maps_coord_valid(double lat, double lon)
 {
@@ -4044,28 +4117,36 @@ static void maps_tile_for(double lat,double lon,int z,int *tx,int *ty,int *px,in
     *tx=ix;*ty=iy;*px=ipx;*py=ipy;
 }
 
-static bool maps_cache_dirs(int z,int x)
+static bool maps_cache_dirs(const char *provider, int z,int x)
 {
     if(!peri_buf[E_PERI_SD_CARD]) return false;
     if(!sd_guard_lock(2000)) return false;
     if(!SD.exists("/cache")) SD.mkdir("/cache");
     if(!SD.exists("/cache/maps")) SD.mkdir("/cache/maps");
-    char p1[32]; lv_snprintf(p1,sizeof(p1),"/cache/maps/%d",z); if(!SD.exists(p1)) SD.mkdir(p1);
-    char p2[64]; lv_snprintf(p2,sizeof(p2),"/cache/maps/%d/%d",z,x); if(!SD.exists(p2)) SD.mkdir(p2);
+    char p0[96]; lv_snprintf(p0,sizeof(p0),"/cache/maps/%s",provider); if(!SD.exists(p0)) SD.mkdir(p0);
+    char p1[96]; lv_snprintf(p1,sizeof(p1),"/cache/maps/%s/%d",provider,z); if(!SD.exists(p1)) SD.mkdir(p1);
+    char p2[128]; lv_snprintf(p2,sizeof(p2),"/cache/maps/%s/%d/%d",provider,z,x); if(!SD.exists(p2)) SD.mkdir(p2);
     sd_guard_unlock();
     return true;
 }
 
-static bool maps_download_tile(const char *path, int z,int x,int y)
+static bool maps_download_tile(const char *path, MapsTileProvider provider, int z,int x,int y, int *http_code, String &url_redacted)
 {
-    char url[128]; lv_snprintf(url,sizeof(url),"https://tile.openstreetmap.org/%d/%d/%d.png",z,x,y);
-    Serial.printf("[MAP] HTTP GET %s\n", url);
+    char url[256];
+    char redacted[256];
+    *http_code = -1;
+    if (!maps_build_tile_url(url, sizeof(url), provider, z, x, y)) return false;
+    maps_build_tile_url_redacted(redacted, sizeof(redacted), provider, z, x, y);
+    url_redacted = String(redacted);
+    Serial.printf("[MAP] provider=%s z=%d x=%d y=%d\n", maps_provider_name(provider), z, x, y);
+    Serial.printf("[MAP] HTTP GET %s\n", redacted);
     HTTPClient http;
     http.setUserAgent("T5S3-PaperPro-Maps/0.1 (contact: michael.rol.phone@gmail.com)");
     http.setTimeout(10000);
     if(!http.begin(url)) return false;
     int code=http.GET();
-    if(code!=200){ http.end(); Serial.printf("[MAP] error: http=%d\n",code); return false; }
+    *http_code = code;
+    if(code!=200){ http.end(); Serial.printf("[MAP] provider=%s http=%d\n", maps_provider_name(provider), code); return false; }
     WiFiClient *stream=http.getStreamPtr();
     if (!sd_guard_lock(3000)) { http.end(); return false; }
     File f=SD.open(path, FILE_WRITE);
@@ -4125,7 +4206,7 @@ static bool maps_decode_png_to_canvas(const char *path, String &decode_result)
             int g = ((c >> 5) & 0x3F) * 255 / 63;
             int b = (c & 0x1F) * 255 / 31;
             int gray = (299 * r + 587 * g + 114 * b) / 1000;
-            bool black = gray < 180;
+            bool black = gray < maps_bw_threshold;
             if (black) maps_nonwhite_pixels++;
             int dst_x = maps_decode_dest_x + x;
             int dst_y = maps_decode_dest_y + pDraw->y;
@@ -4188,42 +4269,67 @@ static bool maps_try_render(double lat,double lon)
                 dbg += "tile[" + String(row) + "," + String(col) + "] path=(clamped y) source=none decode=skip\n";
                 continue;
             }
-            char tile[96];
-            lv_snprintf(tile, sizeof(tile), "/cache/maps/%d/%d/%d.png", z, tile_x, tile_y);
-            bool cache_hit = has_sd && SD.exists(tile);
-            const char *source = cache_hit ? "cache" : "download";
-            if (!cache_hit) {
-                if (WiFi.status() != WL_CONNECTED) {
-                    wifi_load_saved_settings();
-                    if (wifi_sta_ssid.length() == 0) { maps_set_status("Map unavailable"); return false; }
-                    if (!maps_waiting_wifi) { maps_wifi_start_ms = millis(); maps_waiting_wifi = true; maps_set_status("Connecting WiFi..."); wifi_connect_saved_sta("maps tile download"); }
-                    return false;
+            const MapsTileProvider providers[] = {MAPS_PROVIDER_STADIA_STAMEN_TONER, MAPS_PROVIDER_CARTO_LIGHT, MAPS_PROVIDER_OSM_STANDARD};
+            bool decoded = false;
+            bool tile_attempted = false;
+            for (size_t pi = 0; pi < ARRAY_LEN(providers); ++pi) {
+                MapsTileProvider provider = providers[pi];
+                const char *provider_name = maps_provider_name(provider);
+                char tile[160];
+                lv_snprintf(tile, sizeof(tile), "/cache/maps/%s/%d/%d/%d.png", provider_name, z, tile_x, tile_y);
+                bool cache_hit = has_sd && SD.exists(tile);
+                const char *source = cache_hit ? "cache" : "download";
+                int http_code = -1;
+                String url_redacted = "";
+                String decode_result = "not_attempted";
+                String fallback_to = "";
+                tile_attempted = true;
+                if (!cache_hit) {
+                    if (WiFi.status() != WL_CONNECTED) {
+                        wifi_load_saved_settings();
+                        if (wifi_sta_ssid.length() == 0) { maps_set_status("Map unavailable"); return false; }
+                        if (!maps_waiting_wifi) { maps_wifi_start_ms = millis(); maps_waiting_wifi = true; maps_set_status("Connecting WiFi..."); wifi_connect_saved_sta("maps tile download"); }
+                        return false;
+                    }
+                    if (!has_sd) { maps_set_status("SD unavailable"); return false; }
+                    maps_cache_dirs(provider_name, z, tile_x);
+                    bool dl_ok = maps_download_tile(tile, provider, z, tile_x, tile_y, &http_code, url_redacted);
+                    if (!dl_ok) {
+                        any_failed = true;
+                        if (pi + 1 < ARRAY_LEN(providers) && (http_code == 401 || http_code == 403 || http_code == 404 || http_code < 0)) {
+                            fallback_to = maps_provider_name(providers[pi + 1]);
+                            Serial.printf("[MAP] provider=%s http=%d; trying fallback\n", provider_name, http_code);
+                        }
+                        dbg += "tile[" + String(row) + "," + String(col) + "] provider=" + String(provider_name) + " url=" + url_redacted + " http=" + String(http_code) + " fallback=" + fallback_to + " cache_path=" + String(tile) + " decode=download_failed\n";
+                        continue;
+                    }
+                } else {
+                    maps_build_tile_url_redacted((char*)md_text_buf, sizeof(md_text_buf), provider, z, tile_x, tile_y);
+                    url_redacted = String(md_text_buf);
                 }
-                if (!has_sd) { maps_set_status("SD unavailable"); return false; }
-                maps_cache_dirs(z, tile_x);
-                if (!maps_download_tile(tile, z, tile_x, tile_y)) {
+                size_t file_size = 0;
+                bool png_magic_ok = false;
+                if (!maps_check_png_file(tile, &file_size, &png_magic_ok) || file_size <= 100 || !png_magic_ok) {
                     any_failed = true;
-                    Serial.printf("[MAP] grid tile row=%d col=%d z=%d x=%d y=%d source=download decode=download_failed\n", row, col, z, tile_x, tile_y);
-                    dbg += "tile[" + String(row) + "," + String(col) + "] path=" + String(tile) + " source=download decode=download_failed\n";
+                    dbg += "tile[" + String(row) + "," + String(col) + "] provider=" + String(provider_name) + " url=" + url_redacted + " http=" + String(http_code) + " fallback=" + fallback_to + " cache_path=" + String(tile) + " decode=invalid_png\n";
                     continue;
                 }
-            }
-            size_t file_size = 0;
-            bool png_magic_ok = false;
-            if (!maps_check_png_file(tile, &file_size, &png_magic_ok) || file_size <= 100 || !png_magic_ok) {
+                decoded = maps_decode_png_to_canvas(tile, decode_result);
+                Serial.printf("[MAP] grid tile row=%d col=%d z=%d x=%d y=%d source=%s provider=%s decode=%s\n", row, col, z, tile_x, tile_y, source, provider_name, decode_result.c_str());
+                dbg += "tile[" + String(row) + "," + String(col) + "] provider=" + String(provider_name) + " url=" + url_redacted + " http=" + String(http_code) + " fallback=" + fallback_to + " cache_path=" + String(tile) + " decode=" + decode_result + "\n";
+                if (decoded) {
+                    maps_tile_provider = provider;
+                    break;
+                }
                 any_failed = true;
-                Serial.printf("[MAP] grid tile row=%d col=%d z=%d x=%d y=%d source=%s decode=invalid_png\n", row, col, z, tile_x, tile_y, source);
-                dbg += "tile[" + String(row) + "," + String(col) + "] path=" + String(tile) + " source=" + String(source) + " decode=invalid_png\n";
-                continue;
             }
-            String decode_result;
-            bool decoded = maps_decode_png_to_canvas(tile, decode_result);
-            Serial.printf("[MAP] grid tile row=%d col=%d z=%d x=%d y=%d source=%s decode=%s\n", row, col, z, tile_x, tile_y, source, decode_result.c_str());
-            dbg += "tile[" + String(row) + "," + String(col) + "] path=" + String(tile) + " source=" + String(source) + " decode=" + decode_result + "\n";
             if (decoded) {
                 any_decoded = true;
             } else {
                 any_failed = true;
+                if (tile_attempted) {
+                    Serial.printf("[MAP] grid tile row=%d col=%d z=%d x=%d y=%d decode=all_providers_failed\n", row, col, z, tile_x, tile_y);
+                }
             }
         }
     }
@@ -4285,7 +4391,7 @@ static void create13(lv_obj_t *p){
     maps_marker=lv_obj_create(p); lv_obj_set_size(maps_marker, 32, 32); lv_obj_set_style_radius(maps_marker, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_opa(maps_marker, LV_OPA_TRANSP, 0); lv_obj_set_style_border_width(maps_marker, 3, 0);
     maps_info=lv_label_create(p); lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN);
 }
-static void entry13(void){ Serial.println("[MAP] entry"); ui_gps_task_resume(); maps_waiting_wifi=false; maps_set_status("Waiting for GPS fix..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 2500, NULL); lv_timer_ready(maps_timer);}
+static void entry13(void){ Serial.println("[MAP] entry"); maps_load_stadia_key(); ui_gps_task_resume(); maps_waiting_wifi=false; maps_set_status("Waiting for GPS fix..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 2500, NULL); lv_timer_ready(maps_timer);}
 static void exit13(void){ if(maps_timer){ lv_timer_del(maps_timer); maps_timer=NULL; } maps_waiting_wifi=false; }
 static void destroy13(void){ if(maps_canvas_buf){ free(maps_canvas_buf); maps_canvas_buf=NULL; } if(maps_png_line_buf){ free(maps_png_line_buf); maps_png_line_buf=NULL; } if(maps_png_raw){ free(maps_png_raw); maps_png_raw=NULL; maps_png_raw_size=0; } }
 static scr_lifecycle_t screen13 = {.create=create13,.entry=entry13,.exit=exit13,.destroy=destroy13};
