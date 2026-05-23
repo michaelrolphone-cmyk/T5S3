@@ -4828,6 +4828,120 @@ static void scr8_shutdown_timer_event(lv_timer_t *t)
     ui_shutdown();
 }
 
+static const char *SYSTEM_SLEEP_IMAGE_PATH = "/system/display/sleep.png";
+static const size_t SYSTEM_SLEEP_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+static lv_color_t *system_sleep_canvas_buf = NULL;
+static uint8_t *system_sleep_png_raw = NULL;
+static size_t system_sleep_png_raw_size = 0;
+static uint16_t *system_sleep_png_line_buf = NULL;
+static lv_img_dsc_t system_sleep_canvas_dsc = {
+    .header = {.always_zero = 0, .w = LV_HOR_RES, .h = LV_VER_RES, .cf = LV_IMG_CF_TRUE_COLOR},
+    .data_size = LV_HOR_RES * LV_VER_RES * sizeof(lv_color_t),
+    .data = NULL,
+};
+static PNG system_sleep_png_decoder;
+static float system_sleep_scale = 1.0f;
+static int system_sleep_offset_x = 0;
+static int system_sleep_offset_y = 0;
+static lv_timer_t *scr9_sleep_timer = NULL;
+
+static void system_sleep_release_buffers(void)
+{
+    if (system_sleep_canvas_buf) { free(system_sleep_canvas_buf); system_sleep_canvas_buf = NULL; }
+    if (system_sleep_png_line_buf) { free(system_sleep_png_line_buf); system_sleep_png_line_buf = NULL; }
+    if (system_sleep_png_raw) { free(system_sleep_png_raw); system_sleep_png_raw = NULL; system_sleep_png_raw_size = 0; }
+    system_sleep_canvas_dsc.data = NULL;
+}
+
+static bool system_sleep_load_png_to_canvas(const char *path, String &reason)
+{
+    reason = "";
+    if (!path || !path[0]) { reason = "path_empty"; return false; }
+    if (!peri_buf[E_PERI_SD_CARD]) { reason = "sd_unavailable"; return false; }
+    if (!sd_guard_lock(3000)) { reason = "sd_lock_timeout"; return false; }
+    File f = SD.open(path, FILE_READ);
+    if (!f || f.isDirectory()) { sd_guard_unlock(); reason = "open_failed"; return false; }
+    size_t sz = (size_t)f.size();
+    if (sz < 8) { f.close(); sd_guard_unlock(); reason = "short_file"; return false; }
+    if (sz > SYSTEM_SLEEP_IMAGE_MAX_BYTES) { f.close(); sd_guard_unlock(); reason = "file_too_large"; return false; }
+    if (system_sleep_png_raw) { free(system_sleep_png_raw); system_sleep_png_raw = NULL; system_sleep_png_raw_size = 0; }
+    system_sleep_png_raw = (uint8_t *)ps_malloc(sz);
+    if (!system_sleep_png_raw) { f.close(); sd_guard_unlock(); reason = "raw_alloc_failed"; return false; }
+    size_t n = f.read(system_sleep_png_raw, sz);
+    f.close();
+    sd_guard_unlock();
+    if (n != sz) { free(system_sleep_png_raw); system_sleep_png_raw = NULL; reason = "short_read"; return false; }
+    system_sleep_png_raw_size = sz;
+
+    const uint8_t png_magic[8] = {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
+    if (memcmp(system_sleep_png_raw, png_magic, sizeof(png_magic)) != 0) { reason = "invalid_png_magic"; return false; }
+
+    if (!system_sleep_canvas_buf) system_sleep_canvas_buf = (lv_color_t *)ps_malloc(LV_HOR_RES * LV_VER_RES * sizeof(lv_color_t));
+    if (!system_sleep_canvas_buf) { reason = "canvas_alloc_failed"; return false; }
+    if (!system_sleep_png_line_buf) system_sleep_png_line_buf = (uint16_t *)ps_malloc(4096 * sizeof(uint16_t));
+    if (!system_sleep_png_line_buf) { reason = "line_alloc_failed"; return false; }
+
+    auto open_cb = [](PNGDRAW *pDraw) -> int { (void)pDraw; return 1; };
+    int rc = system_sleep_png_decoder.openRAM(system_sleep_png_raw, (int)system_sleep_png_raw_size, open_cb);
+    if (rc != PNG_SUCCESS) { reason = "png_open_failed"; return false; }
+    int src_w = system_sleep_png_decoder.getWidth();
+    int src_h = system_sleep_png_decoder.getHeight();
+    system_sleep_png_decoder.close();
+    if (src_w <= 0 || src_h <= 0) { reason = "invalid_dimensions"; return false; }
+    if (src_w > 4096 || src_h > 4096) { reason = "source_too_large"; return false; }
+
+    for (int i = 0; i < LV_HOR_RES * LV_VER_RES; ++i) system_sleep_canvas_buf[i] = lv_color_white();
+
+    system_sleep_scale = (float)LV_HOR_RES / (float)src_w;
+    int scaled_w = LV_HOR_RES;
+    int scaled_h = (int)((float)src_h * system_sleep_scale);
+    if (scaled_h > LV_VER_RES) {
+        system_sleep_scale = (float)LV_VER_RES / (float)src_h;
+        scaled_h = LV_VER_RES;
+        scaled_w = (int)((float)src_w * system_sleep_scale);
+    }
+    if (scaled_w < 1) scaled_w = 1;
+    if (scaled_h < 1) scaled_h = 1;
+    system_sleep_offset_x = (LV_HOR_RES - scaled_w) / 2;
+    system_sleep_offset_y = (LV_VER_RES - scaled_h) / 2;
+
+    auto draw_cb = [](PNGDRAW *pDraw) -> int {
+        if (!pDraw || !system_sleep_canvas_buf || !system_sleep_png_line_buf) return 0;
+        system_sleep_png_decoder.getLineAsRGB565(pDraw, system_sleep_png_line_buf, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
+        int src_y = pDraw->y;
+        int dst_y0 = system_sleep_offset_y + (int)floorf(src_y * system_sleep_scale);
+        int dst_y1 = system_sleep_offset_y + (int)floorf((src_y + 1) * system_sleep_scale);
+        if (dst_y1 <= dst_y0) dst_y1 = dst_y0 + 1;
+        for (int src_x = 0; src_x < pDraw->iWidth; ++src_x) {
+            uint16_t c = system_sleep_png_line_buf[src_x];
+            int r = ((c >> 11) & 0x1F) * 255 / 31;
+            int g = ((c >> 5) & 0x3F) * 255 / 63;
+            int b = (c & 0x1F) * 255 / 31;
+            int gray = (299 * r + 587 * g + 114 * b) / 1000;
+            lv_color_t pix = (gray < 128) ? lv_color_black() : lv_color_white();
+            int dst_x0 = system_sleep_offset_x + (int)floorf(src_x * system_sleep_scale);
+            int dst_x1 = system_sleep_offset_x + (int)floorf((src_x + 1) * system_sleep_scale);
+            if (dst_x1 <= dst_x0) dst_x1 = dst_x0 + 1;
+            for (int yy = dst_y0; yy < dst_y1; ++yy) {
+                if (yy < 0 || yy >= LV_VER_RES) continue;
+                for (int xx = dst_x0; xx < dst_x1; ++xx) {
+                    if (xx < 0 || xx >= LV_HOR_RES) continue;
+                    system_sleep_canvas_buf[yy * LV_HOR_RES + xx] = pix;
+                }
+            }
+        }
+        return 1;
+    };
+
+    rc = system_sleep_png_decoder.openRAM(system_sleep_png_raw, (int)system_sleep_png_raw_size, draw_cb);
+    if (rc != PNG_SUCCESS) { reason = "png_open_failed"; return false; }
+    rc = system_sleep_png_decoder.decode(NULL, 0);
+    system_sleep_png_decoder.close();
+    if (rc != PNG_SUCCESS) { reason = "png_decode_failed"; return false; }
+    system_sleep_canvas_dsc.data = (const uint8_t *)system_sleep_canvas_buf;
+    return true;
+}
+
 static void create8(lv_obj_t *parent)
 {
     if(battery_25896_is_vbus_in()) 
@@ -4849,7 +4963,13 @@ static void create8(lv_obj_t *parent)
         ui_shutdown_vcom(5000);
 
         lv_obj_t * img = lv_img_create(parent);
-        lv_img_set_src(img, &img_start);
+        String reason = "";
+        if (system_sleep_load_png_to_canvas(SYSTEM_SLEEP_IMAGE_PATH, reason)) {
+            lv_img_set_src(img, &system_sleep_canvas_dsc);
+        } else {
+            lv_img_set_src(img, &img_start);
+            Serial.printf("[SLEEP_IMAGE] fallback path=%s reason=%s\n", SYSTEM_SLEEP_IMAGE_PATH, reason.c_str());
+        }
         lv_obj_center(img);
 
         lv_timer_create(scr8_shutdown_timer_event, 2000, (void *)parent);
@@ -4862,7 +4982,7 @@ static void entry8(void) {
 static void exit8(void) {
 }
 static void destroy8(void) { 
-
+    system_sleep_release_buffers();
 }
 
 static scr_lifecycle_t screen8 = {
@@ -4888,66 +5008,37 @@ static void scr9_shutdown_timer_event(lv_timer_t *t)
     ui_sleep();
 }
 
-static lv_color_t *sleep_screen_png_buf = NULL;
-static lv_img_dsc_t sleep_screen_png_dsc = {
-    .header = {.always_zero = 0, .w = SPRINGBOARD_ICON_W, .h = SPRINGBOARD_ICON_H, .cf = LV_IMG_CF_TRUE_COLOR},
-    .data_size = SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t),
-    .data = NULL,
-};
-static bool sleep_screen_png_ready = false;
-
-static void sleep_screen_free_png(void)
-{
-    if (sleep_screen_png_buf) {
-        free(sleep_screen_png_buf);
-        sleep_screen_png_buf = NULL;
-    }
-    sleep_screen_png_dsc.data = NULL;
-    sleep_screen_png_ready = false;
-}
-
 static void create9(lv_obj_t *parent)
 {
+    scr_back_btn_create(parent, "Sleep", scr9_btn_event_cb);
     lv_obj_t *img = lv_img_create(parent);
-    bool use_fallback = true;
-
-    if (springboard_icon_png_exists("/system/display/sleep.png")) {
-        if (!sleep_screen_png_buf) {
-            sleep_screen_png_buf = (lv_color_t *)ps_malloc(SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t));
-        }
-        if (sleep_screen_png_buf) {
-            char reason[64] = {0};
-            if (springboard_decode_png_to_buf("/system/display/sleep.png", sleep_screen_png_buf, reason, sizeof(reason))) {
-                sleep_screen_png_dsc.data = (const uint8_t *)sleep_screen_png_buf;
-                lv_img_set_src(img, &sleep_screen_png_dsc);
-                sleep_screen_png_ready = true;
-                use_fallback = false;
-            } else {
-                Serial.printf("[SLEEP] decode failed /system/display/sleep.png: %s; using fallback img_sleep\n", reason);
-            }
-        } else {
-            Serial.println("[SLEEP] allocation failed for /system/display/sleep.png; using fallback img_sleep");
-        }
+    String reason = "";
+    if (system_sleep_load_png_to_canvas(SYSTEM_SLEEP_IMAGE_PATH, reason)) {
+        lv_img_set_src(img, &system_sleep_canvas_dsc);
     } else {
-        Serial.println("[SLEEP] missing /system/display/sleep.png; using fallback img_sleep");
-    }
-
-    if (use_fallback) {
-        lv_img_set_src(img, &img_sleep);
+        lv_img_set_src(img, &img_start);
+        Serial.printf("[SLEEP_IMAGE] fallback path=%s reason=%s\n", SYSTEM_SLEEP_IMAGE_PATH, reason.c_str());
     }
     lv_obj_center(img);
-    scr_back_btn_create(parent, "Sleep", scr9_btn_event_cb);
 
-    lv_timer_create(scr9_shutdown_timer_event, 3000, NULL);
+    if (scr9_sleep_timer) {
+        lv_timer_del(scr9_sleep_timer);
+        scr9_sleep_timer = NULL;
+    }
+    scr9_sleep_timer = lv_timer_create(scr9_shutdown_timer_event, 3000, NULL);
 }
 
 static void entry9(void) {
     
 }
 static void exit9(void) {
+    if (scr9_sleep_timer) {
+        lv_timer_del(scr9_sleep_timer);
+        scr9_sleep_timer = NULL;
+    }
 }
 static void destroy9(void) { 
-    sleep_screen_free_png();
+    system_sleep_release_buffers();
 }
 
 static scr_lifecycle_t screen9 = {
