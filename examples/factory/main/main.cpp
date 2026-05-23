@@ -1379,18 +1379,11 @@ void idf_setup()
     }
 
 
-    int cursor_x = 100;
-    int cursor_y = epd_rotated_display_height() / 2 - 100 - 50;
     uint8_t io_val0 = pca9555_read_input(BOARD_I2C_PORT, 0);
     uint8_t io_val1 = pca9555_read_input(BOARD_I2C_PORT, 1);
-    bool io_ret = false;
-    lv_snprintf(global_buf, GLOBAL_BUF_LEN, "io_extend: 0x%02x, 0x%02x", io_val0, io_val1);
-    if(((io_val0 & 0x01) && (io_val1 & 0x04))) io_ret = true;
-    disp_init_status(global_buf, &cursor_x, &cursor_y, io_ret);
-
-    cursor_x = 100;
-    cursor_y = epd_rotated_display_height() / 2 - 100 - 0;
-    disp_init_status("BQ27220 Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_BQ27220]);
+    bool io_ret = ((io_val0 & 0x01) && (io_val1 & 0x04));
+    Serial.printf("[BOOT STATUS] io_extend=%s io0=0x%02x io1=0x%02x\n", io_ret ? "PASS" : "FAIL", io_val0, io_val1);
+    Serial.printf("[BOOT STATUS] BQ27220=%s\n", peri_buf[E_PERI_BQ27220] ? "PASS" : "FAIL");
 
     peri_buf[E_PERI_INK_POWER]  = false; 
 
@@ -1402,40 +1395,39 @@ void idf_setup()
                       battery_25896_get_VBAT(),
                       battery_25896_is_chr());
     }
-    cursor_x = 100;
-    cursor_y = epd_rotated_display_height() / 2 - 100 + 50;
-    disp_init_status("BQ25896 Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_BQ25896]);
+    Serial.printf("[BOOT STATUS] BQ25896=%s\n", peri_buf[E_PERI_BQ25896] ? "PASS" : "FAIL");
 
     peri_buf[E_PERI_RTC]        = rtc_pcf8563_init(); // RTC --- 0x51
-    cursor_x = 100;
-    cursor_y = epd_rotated_display_height() / 2 - 100 + 100;
-    disp_init_status("RTC (PCF8563) Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_RTC]);
+    Serial.printf("[BOOT STATUS] RTC=%s\n", peri_buf[E_PERI_RTC] ? "PASS" : "FAIL");
 
     ui_event_q = xQueueCreate(16, sizeof(UiEvent));
     Serial.println("[BOOT PHASE] before Touch");
     peri_buf[E_PERI_TOUCH]      = touch_gt911_init();  // Touch --- 0x5D;
-    cursor_x = 100;
-    cursor_y = epd_rotated_display_height() / 2 - 100 + 150;
-    disp_init_status("Touch (GT911) Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_TOUCH]);
+    Serial.printf("[BOOT STATUS] Touch=%s\n", peri_buf[E_PERI_TOUCH] ? "PASS" : "FAIL");
 
     Serial.println("[BOOT PHASE] before LoRa");
     peri_buf[E_PERI_LORA]       = lora_sx1262_init();
-    cursor_x = 100;
-    cursor_y = epd_rotated_display_height() / 2 - 100 + 200;
-    disp_init_status("LoRa (SX1262) Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_LORA]);
+    Serial.printf("[BOOT STATUS] LoRa=%s\n", peri_buf[E_PERI_LORA] ? "PASS" : "FAIL");
 
     peri_buf[E_PERI_SD_CARD]    = sd_card_init();
     sd_guard_init();
-    cursor_x = 100;
-    cursor_y = epd_rotated_display_height() / 2 - 100 + 250;
-    disp_init_status("SD Card Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_SD_CARD]);
+    Serial.printf("[BOOT STATUS] SD=%s\n", peri_buf[E_PERI_SD_CARD] ? "PASS" : "FAIL");
 
+    size_t gps_pre_free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t gps_pre_largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    size_t gps_pre_free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     Serial.println("[BOOT PHASE] before GPS");
+    Serial.printf("[GPS INIT] pre free_internal=%u largest_internal=%u free_psram=%u\n",
+                  (unsigned)gps_pre_free_internal, (unsigned)gps_pre_largest_internal, (unsigned)gps_pre_free_psram);
     peri_buf[E_PERI_GPS]        = gps_init();
-    cursor_x = 100;
-    cursor_y = epd_rotated_display_height() / 2 - 100 +300;
-    disp_init_status("GPS Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_GPS]);
+    Serial.printf("[BOOT STATUS] GPS=%s\n", peri_buf[E_PERI_GPS] ? "PASS" : "FAIL");
+    Serial.printf("[GPS INIT] result=%d free_internal=%u largest_internal=%u\n",
+                  peri_buf[E_PERI_GPS] ? 1 : 0,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    Serial.printf("[BOOT PHASE] after GPS result=%d\n", peri_buf[E_PERI_GPS] ? 1 : 0);
 
+    Serial.println("[BOOT PHASE] before LVGL");
     printf("LVGL Init\n");
     lv_port_disp_init();
     Serial.println("[BOOT] after lv_port_disp_init()");
