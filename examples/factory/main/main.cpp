@@ -1315,19 +1315,6 @@ void idf_setup()
     pinMode(BOARD_IO48_BTN, INPUT_PULLUP);
 #endif
 
-    BaseType_t btn_rc = xTaskCreate(btn_task, "btn_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
-    Serial.printf("[BUTTON TASK] create rc=%ld handle=%p free_internal=%u largest_internal=%u\n",
-                  (long)btn_rc,
-                  (void*)btn_handle,
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-    if (btn_rc != pdPASS) {
-        Serial.printf("[BUTTON TASK ERROR] create failed rc=%ld free_internal=%u largest_internal=%u\n",
-                      (long)btn_rc,
-                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-    }
-
     WiFi.persistent(false);
     WiFi.disconnect(true, true);
     WiFi.mode(WIFI_OFF);
@@ -1345,6 +1332,19 @@ void idf_setup()
     screen_init();
     Wire.begin(BOARD_SDA, BOARD_SCL);
     io_extend_lora_gps_power_on(true);
+    BaseType_t btn_rc = xTaskCreate(btn_task, "btn_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
+    Serial.printf("[BUTTON TASK] create rc=%ld handle=%p free_internal=%u largest_internal=%u\n",
+                  (long)btn_rc,
+                  (void*)btn_handle,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    if (btn_rc != pdPASS) {
+        Serial.printf("[BUTTON TASK ERROR] create failed rc=%ld free_internal=%u largest_internal=%u\n",
+                      (long)btn_rc,
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
+
 
     int cursor_x = 100;
     int cursor_y = epd_rotated_display_height() / 2 - 100 - 50;
