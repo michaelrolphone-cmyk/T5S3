@@ -4828,8 +4828,8 @@ static void scr8_shutdown_timer_event(lv_timer_t *t)
     ui_shutdown();
 }
 
-static const char *SYSTEM_SLEEP_IMAGE_PATH = "/system/display/sleep.png";
-static const size_t SYSTEM_SLEEP_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+static const char *SYSTEM_POWER_OFF_IMAGE_PATH = "/system/display/sleep.png";
+static const size_t SYSTEM_POWER_OFF_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 static lv_color_t *system_sleep_canvas_buf = NULL;
 static uint8_t *system_sleep_png_raw = NULL;
 static size_t system_sleep_png_raw_size = 0;
@@ -4843,7 +4843,7 @@ static PNG system_sleep_png_decoder;
 static float system_sleep_scale = 1.0f;
 static int system_sleep_offset_x = 0;
 static int system_sleep_offset_y = 0;
-static lv_timer_t *scr9_sleep_timer = NULL;
+static lv_timer_t *scr8_shutdown_timer = NULL;
 
 static void system_sleep_release_buffers(void)
 {
@@ -4863,7 +4863,7 @@ static bool system_sleep_load_png_to_canvas(const char *path, String &reason)
     if (!f || f.isDirectory()) { sd_guard_unlock(); reason = "open_failed"; return false; }
     size_t sz = (size_t)f.size();
     if (sz < 8) { f.close(); sd_guard_unlock(); reason = "short_file"; return false; }
-    if (sz > SYSTEM_SLEEP_IMAGE_MAX_BYTES) { f.close(); sd_guard_unlock(); reason = "file_too_large"; return false; }
+    if (sz > SYSTEM_POWER_OFF_IMAGE_MAX_BYTES) { f.close(); sd_guard_unlock(); reason = "file_too_large"; return false; }
     if (system_sleep_png_raw) { free(system_sleep_png_raw); system_sleep_png_raw = NULL; system_sleep_png_raw_size = 0; }
     system_sleep_png_raw = (uint8_t *)ps_malloc(sz);
     if (!system_sleep_png_raw) { f.close(); sd_guard_unlock(); reason = "raw_alloc_failed"; return false; }
@@ -4964,15 +4964,19 @@ static void create8(lv_obj_t *parent)
 
         lv_obj_t * img = lv_img_create(parent);
         String reason = "";
-        if (system_sleep_load_png_to_canvas(SYSTEM_SLEEP_IMAGE_PATH, reason)) {
+        if (system_sleep_load_png_to_canvas(SYSTEM_POWER_OFF_IMAGE_PATH, reason)) {
             lv_img_set_src(img, &system_sleep_canvas_dsc);
         } else {
             lv_img_set_src(img, &img_start);
-            Serial.printf("[SLEEP_IMAGE] fallback path=%s reason=%s\n", SYSTEM_SLEEP_IMAGE_PATH, reason.c_str());
+            Serial.printf("[POWER_OFF] fallback path=%s reason=%s\n", SYSTEM_POWER_OFF_IMAGE_PATH, reason.c_str());
         }
         lv_obj_center(img);
 
-        lv_timer_create(scr8_shutdown_timer_event, 2000, (void *)parent);
+        if (scr8_shutdown_timer) {
+            lv_timer_del(scr8_shutdown_timer);
+            scr8_shutdown_timer = NULL;
+        }
+        scr8_shutdown_timer = lv_timer_create(scr8_shutdown_timer_event, 2000, (void *)parent);
     }
 }
 
@@ -4980,8 +4984,16 @@ static void entry8(void) {
     
 }
 static void exit8(void) {
+    if (scr8_shutdown_timer) {
+        lv_timer_del(scr8_shutdown_timer);
+        scr8_shutdown_timer = NULL;
+    }
 }
 static void destroy8(void) { 
+    if (scr8_shutdown_timer) {
+        lv_timer_del(scr8_shutdown_timer);
+        scr8_shutdown_timer = NULL;
+    }
     system_sleep_release_buffers();
 }
 
@@ -5011,34 +5023,15 @@ static void scr9_shutdown_timer_event(lv_timer_t *t)
 static void create9(lv_obj_t *parent)
 {
     scr_back_btn_create(parent, "Sleep", scr9_btn_event_cb);
-    lv_obj_t *img = lv_img_create(parent);
-    String reason = "";
-    if (system_sleep_load_png_to_canvas(SYSTEM_SLEEP_IMAGE_PATH, reason)) {
-        lv_img_set_src(img, &system_sleep_canvas_dsc);
-    } else {
-        lv_img_set_src(img, &img_start);
-        Serial.printf("[SLEEP_IMAGE] fallback path=%s reason=%s\n", SYSTEM_SLEEP_IMAGE_PATH, reason.c_str());
-    }
-    lv_obj_center(img);
-
-    if (scr9_sleep_timer) {
-        lv_timer_del(scr9_sleep_timer);
-        scr9_sleep_timer = NULL;
-    }
-    scr9_sleep_timer = lv_timer_create(scr9_shutdown_timer_event, 3000, NULL);
+    lv_timer_create(scr9_shutdown_timer_event, 3000, NULL);
 }
 
 static void entry9(void) {
     
 }
 static void exit9(void) {
-    if (scr9_sleep_timer) {
-        lv_timer_del(scr9_sleep_timer);
-        scr9_sleep_timer = NULL;
-    }
 }
 static void destroy9(void) { 
-    system_sleep_release_buffers();
 }
 
 static scr_lifecycle_t screen9 = {
