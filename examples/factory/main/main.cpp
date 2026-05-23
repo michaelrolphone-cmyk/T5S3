@@ -1571,6 +1571,7 @@ void idf_loop()
         Serial.println("[UI EVENT] skipped lv_task_handler after queued UI transition");
     }
 
+    gps_service_loop();
     ui_wifi_service_loop();
     delay(1);
 }
