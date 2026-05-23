@@ -3774,26 +3774,28 @@ static void web_fetch_worker(void *param)
 {
     char *in_url = (char *)param;
     char url[256] = {0};
+    HTTPClient http;
+    bool http_started = false;
+    int code = 0;
     if(strstr(in_url, "http://") == in_url || strstr(in_url, "https://") == in_url) lv_snprintf(url, sizeof(url), "%s", in_url);
     else lv_snprintf(url, sizeof(url), "http://%s", in_url);
 
     if(WiFi.status() != WL_CONNECTED) { web_fetch_result = "Wi-Fi is not connected. Open Wi-Fi app and connect first."; goto done; }
 
-    HTTPClient http;
     if(!http.begin(url)) {
         web_fetch_result = "Failed to initialize HTTP client.";
         goto done;
     }
+    http_started = true;
     http.setTimeout(10000);
-    int code = http.GET();
+    code = http.GET();
     if(code <= 0) {
-        http.end();
         web_fetch_result = String("HTTP GET failed: ") + String(code);
         goto done;
     }
     web_fetch_result = http.getString();
-    http.end();
 done:
+    if (http_started) http.end();
     if (in_url) free(in_url);
     web_fetch_done = true;
     web_fetch_in_progress = false;
@@ -4107,8 +4109,8 @@ static bool maps_decode_png_to_canvas(const char *path, String &decode_result)
     sd_guard_unlock();
     if (n != sz) { decode_result = "read_failed"; return false; }
     maps_png_raw_size = sz;
-    auto maps_png_draw_cb = [](PNGDRAW *pDraw) {
-        if (!pDraw || !maps_canvas_buf || !maps_png_line_buf) return;
+    auto maps_png_draw_cb = [](PNGDRAW *pDraw) -> int {
+        if (!pDraw || !maps_canvas_buf || !maps_png_line_buf) return 0;
         maps_png_decoder.getLineAsRGB565(pDraw, maps_png_line_buf, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
         for (int x = 0; x < pDraw->iWidth && x < 256; ++x) {
             uint16_t c = maps_png_line_buf[x];
@@ -4122,6 +4124,7 @@ static bool maps_decode_png_to_canvas(const char *path, String &decode_result)
                 maps_canvas_buf[pDraw->y * 256 + x] = black ? lv_color_black() : lv_color_white();
             }
         }
+        return 1;
     };
     int rc = maps_png_decoder.openRAM(maps_png_raw, (int)maps_png_raw_size, maps_png_draw_cb);
     if (rc != PNG_SUCCESS) { decode_result = "open_png_failed"; return false; }
