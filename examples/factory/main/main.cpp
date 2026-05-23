@@ -80,7 +80,6 @@ static lv_indev_t *touch_indev = NULL;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
-static volatile bool disp_force_clear_next_flush = false;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 
@@ -242,26 +241,6 @@ static inline void epd_image_set_pixel_4bpp(uint8_t *buf, int32_t width, int32_t
     }
 }
 
-static uint32_t epd_frame_hash(const uint8_t *buf, size_t len)
-{
-    uint32_t h = 2166136261UL;
-    for (size_t i = 0; i < len; ++i) {
-        h ^= buf[i];
-        h *= 16777619UL;
-    }
-    return h;
-}
-
-
-static void wifi_quiet_before_epd_update(void)
-{
-    // For now just diagnostic; do not permanently kill WiFi unless test proves it.
-    if (WiFi.getMode() != WIFI_OFF) {
-        Serial.printf("[EPD/WIFI] WiFi active during EPD update mode=%d status=%d\n",
-                      WiFi.getMode(), WiFi.status());
-    }
-}
-
 static void disp_flush_task(void *param)
 {
     (void)param;
@@ -287,29 +266,9 @@ static void disp_flush_task(void *param)
                 }
             }
 
-            static uint32_t last_hash = 0;
-            static bool have_last_hash = false;
-            static uint32_t physical_update_count = 0;
-
-            uint32_t current_hash = epd_frame_hash(displaybuffer, EPD_IMAGE_BUF_SIZE);
-            Serial.printf("[EPD update after LVGL frame complete] hash=%08lx mode=%d\n",
-                          current_hash, ui_refresh_get_mode());
-            if (have_last_hash && current_hash == last_hash) {
-                Serial.println("[EPD] skip duplicate physical refresh");
-                continue;
-            }
-            last_hash = current_hash;
-            have_last_hash = true;
-
-            if (physical_update_count == 0) {
-                Serial.println("[EPD] first physical update after boot");
-            }
-            physical_update_count++;
-
             if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
             {
                 epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-                wifi_quiet_before_epd_update();
                 epd_poweron();
                 checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
                 epd_poweroff();
@@ -317,16 +276,14 @@ static void disp_flush_task(void *param)
             else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
             {
                 epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-                wifi_quiet_before_epd_update();
                 epd_poweron();
                 checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
                 epd_poweroff();
             }
-            else
+            else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
             {
                 disp_full_refresh();
                 epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-                wifi_quiet_before_epd_update();
                 epd_poweron();
                 checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
                 epd_poweroff();
@@ -356,19 +313,6 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         int32_t h = lv_area_get_height(area);
         int32_t screen_w = epd_rotated_display_width();
         int32_t screen_h = epd_rotated_display_height();
-        bool full_area =
-            area->x1 == 0 &&
-            area->y1 == 0 &&
-            area->x2 == screen_w - 1 &&
-            area->y2 == screen_h - 1;
-        bool force_clear_this_flush = disp_force_clear_next_flush;
-        if (force_clear_this_flush || full_area) {
-            memset(decodebuffer, 0x00, EPD_IMAGE_BUF_SIZE);
-            disp_force_clear_next_flush = false;
-            Serial.printf("[LVGL flush] logical framebuffer cleared full=%d force=%d\n",
-                          full_area, force_clear_this_flush);
-        }
-
         for(int32_t y = 0; y < h; y++) {
             int32_t dst_y = area->y1 + y;
             if(dst_y < 0 || dst_y >= screen_h) continue;
@@ -385,27 +329,28 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
             xSemaphoreGive(framebuffer_mutex);
         }
 
-        static uint32_t flush_log_count = 0;
-        bool is_last_flush = lv_disp_flush_is_last(disp);
-        if (flush_log_count < 3) {
-            Serial.printf("[LVGL flush #%lu] full=%d last=%d area=(%d,%d)-(%d,%d) w=%d h=%d\n",
-                          flush_log_count + 1, full_area, is_last_flush,
-                          area->x1, area->y1, area->x2, area->y2,
-                          w, h);
-            flush_log_count++;
-        }
         framebuffer_dirty = true;
-        if (is_last_flush) {
-            disp_flush_pending = true;
-        }
+        // printf("[disp_flush] x1:%d, y1:%d, w:%d, h:%d\n", area->x1, area->y1, w, h);
     }
-
+    if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
+    {
+        disp_flush_pending = true;
+    }
+    else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
+    {
+        disp_flush_pending = true;
+    }
+    else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
+    {
+        disp_flush_pending = true;
+    }
+    /* Inform the graphics library that you are ready with the flushing */
     lv_disp_flush_ready(disp);
 }
 
 void disp_request_full_clear(void)
 {
-    disp_force_clear_next_flush = true;
+    // No-op. Display pipeline restored to known-good full-refresh behavior.
 }
 
 static void touch_cancel_current_press(const char *reason)
@@ -640,34 +585,6 @@ static void disp_init_status(const char *name, int *x, int *y, bool init_st)
 }
 
 
-static void epd_power_domain_cold_start(esp_reset_reason_t rr)
-{
-    Serial.printf("[EPD BOOT] cold display init reset_reason=%d\n", rr);
-
-    // Let rails settle after EN/RST or firmware-upload auto-reset.
-    delay(500);
-
-    epd_poweroff();
-    delay(300);
-
-    // First clear the raw panel state.
-    epd_poweron();
-    delay(100);
-    epd_clear();
-    delay(100);
-    epd_poweroff();
-    delay(300);
-
-    // Reset the high-level framebuffer to white and push a full GC16 update.
-    epd_hl_set_all_white(&hl);
-    epd_poweron();
-    checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
-    epd_poweroff();
-    delay(300);
-
-    Serial.println("[EPD BOOT] cold display init complete");
-}
-
 static bool screen_init(void)
 {
     epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_64K);
@@ -686,9 +603,6 @@ static bool screen_init(void)
         "Dimensions after rotation, width: %d height: %d\n\n", epd_rotated_display_width(),
         epd_rotated_display_height()
     );
-
-    epd_power_domain_cold_start(esp_reset_reason());
-    Serial.println("[BOOT] screen_init: cold display init returned");
 
     epd_hl_set_all_white(&hl);
 
