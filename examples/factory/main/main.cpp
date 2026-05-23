@@ -139,6 +139,8 @@ static SemaphoreHandle_t framebuffer_mutex = NULL;
 static SemaphoreHandle_t sd_mutex = NULL;
 static bool display_have_vbus(void);
 static bool display_safe_for_hard_clean(void);
+static bool display_have_vbus_provisional(void);
+static bool display_safe_for_hard_clean_boot(void);
 void disp_request_normal_frame(void);
 void disp_request_screen_replace(void);
 void disp_request_boot_replace(void);
@@ -409,45 +411,76 @@ static void release_snapshot(uint32_t seq, uint8_t *snapshot)
 static void disp_flush_task(void *param)
 {
     (void)param;
-    DisplayCmd cmd;
+    DisplayCmd cmd = {};
     DisplayCmd pending_normal = {};
+    DisplayCmd pending_reliable = {};
     bool has_pending_normal = false;
+    bool has_pending_reliable = false;
+
+    auto queue_or_replace = [&](DisplayCmd &slot, bool &has_slot, const DisplayCmd &incoming, const char *tag) {
+        if (has_slot) {
+            Serial.printf("[DISPLAY QUEUE] %s dropped seq=%lu kind=%d\n", tag,
+                          (unsigned long)slot.seq, (int)slot.kind);
+            release_snapshot(slot.seq, slot.snapshot);
+        }
+        slot = incoming;
+        has_slot = true;
+    };
+
     while (1) {
-        if (xQueueReceive(display_q, &cmd, pdMS_TO_TICKS(20)) != pdTRUE) {
+        if (xQueueReceive(display_q, &cmd, pdMS_TO_TICKS(50)) != pdTRUE) {
             continue;
         }
-        do {
-            if (cmd.kind == DISPLAY_UPDATE_NONE) {
-                release_snapshot(cmd.seq, cmd.snapshot);
-                continue;
+
+        auto absorb_cmd = [&](const DisplayCmd &in) {
+            if (in.kind == DISPLAY_UPDATE_NONE) {
+                release_snapshot(in.seq, in.snapshot);
+                return;
             }
-            if (cmd.kind == DISPLAY_UPDATE_NORMAL_FRAME) {
+            if (display_cmd_is_reliable(in.kind)) {
                 if (has_pending_normal) {
-                    Serial.printf("[DISPLAY QUEUE] coalesce normal dropped seq=%lu\n", (unsigned long)pending_normal.seq);
-                    release_snapshot(pending_normal.seq, pending_normal.snapshot);
-                }
-                pending_normal = cmd;
-                has_pending_normal = true;
-                continue;
-            }
-            if (display_cmd_is_reliable(cmd.kind)) {
-                if (has_pending_normal) {
-                    Serial.printf("[DISPLAY QUEUE] commit seq=%lu kind=%d\n",
-                                  (unsigned long)pending_normal.seq, (int)pending_normal.kind);
-                    display_commit_frame(pending_normal.kind, pending_normal.snapshot);
+                    Serial.printf("[DISPLAY QUEUE] reliable supersedes normal seq=%lu reliable_kind=%d\n",
+                                  (unsigned long)pending_normal.seq, (int)in.kind);
                     release_snapshot(pending_normal.seq, pending_normal.snapshot);
                     has_pending_normal = false;
                 }
-                Serial.printf("[DISPLAY QUEUE] commit seq=%lu kind=%d\n", (unsigned long)cmd.seq, (int)cmd.kind);
-                display_commit_frame(cmd.kind, cmd.snapshot);
-                release_snapshot(cmd.seq, cmd.snapshot);
-                continue;
+                queue_or_replace(pending_reliable, has_pending_reliable, in, "replace reliable");
+                return;
             }
-            release_snapshot(cmd.seq, cmd.snapshot);
-        } while (xQueueReceive(display_q, &cmd, 0) == pdTRUE);
+            if (has_pending_reliable) {
+                Serial.printf("[DISPLAY QUEUE] drop normal seq=%lu while reliable kind=%d pending\n",
+                              (unsigned long)in.seq, (int)pending_reliable.kind);
+                release_snapshot(in.seq, in.snapshot);
+                return;
+            }
+            queue_or_replace(pending_normal, has_pending_normal, in, "coalesce normal");
+        };
 
-        if (has_pending_normal) {
-            Serial.printf("[DISPLAY QUEUE] commit seq=%lu kind=%d\n",
+        absorb_cmd(cmd);
+
+        Serial.printf("[DISPLAY QUEUE] settle wait begin ms=%lu window=%lu\n",
+                      (unsigned long)millis(), (unsigned long)EPD_FRAME_SETTLE_MS);
+        while (true) {
+            uint32_t now = millis();
+            bool settled = (now - disp_last_flush_ms) >= EPD_FRAME_SETTLE_MS;
+            if (settled && uxQueueMessagesWaiting(display_q) == 0) {
+                Serial.printf("[DISPLAY QUEUE] settle complete ms=%lu last_flush=%lu\n",
+                              (unsigned long)now, (unsigned long)disp_last_flush_ms);
+                break;
+            }
+            if (xQueueReceive(display_q, &cmd, pdMS_TO_TICKS(20)) == pdTRUE) {
+                absorb_cmd(cmd);
+            }
+        }
+
+        if (has_pending_reliable) {
+            Serial.printf("[DISPLAY QUEUE] commit reliable seq=%lu kind=%d\n",
+                          (unsigned long)pending_reliable.seq, (int)pending_reliable.kind);
+            display_commit_frame(pending_reliable.kind, pending_reliable.snapshot);
+            release_snapshot(pending_reliable.seq, pending_reliable.snapshot);
+            has_pending_reliable = false;
+        } else if (has_pending_normal) {
+            Serial.printf("[DISPLAY QUEUE] commit normal seq=%lu kind=%d\n",
                           (unsigned long)pending_normal.seq, (int)pending_normal.kind);
             display_commit_frame(pending_normal.kind, pending_normal.snapshot);
             release_snapshot(pending_normal.seq, pending_normal.snapshot);
@@ -479,7 +512,6 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
 
         if (force_clear_this_flush || full_area) {
             memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
-            disp_force_clear_next_flush = false;
             Serial.printf("[LVGL flush] logical framebuffer WHITE cleared full=%d force=%d\n",
                           full_area, force_clear_this_flush);
             Serial.printf("[LVGL flush] WHITE clear byte=0x%02X\n", EPD_LOGICAL_WHITE_BYTE);
@@ -515,6 +547,10 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
     bool published = publish_snapshot(kind, true, area);
     if (published && requested_kind != DISPLAY_UPDATE_NONE) {
         display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
+        if (display_cmd_is_reliable(requested_kind) && disp_force_clear_next_flush) {
+            disp_force_clear_next_flush = false;
+            Serial.printf("[DISPLAY QUEUE] force-clear consumed by published reliable kind=%d\n", (int)requested_kind);
+        }
     } else if (!published && requested_kind != DISPLAY_UPDATE_NONE) {
         Serial.printf("[DISPLAY QUEUE ERROR] publish failed; retaining pending replace kind=%d\n", (int)requested_kind);
         Serial.println("[DISPLAY QUEUE] pending kind retained after publish failure");
@@ -542,20 +578,27 @@ void disp_request_screen_replace(void)
 {
     disp_force_clear_next_flush = true;
     display_set_next_snapshot_kind(DISPLAY_UPDATE_SCREEN_REPLACE);
-    Serial.println("[DISPLAY LIFECYCLE] screen replace requested");
+    lv_obj_t *act = lv_scr_act();
+    if (act) lv_obj_invalidate(act);
+    Serial.println("[DISPLAY LIFECYCLE] screen replace requested + invalidate");
 }
 
 void disp_request_boot_replace(void)
 {
     disp_force_clear_next_flush = true;
     display_set_next_snapshot_kind(DISPLAY_UPDATE_BOOT_REPLACE);
-    Serial.println("[DISPLAY LIFECYCLE] boot replace requested");
+    lv_obj_t *act = lv_scr_act();
+    if (act) lv_obj_invalidate(act);
+    Serial.println("[DISPLAY LIFECYCLE] boot replace requested + invalidate");
 }
 
 void disp_request_recovery_clean(void)
 {
+    disp_force_clear_next_flush = true;
     display_set_next_snapshot_kind(DISPLAY_UPDATE_RECOVERY_CLEAN);
-    Serial.println("[DISPLAY LIFECYCLE] recovery clean requested");
+    lv_obj_t *act = lv_scr_act();
+    if (act) lv_obj_invalidate(act);
+    Serial.println("[DISPLAY LIFECYCLE] recovery clean requested + invalidate");
 }
 
 static const char *home_input_state_name(HomeInputState s)
@@ -709,7 +752,7 @@ static void lv_port_disp_init(void)
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     framebuffer_mutex = xSemaphoreCreateMutex();
-    display_q = xQueueCreate(16, sizeof(DisplayCmd));
+    display_q = xQueueCreate(8, sizeof(DisplayCmd));
     display_snapshot_mutex = xSemaphoreCreateMutex();
     bool snapshot_pool_ok = true;
     for (uint8_t i = 0; i < DISPLAY_SNAPSHOT_COUNT; ++i) {
@@ -857,13 +900,26 @@ static bool screen_init(void)
     heap_caps_print_heap_info(MALLOC_CAP_INTERNAL);
     heap_caps_print_heap_info(MALLOC_CAP_SPIRAM);
 
-    if (display_safe_for_hard_clean()) {
+    bool boot_can_hard_clean = display_safe_for_hard_clean_boot();
+    if (peri_buf[E_PERI_BQ25896]) {
+        Serial.printf("[EPD BOOT CLEAN] bq_init=1 vbus=%d vbat=%.3f vsys=%.3f safe=%d\n",
+                      battery_25896_is_vbus_in(),
+                      battery_25896_get_VBAT(),
+                      battery_25896_get_VSYS(),
+                      boot_can_hard_clean);
+    } else {
+        Serial.printf("[EPD BOOT CLEAN] bq_init=0 provisional_vbus=%d safe=%d\n",
+                      display_have_vbus_provisional(),
+                      boot_can_hard_clean);
+    }
+
+    if (boot_can_hard_clean) {
         epd_poweron();
         epd_clear();
         epd_poweroff();
         Serial.println("[EPD INIT] boot epd_clear complete");
     } else {
-        Serial.println("[EPD POWER] boot epd_clear skipped due to low power margin");
+        Serial.println("[EPD POWER] boot epd_clear downgraded/skipped due to power-safety decision");
     }
 
     int cursor_x = 250;
@@ -916,7 +972,14 @@ static bool bq25896_init(void)
 
     PPM.disableOTG();
 
-    if (display_have_vbus()) {
+    bool vbus_present = battery_25896_is_vbus_in();
+    Serial.printf("[PMIC INIT] bq25896 vbus_detect=%d vbus=%.3f vsys=%.3f vbat=%.3f\n",
+                  vbus_present,
+                  battery_25896_get_VBUS(),
+                  battery_25896_get_VSYS(),
+                  battery_25896_get_VBAT());
+
+    if (vbus_present) {
         // Configure aggressive input/charge policy only when VBUS is actually present.
         PPM.setInputCurrentLimit(3250);
         Serial.printf("getInputCurrentLimit: %d mA\n", PPM.getInputCurrentLimit());
@@ -951,14 +1014,27 @@ static bool display_have_vbus(void)
     return peri_buf[E_PERI_BQ25896] && battery_25896_is_vbus_in();
 }
 
+static bool display_have_vbus_provisional(void)
+{
+    return battery_25896_is_vbus_in();
+}
+
 #ifndef CONFIG_EPD_HARD_CLEAN_MIN_VBAT
 #define CONFIG_EPD_HARD_CLEAN_MIN_VBAT 0.0f
 #endif
 
+static bool display_safe_for_hard_clean_boot(void)
+{
+    if (peri_buf[E_PERI_BQ25896]) {
+        return display_safe_for_hard_clean();
+    }
+    return display_have_vbus_provisional();
+}
+
 static bool display_safe_for_hard_clean(void)
 {
-    if (display_have_vbus()) return true;
     if (!peri_buf[E_PERI_BQ25896]) return false;
+    if (display_have_vbus()) return true;
     return battery_25896_get_VBAT() >= CONFIG_EPD_HARD_CLEAN_MIN_VBAT;
 }
 
@@ -1031,7 +1107,9 @@ void idf_setup()
     delay(100);
 
     peri_buf[E_PERI_BQ27220]    = bq27220_init();   // PMU --- 0x55
-    
+    peri_buf[E_PERI_BQ25896]    = bq25896_init();   // PMU --- 0x6B
+    Serial.printf("[BOOT] bq25896 init before screen_init: %d\n", peri_buf[E_PERI_BQ25896]);
+
     Serial.println("[BOOT] before screen_init()");
     screen_init();
     io_extend_lora_gps_power_on(true);
@@ -1051,7 +1129,6 @@ void idf_setup()
 
     peri_buf[E_PERI_INK_POWER]  = false; 
 
-    peri_buf[E_PERI_BQ25896]    = bq25896_init();   // PMU --- 0x6B
     if (peri_buf[E_PERI_BQ25896]) {
         Serial.printf("[BOOT PWR] vbus_in=%d vbus=%.3f vsys=%.3f vbat=%.3f charging=%d\n",
                       battery_25896_is_vbus_in(),
@@ -1313,13 +1390,24 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         Serial.println("[DISPLAY LIFECYCLE] FAST/DU disabled; using GL16 safe mode");
     }
 
-    bool do_recovery_clean = (kind == DISPLAY_UPDATE_RECOVERY_CLEAN);
+    bool do_hard_clean = (kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_BOOT_REPLACE);
     if (kind == DISPLAY_UPDATE_RECOVERY_CLEAN && !display_safe_for_recovery_clean()) {
         Serial.println("[EPD POWER] recovery clean downgraded to single GL16 replacement");
-        do_recovery_clean = false;
+        do_hard_clean = false;
+    }
+    if (kind == DISPLAY_UPDATE_SCREEN_REPLACE && !display_safe_for_recovery_clean()) {
+        Serial.println("[EPD POWER] screen replace hard clean downgraded to single GL16 replacement");
+        do_hard_clean = false;
+    }
+    if (kind == DISPLAY_UPDATE_BOOT_REPLACE && !display_safe_for_recovery_clean()) {
+        Serial.println("[EPD POWER] boot replace hard clean downgraded to single GL16 replacement");
+        do_hard_clean = false;
+    }
+    if (kind == DISPLAY_UPDATE_BOOT_REPLACE) {
+        do_hard_clean = do_hard_clean || display_safe_for_recovery_clean();
     }
 
-    if (do_recovery_clean) {
+    if (do_hard_clean) {
         disp_replace_commit_count++;
         Serial.println("[DISPLAY LIFECYCLE] physical white erase begin");
         epd_hl_set_all_white(&hl);
@@ -1333,7 +1421,7 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         display_log_power("after_update", kind);
         epd_poweroff();
         Serial.println("[DISPLAY LIFECYCLE] physical white erase complete");
-        Serial.println("[DISPLAY LIFECYCLE] recovery replacement GL16 frame begin");
+        Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame begin (post-clean)");
         epd_hl_set_all_white(&hl);
         epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
         epd_poweron();
@@ -1347,7 +1435,12 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         display_log_power("after_update", kind);
         vTaskDelay(pdMS_TO_TICKS(20));
         epd_poweroff();
-        Serial.println("[DISPLAY LIFECYCLE] recovery replacement GL16 frame complete");
+        Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame complete (post-clean)");
+        if (home_waiting_for_redraw_commit &&
+            (kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_BOOT_REPLACE)) {
+            home_waiting_for_redraw_commit = false;
+            Serial.println("[HOME REDRAW] guard released after physical commit (post-clean)");
+        }
         return;
     }
     if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE) {
@@ -1367,9 +1460,9 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         vTaskDelay(pdMS_TO_TICKS(20));
         epd_poweroff();
         Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame complete");
-        if (home_waiting_for_redraw_commit && kind == DISPLAY_UPDATE_SCREEN_REPLACE) {
+        if (home_waiting_for_redraw_commit && (kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN)) {
             home_waiting_for_redraw_commit = false;
-            Serial.println("[HOME REDRAW] replacement frame committed; touch may resume after guard");
+            Serial.println("[HOME REDRAW] guard released after physical commit");
         }
         return;
     }
