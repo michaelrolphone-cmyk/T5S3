@@ -4837,7 +4837,6 @@ static void scr8_btn_event_cb(lv_event_t * e)
 static void scr8_shutdown_timer_event(lv_timer_t *t)
 {
     lv_timer_del(t);
-    ui_epd_clean();
     ui_shutdown();
 }
 
