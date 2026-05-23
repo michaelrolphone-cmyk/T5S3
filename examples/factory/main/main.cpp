@@ -1315,6 +1315,23 @@ void idf_setup()
     pinMode(BOARD_IO48_BTN, INPUT_PULLUP);
 #endif
 
+    WiFi.persistent(false);
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_OFF);
+    delay(100);
+
+    Serial.println("[BOOT] before screen_init()");
+    // epdiy installs its own I2C driver during panel init. If Arduino Wire keeps
+    // the same bus active here, ESP-IDF returns "i2c driver install error" and
+    // epd_init can abort before LUT allocation.
+    Wire.end();
+    screen_init();
+    Wire.begin(BOARD_SDA, BOARD_SCL);
+    io_extend_lora_gps_power_on(true);
+    peri_buf[E_PERI_BQ27220]    = bq27220_init();   // PMU --- 0x55
+    peri_buf[E_PERI_BQ25896]    = bq25896_init();   // PMU --- 0x6B
+    Serial.printf("[BOOT] bq25896 init after screen_init: %d\n", peri_buf[E_PERI_BQ25896]);
+
     BaseType_t btn_rc = xTaskCreate(btn_task, "btn_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
     Serial.printf("[BUTTON TASK] create rc=%ld handle=%p free_internal=%u largest_internal=%u\n",
                   (long)btn_rc,
@@ -1328,23 +1345,6 @@ void idf_setup()
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     }
 
-    WiFi.persistent(false);
-    WiFi.disconnect(true, true);
-    WiFi.mode(WIFI_OFF);
-    delay(100);
-
-    peri_buf[E_PERI_BQ27220]    = bq27220_init();   // PMU --- 0x55
-    peri_buf[E_PERI_BQ25896]    = bq25896_init();   // PMU --- 0x6B
-    Serial.printf("[BOOT] bq25896 init before screen_init: %d\n", peri_buf[E_PERI_BQ25896]);
-
-    Serial.println("[BOOT] before screen_init()");
-    // epdiy installs its own I2C driver during panel init. If Arduino Wire keeps
-    // the same bus active here, ESP-IDF returns "i2c driver install error" and
-    // epd_init can abort before LUT allocation.
-    Wire.end();
-    screen_init();
-    Wire.begin(BOARD_SDA, BOARD_SCL);
-    io_extend_lora_gps_power_on(true);
 
     int cursor_x = 100;
     int cursor_y = epd_rotated_display_height() / 2 - 100 - 50;
