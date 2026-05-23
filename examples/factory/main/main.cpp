@@ -35,6 +35,7 @@
 #include "firasans_20.h"
 #include "ui_port.h"
 #include "nvs_param.h"
+#include <PNGdec.h>
 
 char global_buf[GLOBAL_BUF_LEN];
 
@@ -455,6 +456,162 @@ static inline void epd_image_set_pixel_4bpp(uint8_t *buf, int32_t width, int32_t
     } else {
         *dst = (uint8_t)((*dst & 0xF0) | gray4);
     }
+}
+
+struct SleepPngDecodeCtx {
+    uint8_t *dst4bpp;
+    int dst_w;
+    int dst_h;
+    float scale;
+    int offset_x;
+    int offset_y;
+};
+
+static PNG s_sleep_png_decoder;
+static uint16_t *s_sleep_png_line_buf = NULL;
+static SleepPngDecodeCtx s_sleep_decode_ctx = {};
+
+static int sleep_png_draw_cb(PNGDRAW *pDraw)
+{
+    if (!pDraw || !s_sleep_decode_ctx.dst4bpp || !s_sleep_png_line_buf) {
+        return 0;
+    }
+
+    s_sleep_png_decoder.getLineAsRGB565(pDraw, s_sleep_png_line_buf, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
+    const int src_y = pDraw->y;
+    int dst_y0 = s_sleep_decode_ctx.offset_y + (int)floorf(src_y * s_sleep_decode_ctx.scale);
+    int dst_y1 = s_sleep_decode_ctx.offset_y + (int)floorf((src_y + 1) * s_sleep_decode_ctx.scale);
+    if (dst_y1 <= dst_y0) dst_y1 = dst_y0 + 1;
+
+    for (int src_x = 0; src_x < pDraw->iWidth; ++src_x) {
+        const uint16_t c = s_sleep_png_line_buf[src_x];
+        const int r = ((c >> 11) & 0x1F) * 255 / 31;
+        const int g = ((c >> 5) & 0x3F) * 255 / 63;
+        const int b = (c & 0x1F) * 255 / 31;
+        const uint8_t gray4 = (uint8_t)(((299 * r + 587 * g + 114 * b) / 1000) >> 4);
+
+        int dst_x0 = s_sleep_decode_ctx.offset_x + (int)floorf(src_x * s_sleep_decode_ctx.scale);
+        int dst_x1 = s_sleep_decode_ctx.offset_x + (int)floorf((src_x + 1) * s_sleep_decode_ctx.scale);
+        if (dst_x1 <= dst_x0) dst_x1 = dst_x0 + 1;
+
+        for (int yy = dst_y0; yy < dst_y1; ++yy) {
+            if (yy < 0 || yy >= s_sleep_decode_ctx.dst_h) continue;
+            for (int xx = dst_x0; xx < dst_x1; ++xx) {
+                if (xx < 0 || xx >= s_sleep_decode_ctx.dst_w) continue;
+                epd_image_set_pixel_4bpp(s_sleep_decode_ctx.dst4bpp, s_sleep_decode_ctx.dst_w, xx, yy, gray4);
+            }
+        }
+    }
+
+    return 1;
+}
+
+bool disp_show_sleep_png_from_sd(const char *preferred_path)
+{
+    const char *path = (preferred_path && preferred_path[0]) ? preferred_path : "/sleep.png";
+    if (!decodebuffer || !displaybuffer || !framebuffer_mutex) {
+        Serial.println("[SLEEP PNG] unavailable framebuffer/mutex");
+        return false;
+    }
+    if (!peri_buf[E_PERI_SD_CARD]) {
+        Serial.printf("[SLEEP PNG] sd unavailable path=%s\n", path);
+        return false;
+    }
+    if (!sd_guard_lock(3000)) {
+        Serial.println("[SLEEP PNG] sd lock timeout");
+        return false;
+    }
+
+    bool ok = false;
+    uint8_t *png_raw = NULL;
+    size_t png_raw_size = 0;
+    File f = SD.open(path, FILE_READ);
+    if (!f || f.isDirectory()) {
+        Serial.printf("[SLEEP PNG] open failed path=%s\n", path);
+        goto out;
+    }
+    png_raw_size = (size_t)f.size();
+    if (png_raw_size < 8 || png_raw_size > (8 * 1024 * 1024)) {
+        Serial.printf("[SLEEP PNG] invalid file size=%u\n", (unsigned)png_raw_size);
+        f.close();
+        goto out;
+    }
+    png_raw = (uint8_t *)ps_malloc(png_raw_size);
+    if (!png_raw) {
+        Serial.println("[SLEEP PNG] raw alloc failed");
+        f.close();
+        goto out;
+    }
+    if (f.read(png_raw, png_raw_size) != png_raw_size) {
+        Serial.println("[SLEEP PNG] short read");
+        f.close();
+        goto out;
+    }
+    f.close();
+
+    if (!s_sleep_png_line_buf) s_sleep_png_line_buf = (uint16_t *)ps_malloc(4096 * sizeof(uint16_t));
+    if (!s_sleep_png_line_buf) {
+        Serial.println("[SLEEP PNG] line alloc failed");
+        goto out;
+    }
+
+    auto open_cb = [](PNGDRAW *pDraw) -> int { (void)pDraw; return 1; };
+    int rc = s_sleep_png_decoder.openRAM(png_raw, (int)png_raw_size, open_cb);
+    if (rc != PNG_SUCCESS) {
+        Serial.printf("[SLEEP PNG] openRAM failed rc=%d\n", rc);
+        goto out;
+    }
+    int src_w = s_sleep_png_decoder.getWidth();
+    int src_h = s_sleep_png_decoder.getHeight();
+    s_sleep_png_decoder.close();
+    if (src_w <= 0 || src_h <= 0 || src_w > 4096 || src_h > 4096) {
+        Serial.printf("[SLEEP PNG] invalid dimensions %dx%d\n", src_w, src_h);
+        goto out;
+    }
+
+    const int dst_w = epd_rotated_display_width();
+    const int dst_h = epd_rotated_display_height();
+    float scale = (float)dst_w / (float)src_w;
+    int scaled_w = dst_w;
+    int scaled_h = (int)((float)src_h * scale);
+    if (scaled_h > dst_h) {
+        scale = (float)dst_h / (float)src_h;
+        scaled_h = dst_h;
+        scaled_w = (int)((float)src_w * scale);
+    }
+    if (scaled_w < 1) scaled_w = 1;
+    if (scaled_h < 1) scaled_h = 1;
+
+    if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        Serial.println("[SLEEP PNG] framebuffer lock timeout");
+        goto out;
+    }
+    memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
+    s_sleep_decode_ctx.dst4bpp = decodebuffer;
+    s_sleep_decode_ctx.dst_w = dst_w;
+    s_sleep_decode_ctx.dst_h = dst_h;
+    s_sleep_decode_ctx.scale = scale;
+    s_sleep_decode_ctx.offset_x = (dst_w - scaled_w) / 2;
+    s_sleep_decode_ctx.offset_y = (dst_h - scaled_h) / 2;
+    rc = s_sleep_png_decoder.openRAM(png_raw, (int)png_raw_size, sleep_png_draw_cb);
+    if (rc == PNG_SUCCESS) rc = s_sleep_png_decoder.decode(NULL, 0);
+    s_sleep_png_decoder.close();
+    if (rc != PNG_SUCCESS) {
+        xSemaphoreGive(framebuffer_mutex);
+        Serial.printf("[SLEEP PNG] decode failed rc=%d\n", rc);
+        goto out;
+    }
+    memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
+    xSemaphoreGive(framebuffer_mutex);
+
+    display_commit_frame(DISPLAY_UPDATE_SCREEN_REPLACE, displaybuffer);
+    ok = true;
+    Serial.printf("[SLEEP PNG] rendered path=%s\n", path);
+
+out:
+    if (png_raw) free(png_raw);
+    sd_guard_unlock();
+    return ok;
 }
 
 static bool display_cmd_is_reliable(DisplayUpdateKind kind)
