@@ -9,20 +9,41 @@
 /* clang-format off */
 
 TinyGPSPlus gps;
+typedef struct {
+    bool valid;
+    double lat;
+    double lon;
+    double speed_kmph;
+    uint32_t satellites;
+    uint32_t chars_processed;
+    uint32_t fix_age_ms;
+    uint32_t captured_ms;
+    bool date_valid;
+    bool time_valid;
+    uint16_t year;
+    uint8_t month;
+    uint8_t day;
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
+} gps_fix_snapshot_t;
 static bool GPS_Recovery();
 bool setupGPS();
 void displayInfo();
 static bool gps_csv_ensure_dir();
-static bool gps_csv_make_path(char *out, size_t out_len, bool *dated);
-static void gps_csv_make_timestamp(char *out, size_t out_len);
-static bool gps_csv_append_current_fix(double lat, double lon, double speed_kmph, uint32_t satellites);
+static bool gps_csv_make_path(char *out, size_t out_len, bool *dated, const gps_fix_snapshot_t *snapshot);
+static void gps_csv_make_timestamp(char *out, size_t out_len, const gps_fix_snapshot_t *snapshot);
+static bool gps_csv_append_snapshot_fix(const gps_fix_snapshot_t *snapshot);
 static void gps_debug_log(const char *msg);
-static bool gps_current_fix_valid();
-static void gps_csv_logger_pump();
-static void gps_log_status();
-static void gps_status_csv_append();
+static bool gps_snapshot_fix_valid(const gps_fix_snapshot_t *snapshot, uint32_t now_ms);
+static void gps_log_status(const gps_fix_snapshot_t *snapshot);
+static void gps_status_csv_append(const gps_fix_snapshot_t *snapshot);
+void gps_logger_task(void *param);
 
 TaskHandle_t gps_handle = NULL;
+static TaskHandle_t gps_logger_handle = NULL;
+static gps_fix_snapshot_t gps_latest_fix = {0};
+static portMUX_TYPE gps_fix_mux = portMUX_INITIALIZER_UNLOCKED;
 double gps_lat=0, gps_lng=0, gps_altitude=0, gps_speed=0;
 uint16_t gps_year=0;
 uint8_t gps_month=0, gps_day=0;
@@ -31,9 +52,7 @@ static uint32_t gps_vsat=0;
 static bool gps_ready = false;
 static int gps_last_sync_minute = -1;
 static uint32_t last_gps_diag_ms = 0;
-static uint32_t last_gps_sd_diag_ms = 0;
 static uint32_t gps_last_csv_write_ms = 0;
-static uint32_t gps_last_csv_update_write_ms = 0;
 static const uint32_t GPS_CSV_PERIOD_MS = 10000;
 
 uint8_t buffer[256];
@@ -85,48 +104,84 @@ void gps_task(void *param)
 
         while (SerialGPS.available()) {
             int c = SerialGPS.read();
-            // Serial.write(c);
             if (gps.encode(c)) {
                 displayInfo();
-                gps_csv_logger_pump();
+                if (gps.location.isValid()) {
+                    gps_fix_snapshot_t snapshot = {0};
+                    snapshot.valid = true;
+                    snapshot.lat = gps.location.lat();
+                    snapshot.lon = gps.location.lng();
+                    snapshot.speed_kmph = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
+                    snapshot.satellites = gps.satellites.isValid() ? gps.satellites.value() : 0;
+                    snapshot.chars_processed = gps.charsProcessed();
+                    snapshot.fix_age_ms = gps.location.age();
+                    snapshot.captured_ms = millis();
+                    snapshot.date_valid = gps.date.isValid();
+                    snapshot.time_valid = gps.time.isValid();
+                    if (snapshot.date_valid) {
+                        snapshot.year = gps.date.year();
+                        snapshot.month = gps.date.month();
+                        snapshot.day = gps.date.day();
+                    }
+                    if (snapshot.time_valid) {
+                        snapshot.hour = gps.time.hour();
+                        snapshot.minute = gps.time.minute();
+                        snapshot.second = gps.time.second();
+                    }
+                    portENTER_CRITICAL(&gps_fix_mux);
+                    gps_latest_fix = snapshot;
+                    portEXIT_CRITICAL(&gps_fix_mux);
+                }
             }
         }
-        gps_csv_logger_pump();
-        gps_log_status();
-        gps_status_csv_append();
 
         if (millis() - last_gps_diag_ms > 10000) {
             last_gps_diag_ms = millis();
-            Serial.printf("[GPS] chars=%lu fix_valid=%d loc_updated=%d date_valid=%d time_valid=%d sats=%lu sd=%d\n",
+            Serial.printf("[GPS TASK] chars=%lu valid=%d sats=%lu stack_free=%u\n",
                           gps.charsProcessed(),
                           gps.location.isValid(),
-                          gps.location.isUpdated(),
-                          gps.date.isValid(),
-                          gps.time.isValid(),
                           gps.satellites.isValid() ? gps.satellites.value() : 0,
-                          peri_buf[E_PERI_SD_CARD]);
-        }
-        if (millis() - last_gps_sd_diag_ms > 60000) {
-            last_gps_sd_diag_ms = millis();
-            char diag[160] = {0};
-            snprintf(diag, sizeof(diag),
-                     "[GPS] chars=%lu fix_valid=%d date_valid=%d time_valid=%d sats=%lu sd=%d last_csv_ms=%lu",
-                     gps.charsProcessed(),
-                     gps.location.isValid(),
-                     gps.date.isValid(),
-                     gps.time.isValid(),
-                     gps.satellites.isValid() ? gps.satellites.value() : 0,
-                     peri_buf[E_PERI_SD_CARD],
-                     (unsigned long)gps_last_csv_write_ms);
-            gps_debug_log(diag);
+                          uxTaskGetStackHighWaterMark(NULL));
         }
 
         if (millis() > 30000 && gps.charsProcessed() < 10) {
             Serial.println(F("No GPS detected: check wiring."));
-            gps_debug_log("[GPS] No GPS detected: chars not increasing");
             delay(1000);
         }
         delay(1);
+    }
+}
+
+void gps_logger_task(void *param)
+{
+    static uint32_t last_status_diag_ms = 0;
+    static uint32_t last_status_csv_ms = 0;
+    while (1) {
+        gps_fix_snapshot_t snapshot = {0};
+        portENTER_CRITICAL(&gps_fix_mux);
+        snapshot = gps_latest_fix;
+        portEXIT_CRITICAL(&gps_fix_mux);
+
+        uint32_t now = millis();
+        if (now - last_status_csv_ms >= 60000) {
+            last_status_csv_ms = now;
+            gps_log_status(&snapshot);
+            gps_status_csv_append(&snapshot);
+        }
+        if (gps_snapshot_fix_valid(&snapshot, now) && (now - gps_last_csv_write_ms >= GPS_CSV_PERIOD_MS)) {
+            if (gps_csv_append_snapshot_fix(&snapshot)) {
+                gps_last_csv_write_ms = now;
+            }
+        }
+        if (now - last_status_diag_ms >= 60000) {
+            last_status_diag_ms = now;
+            Serial.printf("[GPS LOGGER] valid=%d age=%lu sd=%d stack_free=%u\n",
+                          snapshot.valid,
+                          (unsigned long)(snapshot.captured_ms ? (now - snapshot.captured_ms) : 0),
+                          peri_buf[E_PERI_SD_CARD],
+                          uxTaskGetStackHighWaterMark(NULL));
+        }
+        delay(1000);
     }
 }
 
@@ -136,11 +191,16 @@ void gps_task_create(void)
         return;
     }
 
-    if (xTaskCreate(gps_task, "gps_task", 1024 * 3, NULL, GPS_PRIORITY, &gps_handle) != pdPASS) {
+    if (xTaskCreate(gps_task, "gps_task", 1024 * 6, NULL, GPS_PRIORITY, &gps_handle) != pdPASS) {
         Serial.println("GPS task create failed!");
         gps_handle = NULL;
         gps_ready = false;
         return;
+    }
+    UBaseType_t logger_priority = (GPS_PRIORITY > 0) ? (GPS_PRIORITY - 1) : GPS_PRIORITY;
+    if (xTaskCreate(gps_logger_task, "gps_logger_task", 1024 * 8, NULL, logger_priority, &gps_logger_handle) != pdPASS) {
+        Serial.println("GPS logger task create failed!");
+        gps_logger_handle = NULL;
     }
 
     gps_ready = true;
@@ -349,7 +409,7 @@ static bool gps_csv_ensure_dir()
     return true;
 }
 
-static bool gps_csv_make_path(char *out, size_t out_len, bool *dated)
+static bool gps_csv_make_path(char *out, size_t out_len, bool *dated, const gps_fix_snapshot_t *snapshot)
 {
     *dated = false;
 
@@ -357,13 +417,13 @@ static bool gps_csv_make_path(char *out, size_t out_len, bool *dated)
     uint8_t month = 0;
     uint8_t day = 0;
 
-    if (gps.date.isValid() &&
-        gps.date.year() >= 2000 &&
-        gps.date.month() >= 1 && gps.date.month() <= 12 &&
-        gps.date.day() >= 1 && gps.date.day() <= 31) {
-        year = gps.date.year();
-        month = gps.date.month();
-        day = gps.date.day();
+    if (snapshot->date_valid &&
+        snapshot->year >= 2000 &&
+        snapshot->month >= 1 && snapshot->month <= 12 &&
+        snapshot->day >= 1 && snapshot->day <= 31) {
+        year = snapshot->year;
+        month = snapshot->month;
+        day = snapshot->day;
     } else if (peri_buf[E_PERI_RTC]) {
         RTC_DateTime dt = rtc.getDateTime();
         if (dt.year >= 2000 &&
@@ -385,7 +445,7 @@ static bool gps_csv_make_path(char *out, size_t out_len, bool *dated)
     return true;
 }
 
-static void gps_csv_make_timestamp(char *out, size_t out_len)
+static void gps_csv_make_timestamp(char *out, size_t out_len, const gps_fix_snapshot_t *snapshot)
 {
     uint16_t year = 0;
     uint8_t month = 0;
@@ -397,13 +457,13 @@ static void gps_csv_make_timestamp(char *out, size_t out_len)
     bool have_date = false;
     bool have_time = false;
 
-    if (gps.date.isValid() &&
-        gps.date.year() >= 2000 &&
-        gps.date.month() >= 1 && gps.date.month() <= 12 &&
-        gps.date.day() >= 1 && gps.date.day() <= 31) {
-        year = gps.date.year();
-        month = gps.date.month();
-        day = gps.date.day();
+    if (snapshot->date_valid &&
+        snapshot->year >= 2000 &&
+        snapshot->month >= 1 && snapshot->month <= 12 &&
+        snapshot->day >= 1 && snapshot->day <= 31) {
+        year = snapshot->year;
+        month = snapshot->month;
+        day = snapshot->day;
         have_date = true;
     } else if (peri_buf[E_PERI_RTC]) {
         RTC_DateTime dt = rtc.getDateTime();
@@ -417,10 +477,10 @@ static void gps_csv_make_timestamp(char *out, size_t out_len)
         }
     }
 
-    if (gps.time.isValid()) {
-        hour = gps.time.hour();
-        minute = gps.time.minute();
-        second = gps.time.second();
+    if (snapshot->time_valid) {
+        hour = snapshot->hour;
+        minute = snapshot->minute;
+        second = snapshot->second;
         have_time = true;
     } else if (peri_buf[E_PERI_RTC]) {
         RTC_DateTime dt = rtc.getDateTime();
@@ -439,8 +499,10 @@ static void gps_csv_make_timestamp(char *out, size_t out_len)
     snprintf(out, out_len, "millis:%lu", (unsigned long)millis());
 }
 
-static bool gps_csv_append_current_fix(double lat, double lon, double speed_kmph, uint32_t satellites)
+static bool gps_csv_append_snapshot_fix(const gps_fix_snapshot_t *snapshot)
 {
+    double lat = snapshot->lat;
+    double lon = snapshot->lon;
     if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0 || (lat == 0.0 && lon == 0.0)) {
         gps_debug_log("[GPS CSV] skipped invalid coordinate");
         return false;
@@ -454,8 +516,8 @@ static bool gps_csv_append_current_fix(double lat, double lon, double speed_kmph
     char timestamp[40] = {0};
     bool dated = false;
 
-    gps_csv_make_path(path, sizeof(path), &dated);
-    gps_csv_make_timestamp(timestamp, sizeof(timestamp));
+    gps_csv_make_path(path, sizeof(path), &dated, snapshot);
+    gps_csv_make_timestamp(timestamp, sizeof(timestamp), snapshot);
 
     bool exists = SD.exists(path);
     File f = SD.open(path, FILE_APPEND);
@@ -474,65 +536,37 @@ static bool gps_csv_append_current_fix(double lat, double lon, double speed_kmph
              timestamp,
              lat,
              lon,
-             speed_kmph,
-             satellites,
-             (unsigned long)gps.location.age(),
-             (unsigned long)gps.charsProcessed(),
+             snapshot->speed_kmph,
+             snapshot->satellites,
+             (unsigned long)snapshot->fix_age_ms,
+             (unsigned long)snapshot->chars_processed,
              dated ? 1 : 0);
 
     f.close();
 
     char msg[128];
     snprintf(msg, sizeof(msg), "[GPS CSV] wrote %s lat=%.8f lon=%.8f sats=%u",
-             path, lat, lon, satellites);
+             path, lat, lon, snapshot->satellites);
     gps_debug_log(msg);
 
     return true;
 }
 
-static bool gps_current_fix_valid()
+static bool gps_snapshot_fix_valid(const gps_fix_snapshot_t *snapshot, uint32_t now_ms)
 {
-    if (!gps.location.isValid()) return false;
-
-    double lat = gps.location.lat();
-    double lon = gps.location.lng();
+    if (!snapshot->valid) return false;
+    double lat = snapshot->lat;
+    double lon = snapshot->lon;
 
     if (lat < -90.0 || lat > 90.0) return false;
     if (lon < -180.0 || lon > 180.0) return false;
     if (lat == 0.0 && lon == 0.0) return false;
-    if (gps.location.age() > 30000) return false;
+    if ((now_ms - snapshot->captured_ms) > 30000) return false;
 
     return true;
 }
 
-static void gps_csv_logger_pump()
-{
-    if (!gps_current_fix_valid()) {
-        return;
-    }
-
-    uint32_t now = millis();
-    bool write_due_to_period = (now - gps_last_csv_write_ms >= GPS_CSV_PERIOD_MS);
-    bool write_due_to_update = gps.location.isUpdated() && (now - gps_last_csv_update_write_ms >= 1000);
-
-    if (!write_due_to_period && !write_due_to_update) {
-        return;
-    }
-
-    double lat = gps.location.lat();
-    double lon = gps.location.lng();
-    double speed = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
-    uint32_t sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
-
-    if (gps_csv_append_current_fix(lat, lon, speed, sats)) {
-        gps_last_csv_write_ms = now;
-        if (gps.location.isUpdated()) {
-            gps_last_csv_update_write_ms = now;
-        }
-    }
-}
-
-static void gps_log_status()
+static void gps_log_status(const gps_fix_snapshot_t *snapshot)
 {
     static uint32_t last_status_log_ms = 0;
     if (millis() - last_status_log_ms < 60000) {
@@ -540,27 +574,27 @@ static void gps_log_status()
     }
     last_status_log_ms = millis();
 
-    double lat = gps.location.isValid() ? gps.location.lat() : 0.0;
-    double lon = gps.location.isValid() ? gps.location.lng() : 0.0;
-    uint32_t sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
+    double lat = snapshot->valid ? snapshot->lat : 0.0;
+    double lon = snapshot->valid ? snapshot->lon : 0.0;
+    uint32_t sats = snapshot->satellites;
 
     char msg[220] = {0};
     snprintf(msg, sizeof(msg),
              "[GPS STATUS] chars=%lu loc_valid=%d loc_age=%lu lat=%.8f lon=%.8f date_valid=%d time_valid=%d sats=%lu sd=%d last_csv_ms=%lu",
-             (unsigned long)gps.charsProcessed(),
-             gps.location.isValid() ? 1 : 0,
-             (unsigned long)gps.location.age(),
+             (unsigned long)snapshot->chars_processed,
+             snapshot->valid ? 1 : 0,
+             (unsigned long)snapshot->fix_age_ms,
              lat,
              lon,
-             gps.date.isValid() ? 1 : 0,
-             gps.time.isValid() ? 1 : 0,
+             snapshot->date_valid ? 1 : 0,
+             snapshot->time_valid ? 1 : 0,
              (unsigned long)sats,
              peri_buf[E_PERI_SD_CARD] ? 1 : 0,
              (unsigned long)gps_last_csv_write_ms);
     gps_debug_log(msg);
 }
 
-static void gps_status_csv_append()
+static void gps_status_csv_append(const gps_fix_snapshot_t *snapshot)
 {
     static uint32_t last_status_csv_ms = 0;
     if (millis() - last_status_csv_ms < 60000) {
@@ -586,12 +620,12 @@ static void gps_status_csv_append()
 
     f.printf("%lu,%lu,%u,%lu,%u,%u,%lu,%u\n",
              (unsigned long)millis(),
-             (unsigned long)gps.charsProcessed(),
-             gps.location.isValid() ? 1U : 0U,
-             (unsigned long)gps.location.age(),
-             gps.date.isValid() ? 1U : 0U,
-             gps.time.isValid() ? 1U : 0U,
-             (unsigned long)(gps.satellites.isValid() ? gps.satellites.value() : 0),
+             (unsigned long)snapshot->chars_processed,
+             snapshot->valid ? 1U : 0U,
+             (unsigned long)snapshot->fix_age_ms,
+             snapshot->date_valid ? 1U : 0U,
+             snapshot->time_valid ? 1U : 0U,
+             (unsigned long)snapshot->satellites,
              peri_buf[E_PERI_SD_CARD] ? 1U : 0U);
     f.close();
 }
