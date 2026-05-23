@@ -84,6 +84,9 @@ static volatile uint32_t home_input_state_start_ms = 0;
 static volatile uint32_t home_input_deadline_ms = 0;
 static volatile bool home_nav_in_progress = false;
 static volatile uint32_t home_button_last_ms = 0;
+static volatile bool home_waiting_for_redraw_commit = false;
+static volatile uint32_t home_redraw_deadline_ms = 0;
+static constexpr uint32_t HOME_REDRAW_COMMIT_TIMEOUT_MS = 8000;
 static lv_indev_t *touch_indev = NULL;
 static QueueHandle_t ui_event_q = NULL;
 static TaskHandle_t ui_task_handle = NULL;
@@ -599,6 +602,22 @@ static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
     uint32_t now = millis();
     bool raw_pressed = indev_touch_enabled && touch.isPressed();
 
+    if (home_waiting_for_redraw_commit) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        data->point.x = x;
+        data->point.y = y;
+
+        if (now >= home_redraw_deadline_ms) {
+            Serial.println("[HOME REDRAW WARN] redraw commit timeout; releasing touch guard");
+            home_waiting_for_redraw_commit = false;
+
+            // Do not freeze forever. Continue through existing HomeInputState logic.
+            // Keep existing Home suppression state active so stale touches are still guarded.
+        } else {
+            return;
+        }
+    }
+
     if (home_input_state != HOME_INPUT_IDLE && (now - home_input_state_start_ms) > 5000) {
         Serial.println("[HOME INPUT ERROR] state stuck; forcing IDLE");
         home_input_state = HOME_INPUT_IDLE;
@@ -1113,6 +1132,33 @@ void idf_loop()
                 if (touch_indev) {
                     lv_indev_reset(touch_indev, NULL);
                 }
+
+                home_waiting_for_redraw_commit = true;
+                home_redraw_deadline_ms = millis() + HOME_REDRAW_COMMIT_TIMEOUT_MS;
+
+                lv_obj_t *act = lv_scr_act();
+                if (act) {
+                    lv_obj_invalidate(act);
+                    Serial.println("[HOME REDRAW] springboard invalidated");
+                }
+
+#if defined(LV_VERSION_CHECK)
+#if LV_VERSION_CHECK(8, 0, 0)
+                lv_refr_now(NULL);
+#else
+                bool prev_touch_enabled = indev_touch_enabled;
+                indev_touch_enabled = false;
+                lv_task_handler();
+                indev_touch_enabled = prev_touch_enabled;
+#endif
+#else
+                bool prev_touch_enabled = indev_touch_enabled;
+                indev_touch_enabled = false;
+                lv_task_handler();
+                indev_touch_enabled = prev_touch_enabled;
+#endif
+                Serial.println("[HOME REDRAW] forced LVGL refresh requested");
+
                 uint32_t now = millis();
                 HomeInputState prev = home_input_state;
                 home_input_state = HOME_INPUT_SUPPRESS_UNTIL_RELEASE;
@@ -1304,6 +1350,10 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         vTaskDelay(pdMS_TO_TICKS(20));
         epd_poweroff();
         Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame complete");
+        if (home_waiting_for_redraw_commit && kind == DISPLAY_UPDATE_SCREEN_REPLACE) {
+            home_waiting_for_redraw_commit = false;
+            Serial.println("[HOME REDRAW] replacement frame committed; touch may resume after guard");
+        }
         return;
     }
     epd_hl_set_all_white(&hl);
