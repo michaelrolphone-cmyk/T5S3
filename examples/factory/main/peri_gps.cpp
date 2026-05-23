@@ -51,7 +51,6 @@ uint8_t gps_hour=0, gps_minute=0, gps_second=0;
 static uint32_t gps_vsat=0;
 static bool gps_ready = false;
 static int gps_last_sync_minute = -1;
-static uint32_t last_gps_diag_ms = 0;
 static uint32_t gps_last_csv_write_ms = 0;
 static const uint32_t GPS_CSV_PERIOD_MS = 10000;
 
@@ -135,15 +134,6 @@ void gps_task(void *param)
             }
         }
 
-        if (millis() - last_gps_diag_ms > 10000) {
-            last_gps_diag_ms = millis();
-            Serial.printf("[GPS TASK] chars=%lu valid=%d sats=%lu stack_free=%u\n",
-                          gps.charsProcessed(),
-                          gps.location.isValid(),
-                          gps.satellites.isValid() ? gps.satellites.value() : 0,
-                          uxTaskGetStackHighWaterMark(NULL));
-        }
-
         if (millis() > 30000 && gps.charsProcessed() < 10) {
             Serial.println(F("No GPS detected: check wiring."));
             delay(1000);
@@ -154,7 +144,6 @@ void gps_task(void *param)
 
 void gps_logger_task(void *param)
 {
-    static uint32_t last_status_diag_ms = 0;
     static uint32_t last_status_csv_ms = 0;
     while (1) {
         gps_fix_snapshot_t snapshot = {0};
@@ -172,14 +161,6 @@ void gps_logger_task(void *param)
             if (gps_csv_append_snapshot_fix(&snapshot)) {
                 gps_last_csv_write_ms = now;
             }
-        }
-        if (now - last_status_diag_ms >= 60000) {
-            last_status_diag_ms = now;
-            Serial.printf("[GPS LOGGER] valid=%d age=%lu sd=%d stack_free=%u\n",
-                          snapshot.valid,
-                          (unsigned long)(snapshot.captured_ms ? (now - snapshot.captured_ms) : 0),
-                          peri_buf[E_PERI_SD_CARD],
-                          uxTaskGetStackHighWaterMark(NULL));
         }
         delay(1000);
     }
@@ -557,6 +538,7 @@ static bool gps_csv_append_snapshot_fix(const gps_fix_snapshot_t *snapshot)
     char msg[128];
     snprintf(msg, sizeof(msg), "[GPS CSV] wrote %s lat=%.8f lon=%.8f sats=%u",
              path, lat, lon, snapshot->satellites);
+    Serial.println(msg);
     gps_debug_log(msg);
 
     return true;
@@ -645,8 +627,6 @@ static void gps_status_csv_append(const gps_fix_snapshot_t *snapshot)
 
 static void gps_debug_log(const char *msg)
 {
-    Serial.println(msg);
-
     if (!peri_buf[E_PERI_SD_CARD]) {
         return;
     }
