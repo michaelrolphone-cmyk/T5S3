@@ -831,11 +831,22 @@ bool touch_reject_stale_home_event(void)
 static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
 {
     static int16_t x=0, y=0;
+    static uint32_t low_mem_log_ms = 0;
 
     (void)drv;
 
     uint32_t now = millis();
-    bool raw_pressed = indev_touch_enabled && touch.isPressed();
+    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    bool i2c_ready = (free_internal >= 12 * 1024) && (largest_internal >= 1024);
+    if (!i2c_ready && (now - low_mem_log_ms) > 1000U) {
+        Serial.printf("[TOUCH] skip I2C poll low heap free_internal=%u largest_internal=%u\n",
+                      (unsigned)free_internal,
+                      (unsigned)largest_internal);
+        low_mem_log_ms = now;
+    }
+
+    bool raw_pressed = indev_touch_enabled && i2c_ready && touch.isPressed();
 
     if (home_waiting_for_redraw_commit) {
         data->state = LV_INDEV_STATE_RELEASED;
