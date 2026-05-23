@@ -46,5 +46,6 @@
 
 #define BOARD_IO48_BTN      (48)
 
-#define BOARD_IO48_BTN_ACTIVE_LOW      (0)
+// IO48 is pulled up and reads LOW when pressed
+#define BOARD_IO48_BTN_ACTIVE_LOW      (1)
 #define BOARD_PCA_BUTTON_ACTIVE_HIGH   (0)
