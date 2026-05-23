@@ -86,13 +86,28 @@ bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
 static volatile bool disp_force_clear_next_flush = false;
-static volatile bool disp_force_hl_white_next_update = false;
-static volatile bool disp_force_physical_clean_next_update = false;
+enum DisplayUpdateKind {
+    DISPLAY_UPDATE_NONE = 0,
+    DISPLAY_UPDATE_NORMAL_FRAME,
+    DISPLAY_UPDATE_SCREEN_REPLACE,
+    DISPLAY_UPDATE_BOOT_REPLACE,
+    DISPLAY_UPDATE_RECOVERY_CLEAN
+};
+static volatile DisplayUpdateKind disp_pending_update_kind = DISPLAY_UPDATE_NONE;
 static volatile uint32_t disp_last_flush_ms = 0;
-static constexpr uint32_t EPD_FRAME_SETTLE_MS = 120;
+static constexpr uint32_t EPD_FRAME_SETTLE_MS = 150;
+static uint32_t disp_lvgl_flush_count = 0;
+static uint32_t disp_physical_commit_count = 0;
+static uint32_t disp_replace_commit_count = 0;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 static SemaphoreHandle_t sd_mutex = NULL;
+void disp_request_normal_frame(void);
+void disp_request_screen_replace(void);
+void disp_request_boot_replace(void);
+static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp);
+static void display_set_pending_update_kind(DisplayUpdateKind kind);
+static inline int display_update_kind_priority(DisplayUpdateKind kind);
 
 void sd_guard_init()
 {
@@ -277,53 +292,28 @@ static void disp_flush_task(void *param)
                 vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
-            Serial.println("[EPD SAFE] settled frame; physical update starting");
+            if (!(framebuffer_mutex && decodebuffer && displaybuffer)) {
+                Serial.println("[DISPLAY LIFECYCLE] missing framebuffer resources; update deferred");
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+
+            if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+                Serial.println("[DISPLAY LIFECYCLE] framebuffer mutex timeout; update deferred");
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+
+            Serial.println("[DISPLAY LIFECYCLE] settled frame");
+            memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
+            xSemaphoreGive(framebuffer_mutex);
+
+            DisplayUpdateKind kind = disp_pending_update_kind;
+            disp_pending_update_kind = DISPLAY_UPDATE_NONE;
             disp_flush_pending = false;
             framebuffer_dirty = false;
 
-            EpdRect rener_area = {
-                .x = 0,
-                .y = 0,
-                .width = epd_rotated_display_width(),
-                .height = epd_rotated_display_height(),
-            };
-
-            if (framebuffer_mutex && decodebuffer && displaybuffer) {
-                if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
-                    xSemaphoreGive(framebuffer_mutex);
-                } else {
-                    vTaskDelay(pdMS_TO_TICKS(1));
-                    continue;
-                }
-            }
-
-            bool force_hl_white = disp_force_hl_white_next_update;
-            disp_force_hl_white_next_update = false;
-            bool force_physical_clean = disp_force_physical_clean_next_update;
-            disp_force_physical_clean_next_update = false;
-
-            if (ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) {
-                Serial.println("[EPD SAFE] FAST/DU disabled; using full GL16");
-            }
-            if (force_physical_clean) {
-                Serial.println("[EPD SAFE] physical clean before replacement frame");
-                disp_full_clean();
-                epd_hl_set_all_white(&hl);
-                epd_poweron();
-                checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
-                epd_poweroff();
-            }
-
-            if (force_hl_white) {
-                Serial.println("[EPD] clearing high-level framebuffer to white before UI draw");
-            }
-            epd_hl_set_all_white(&hl);
-            epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-            epd_poweron();
-            checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
-            epd_poweroff();
-            Serial.println("[EPD SAFE] full GL16 replacement frame complete");
+            display_commit_frame(kind, displaybuffer);
 
             if (framebuffer_dirty) {
                 disp_flush_pending = true;
@@ -379,9 +369,11 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         }
 
         framebuffer_dirty = true;
+        disp_lvgl_flush_count++;
         // printf("[disp_flush] x1:%d, y1:%d, w:%d, h:%d\n", area->x1, area->y1, w, h);
     }
     disp_last_flush_ms = millis();
+    display_set_pending_update_kind(DISPLAY_UPDATE_NORMAL_FRAME);
     disp_flush_pending = true;
     /* Inform the graphics library that you are ready with the flushing */
     lv_disp_flush_ready(disp);
@@ -389,10 +381,29 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
 
 void disp_request_full_clear(void)
 {
-    Serial.println("[EPD SAFE] disp_request_full_clear");
+    disp_request_screen_replace();
+}
+
+void disp_request_normal_frame(void)
+{
+    display_set_pending_update_kind(DISPLAY_UPDATE_NORMAL_FRAME);
+    disp_flush_pending = true;
+}
+
+void disp_request_screen_replace(void)
+{
     disp_force_clear_next_flush = true;
-    disp_force_hl_white_next_update = true;
-    disp_force_physical_clean_next_update = true;
+    display_set_pending_update_kind(DISPLAY_UPDATE_SCREEN_REPLACE);
+    disp_flush_pending = true;
+    Serial.println("[DISPLAY LIFECYCLE] screen replace requested");
+}
+
+void disp_request_boot_replace(void)
+{
+    disp_force_clear_next_flush = true;
+    display_set_pending_update_kind(DISPLAY_UPDATE_BOOT_REPLACE);
+    disp_flush_pending = true;
+    Serial.println("[DISPLAY LIFECYCLE] boot replace requested");
 }
 
 static void touch_cancel_current_press(const char *reason)
@@ -589,13 +600,17 @@ static void lv_port_disp_init(void)
     lv_color_t *lv_disp_buf_2 = (lv_color_t *)ps_calloc(sizeof(lv_color_t), DISP_BUF_SIZE);
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
+    framebuffer_mutex = xSemaphoreCreateMutex();
+    if (!lv_disp_buf_1 || !lv_disp_buf_2 || !decodebuffer || !displaybuffer || !framebuffer_mutex) {
+        Serial.println("[DISPLAY LIFECYCLE] FATAL: display buffers/mutex allocation failed; LVGL display not registered");
+        return;
+    }
     if (decodebuffer) {
         memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
     }
     if (displaybuffer) {
         memset(displaybuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
     }
-    framebuffer_mutex = xSemaphoreCreateMutex();
     lv_disp_draw_buf_init(&draw_buf, lv_disp_buf_1, lv_disp_buf_2, DISP_BUF_SIZE);
 
     static lv_disp_drv_t disp_drv;
@@ -607,7 +622,7 @@ static void lv_port_disp_init(void)
     disp_drv.draw_buf = &draw_buf;
     disp_drv.full_refresh = 1;
     lv_disp_drv_register(&disp_drv);
-    disp_request_full_clear();
+    disp_request_boot_replace();
 
     static lv_indev_drv_t indev_drv;
     lv_indev_drv_init(&indev_drv);      /*Basic initialization*/
@@ -970,4 +985,60 @@ void idf_loop()
 
     ui_wifi_service_loop();
     delay(1);
+}
+static inline int display_update_kind_priority(DisplayUpdateKind kind)
+{
+    switch (kind) {
+        case DISPLAY_UPDATE_RECOVERY_CLEAN: return 4;
+        case DISPLAY_UPDATE_BOOT_REPLACE: return 3;
+        case DISPLAY_UPDATE_SCREEN_REPLACE: return 2;
+        case DISPLAY_UPDATE_NORMAL_FRAME: return 1;
+        case DISPLAY_UPDATE_NONE:
+        default: return 0;
+    }
+}
+
+static void display_set_pending_update_kind(DisplayUpdateKind kind)
+{
+    if (display_update_kind_priority(kind) > display_update_kind_priority(disp_pending_update_kind)) {
+        disp_pending_update_kind = kind;
+    }
+}
+
+static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp)
+{
+    if (kind == DISPLAY_UPDATE_NONE) {
+        Serial.println("[DISPLAY LIFECYCLE] no pending update; skipping physical commit");
+        return;
+    }
+    EpdRect full_area = {.x = 0, .y = 0, .width = epd_rotated_display_width(), .height = epd_rotated_display_height()};
+    disp_physical_commit_count++;
+    Serial.printf("[DISPLAY LIFECYCLE] commit=%lu kind=%d lvgl_flushes=%lu\n",
+                  (unsigned long)disp_physical_commit_count, (int)kind, (unsigned long)disp_lvgl_flush_count);
+    if (ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) {
+        Serial.println("[DISPLAY LIFECYCLE] FAST/DU disabled; using GL16 safe mode");
+    }
+    if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN) {
+        disp_replace_commit_count++;
+        Serial.println("[DISPLAY LIFECYCLE] physical white erase begin");
+        epd_hl_set_all_white(&hl);
+        epd_poweron();
+        checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+        epd_poweroff();
+        Serial.println("[DISPLAY LIFECYCLE] physical white erase complete");
+        Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame begin");
+        epd_hl_set_all_white(&hl);
+        epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
+        epd_poweron();
+        checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+        epd_poweroff();
+        Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame complete");
+        return;
+    }
+    epd_hl_set_all_white(&hl);
+    epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
+    epd_poweron();
+    checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+    epd_poweroff();
+    Serial.println("[DISPLAY LIFECYCLE] normal full GL16 frame complete");
 }

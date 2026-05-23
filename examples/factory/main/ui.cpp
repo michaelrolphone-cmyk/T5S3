@@ -4466,5 +4466,6 @@ void ui_entry(void)
     scr_mgr_register(SCREEN13_ID,  &screen13);  // maps
 
     scr_mgr_switch(SCREEN0_ID, false); // set root screen
+    disp_request_boot_replace();
     scr_mgr_set_anim(LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE);
 }
