@@ -80,7 +80,6 @@ static lv_indev_t *touch_indev = NULL;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
-static volatile bool disp_force_clear_next_flush = false;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 
@@ -315,21 +314,6 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         int32_t screen_w = epd_rotated_display_width();
         int32_t screen_h = epd_rotated_display_height();
 
-        bool full_area =
-            area->x1 == 0 &&
-            area->y1 == 0 &&
-            area->x2 == screen_w - 1 &&
-            area->y2 == screen_h - 1;
-
-        bool force_clear_this_flush = disp_force_clear_next_flush;
-
-        if (force_clear_this_flush || full_area) {
-            memset(decodebuffer, 0x00, EPD_IMAGE_BUF_SIZE);
-            disp_force_clear_next_flush = false;
-            Serial.printf("[LVGL flush] logical framebuffer cleared full=%d force=%d\n",
-                          full_area, force_clear_this_flush);
-        }
-
         for(int32_t y = 0; y < h; y++) {
             int32_t dst_y = area->y1 + y;
             if(dst_y < 0 || dst_y >= screen_h) continue;
@@ -367,7 +351,8 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
 
 void disp_request_full_clear(void)
 {
-    disp_force_clear_next_flush = true;
+    // No-op: do not clear decodebuffer here.
+    // Clearing decodebuffer to 0x00 paints black in this 4bpp path.
 }
 
 static void touch_cancel_current_press(const char *reason)
@@ -511,8 +496,6 @@ static void lv_port_disp_init(void)
     lv_color_t *lv_disp_buf_2 = (lv_color_t *)ps_calloc(sizeof(lv_color_t), DISP_BUF_SIZE);
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
-    if (decodebuffer) memset(decodebuffer, 0x00, EPD_IMAGE_BUF_SIZE);
-    if (displaybuffer) memset(displaybuffer, 0x00, EPD_IMAGE_BUF_SIZE);
     framebuffer_mutex = xSemaphoreCreateMutex();
     lv_disp_draw_buf_init(&draw_buf, lv_disp_buf_1, lv_disp_buf_2, DISP_BUF_SIZE);
 

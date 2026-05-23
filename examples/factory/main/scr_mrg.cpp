@@ -153,9 +153,6 @@ bool scr_mgr_switch(int id, bool anim)  // 清空栈，然后切换到指定 id�
         scr_stack_top = stack_scr;
     }
 
-    Serial.printf("[SCR] logical clear requested for screen id=%d\n", id);
-    disp_request_full_clear();
-
     stack_scr = (scr_card_t *)lv_mem_alloc(sizeof(scr_card_t));
     stack_scr->id = tgt_card->id;
     // stack_scr->obj = tgt_card->life->create(NULL);
@@ -193,9 +190,6 @@ bool scr_mgr_push(int id, bool anim)
     if((scr_stack_top != NULL) && (tgt_card->id == scr_stack_top->id)){ // 当前push屏幕和最顶层屏幕一样
         return false;
     }
-
-    Serial.printf("[SCR] logical clear requested for screen id=%d\n", id);
-    disp_request_full_clear();
 
     stack_scr = (scr_card_t *)lv_mem_alloc(sizeof(scr_card_t));
     stack_scr->id = tgt_card->id;
@@ -242,9 +236,6 @@ bool scr_mgr_pop(bool anim)
     scr_mgr_remove(scr_stack_top);
     lv_mem_free((void *)scr_stack_top);
     scr_stack_top = dst_item;
-
-    Serial.printf("[SCR] logical clear requested for screen id=%d\n", dst_item->id);
-    disp_request_full_clear();
 
     scr_mgr_active(dst_item);
 
