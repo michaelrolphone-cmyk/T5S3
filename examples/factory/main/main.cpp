@@ -54,6 +54,10 @@ BQ27220 bq27220;
 #define DEMO_BOARD epd_board_v7
 EpdiyHighlevelState hl;
 
+#ifndef EPD_SELFTEST_ON_BOOT
+#define EPD_SELFTEST_ON_BOOT 0
+#endif
+
 // Touch
 TouchDrvGT911 touch;
 
@@ -200,6 +204,45 @@ static inline void checkError(enum EpdDrawError err) {
     if (err != EPD_DRAW_SUCCESS) {
         ESP_LOGE("demo", "draw error: %X", err);
     }
+}
+
+static void epd_low_level_self_test()
+{
+    Serial.println("[EPD SELFTEST] begin");
+
+    EpdRect full_area = {
+        .x = 0,
+        .y = 0,
+        .width = epd_rotated_display_width(),
+        .height = epd_rotated_display_height(),
+    };
+
+    epd_poweron();
+    epd_clear();
+    epd_poweroff();
+
+    epd_hl_set_all_white(&hl);
+
+    EpdFontProperties font_props = epd_font_properties_default();
+    font_props.flags = EPD_DRAW_ALIGN_CENTER;
+
+    int cx = epd_rotated_display_width() / 2;
+    int cy = epd_rotated_display_height() / 2;
+
+    epd_write_string(&FiraSans_20,
+                     "BATTERY EPD SELF TEST",
+                     &cx,
+                     &cy,
+                     epd_hl_get_framebuffer(&hl),
+                     &font_props);
+
+    (void)full_area;
+
+    epd_poweron();
+    checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+    epd_poweroff();
+
+    Serial.println("[EPD SELFTEST] complete");
 }
 
 void indev_touch_en()
@@ -814,6 +857,16 @@ static bool screen_init(void)
     epd_poweroff();
 
     printf("current temperature: %.2f\n", epd_ambient_temperature());
+
+    bool run_selftest = EPD_SELFTEST_ON_BOOT;
+    if (digitalRead(BOARD_BOOT_BTN) == LOW) {
+        run_selftest = true;
+        Serial.println("[EPD SELFTEST] BOOT held low; running self-test");
+    }
+    if (run_selftest) {
+        epd_low_level_self_test();
+        delay(5000);
+    }
 
     return true;
 }
