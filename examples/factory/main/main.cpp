@@ -525,6 +525,15 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
     bool ok = false;
     uint8_t *png_raw = NULL;
     size_t png_raw_size = 0;
+    int rc = PNG_FAIL;
+    int src_w = 0;
+    int src_h = 0;
+    const int dst_w = epd_rotated_display_width();
+    const int dst_h = epd_rotated_display_height();
+    float scale = 1.0f;
+    int scaled_w = 0;
+    int scaled_h = 0;
+
     File f = SD.open(path, FILE_READ);
     if (!f || f.isDirectory()) {
         Serial.printf("[SLEEP PNG] open failed path=%s\n", path);
@@ -556,24 +565,22 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
     }
 
     auto open_cb = [](PNGDRAW *pDraw) -> int { (void)pDraw; return 1; };
-    int rc = s_sleep_png_decoder.openRAM(png_raw, (int)png_raw_size, open_cb);
+    rc = s_sleep_png_decoder.openRAM(png_raw, (int)png_raw_size, open_cb);
     if (rc != PNG_SUCCESS) {
         Serial.printf("[SLEEP PNG] openRAM failed rc=%d\n", rc);
         goto out;
     }
-    int src_w = s_sleep_png_decoder.getWidth();
-    int src_h = s_sleep_png_decoder.getHeight();
+    src_w = s_sleep_png_decoder.getWidth();
+    src_h = s_sleep_png_decoder.getHeight();
     s_sleep_png_decoder.close();
     if (src_w <= 0 || src_h <= 0 || src_w > 4096 || src_h > 4096) {
         Serial.printf("[SLEEP PNG] invalid dimensions %dx%d\n", src_w, src_h);
         goto out;
     }
 
-    const int dst_w = epd_rotated_display_width();
-    const int dst_h = epd_rotated_display_height();
-    float scale = (float)dst_w / (float)src_w;
-    int scaled_w = dst_w;
-    int scaled_h = (int)((float)src_h * scale);
+    scale = (float)dst_w / (float)src_w;
+    scaled_w = dst_w;
+    scaled_h = (int)((float)src_h * scale);
     if (scaled_h > dst_h) {
         scale = (float)dst_h / (float)src_h;
         scaled_h = dst_h;
