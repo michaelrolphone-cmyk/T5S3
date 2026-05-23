@@ -572,7 +572,24 @@ void ui_shutdown(void)
 {
     bool ok = disp_show_sleep_png_from_sd("/system/display/sleep.png");
     Serial.printf("[SLEEP IMG] pre-shutdown display %s\n", ok ? "ok" : "failed");
-    PPM.shutdown();
+
+    touch.sleep();
+    lora_sleep();
+
+    digitalWrite(BOARD_TOUCH_RST, LOW);
+    digitalWrite(BOARD_LORA_RST, LOW);
+
+    gpio_hold_en((gpio_num_t)BOARD_TOUCH_RST);
+    gpio_hold_en((gpio_num_t)BOARD_LORA_RST);
+    gpio_deep_sleep_hold_en();
+
+    io_extend_lora_gps_power_on(false);
+    analogWrite(BOARD_BL_EN, 0);
+
+    epd_poweroff();
+
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)BOARD_BOOT_BTN, 0);
+    esp_deep_sleep_start();
 }
 
 void ui_sleep(void)
