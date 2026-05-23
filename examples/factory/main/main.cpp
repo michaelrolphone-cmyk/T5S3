@@ -93,7 +93,6 @@ static TaskHandle_t ui_task_handle = NULL;
 
 enum class UiEvent : uint8_t {
     BOOT_SLEEP,
-    TOGGLE_BACKLIGHT,
     HOME_SWITCH_TO_SPRINGBOARD,
 };
 
@@ -179,9 +178,16 @@ void sd_guard_unlock()
  * *******************************************************************************/
 void btn_task(void *param)
 {
-    bool boot_btn_pressed = false;
-    // Seed with the current level to avoid a false release edge right after boot.
+    Serial.println("[BUTTON] task started");
+#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
+    Serial.println("[BUTTON] source=GPIO48");
+    bool ioext_btn_pressed = (digitalRead(BOARD_IO48_BTN) == LOW);
+#else
+    Serial.println("[BUTTON] source=PCA9535/button_read");
     bool ioext_btn_pressed = button_read();
+#endif
+    Serial.printf("[BUTTON] initial button_read=%d\n", ioext_btn_pressed);
+    bool boot_btn_pressed = false;
 
     while(1)
     {
@@ -198,12 +204,26 @@ void btn_task(void *param)
 
         // Read the IO expander key level every cycle and toggle on release edge.
         // Relying solely on INT can miss transitions once the line returns high.
-        if(button_read()) {
+        bool io_pressed = false;
+#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
+        io_pressed = (digitalRead(BOARD_IO48_BTN) == LOW);
+#else
+        io_pressed = button_read();
+#endif
+
+        if(io_pressed) {
+            if(!ioext_btn_pressed) {
+                Serial.println("[BUTTON] io button pressed");
+            }
             ioext_btn_pressed = true;
         }
         else {
             if(ioext_btn_pressed) {
-                ui_post_event(UiEvent::TOGGLE_BACKLIGHT);
+                int bl = 0;
+                ui_setting_get_backlight(&bl);
+                int new_bl = (bl == 0) ? 1 : 0;
+                ui_setting_set_backlight(new_bl);
+                Serial.printf("[BUTTON] io button released; backlight old=%d new=%d\n", bl, new_bl);
             }
             ioext_btn_pressed = false;
         }
@@ -1235,6 +1255,23 @@ void idf_setup()
     // Init system
     ui_nvs_set_defaulat_param();
 
+#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
+    pinMode(BOARD_IO48_BTN, INPUT_PULLUP);
+#endif
+
+    BaseType_t btn_rc = xTaskCreate(btn_task, "btn_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
+    Serial.printf("[BUTTON TASK] create rc=%ld handle=%p free_internal=%u largest_internal=%u\n",
+                  (long)btn_rc,
+                  (void*)btn_handle,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    if (btn_rc != pdPASS) {
+        Serial.printf("[BUTTON TASK ERROR] create failed rc=%ld free_internal=%u largest_internal=%u\n",
+                      (long)btn_rc,
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
+
     WiFi.persistent(false);
     WiFi.disconnect(true, true);
     WiFi.mode(WIFI_OFF);
@@ -1312,8 +1349,6 @@ void idf_setup()
     cursor_y = epd_rotated_display_height() / 2 - 100 +300;
     disp_init_status("GPS Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_GPS]);
 
-    // task
-    xTaskCreate(btn_task, "lora_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
 }
 
 bool ui_is_ui_thread()
@@ -1333,12 +1368,6 @@ void idf_loop()
                 ui_sleep();
                 skip_lv_task_handler = true;
                 break;
-            case UiEvent::TOGGLE_BACKLIGHT: {
-                int bl = 0;
-                ui_setting_get_backlight(&bl);
-                ui_setting_set_backlight(bl == 0 ? 1 : 0);
-                break;
-            }
             case UiEvent::HOME_SWITCH_TO_SPRINGBOARD: {
                 if (home_nav_in_progress) {
                     break;

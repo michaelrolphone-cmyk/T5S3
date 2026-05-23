@@ -43,3 +43,5 @@
 #define BOARD_PCA9535_INT   (38)
 #define BOARD_BOOT_BTN      (0)
 
+
+#define BOARD_IO48_BTN      (48)
