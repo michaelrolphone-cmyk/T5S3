@@ -17,6 +17,13 @@ lv_scr_load_anim_t scr_anim_push = SCR_MGR_SCR_PUSH_ANIM;
 lv_scr_load_anim_t scr_anim_pop = SCR_MGR_SCR_POP_ANIM;
 
 uint32_t default_bg_color = 0x000000;
+static bool scr_mgr_require_ui_thread(const char *fn)
+{
+    if (ui_is_ui_thread()) return true;
+    Serial.printf("[SCR_MGR ERROR] %s called off UI thread\n", fn);
+    assert(false);
+    return false;
+}
 /*********************************************************************************
  *                              STATIC FUNCTION
  *********************************************************************************/
@@ -132,7 +139,7 @@ bool scr_mgr_register(int id, scr_lifecycle_t *card_life) // 注册一个屏幕�
 
 bool scr_mgr_switch(int id, bool anim)  // 清空栈，然后切换到指定 id的屏幕卡片上
 {
-    assert(ui_is_ui_thread());
+    if (!scr_mgr_require_ui_thread(__func__)) return false;
     scr_card_t *tgt_card = scr_mgr_find_by_id(id);
     scr_card_t *stack_scr = NULL;
     lv_obj_t *old_objs[16] = {0};
@@ -187,7 +194,7 @@ bool scr_mgr_switch(int id, bool anim)  // 清空栈，然后切换到指定 id�
 
 bool scr_mgr_push(int id, bool anim)
 {
-    assert(ui_is_ui_thread());
+    if (!scr_mgr_require_ui_thread(__func__)) return false;
     scr_card_t *tgt_card = scr_mgr_find_by_id(id);
     scr_card_t *stack_scr = NULL;
 
@@ -233,7 +240,7 @@ bool scr_mgr_push(int id, bool anim)
 
 bool scr_mgr_pop(bool anim)
 {
-    assert(ui_is_ui_thread());
+    if (!scr_mgr_require_ui_thread(__func__)) return false;
     scr_card_t *dst_item = NULL;
     lv_obj_t *cur_obj;
 

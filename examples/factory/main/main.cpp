@@ -78,7 +78,6 @@ enum HomeInputState {
 static volatile HomeInputState home_input_state = HOME_INPUT_IDLE;
 static volatile uint32_t home_input_state_start_ms = 0;
 static volatile uint32_t home_input_deadline_ms = 0;
-static volatile bool home_button_pending = false;
 static volatile bool home_nav_in_progress = false;
 static volatile uint32_t home_button_last_ms = 0;
 static lv_indev_t *touch_indev = NULL;
@@ -610,8 +609,15 @@ static bool touch_gt911_init(void)
         home_button_last_ms = now;
 
         Serial.println("[HOME] callback: schedule springboard");
-        home_button_pending = ui_post_event(UiEvent::HOME_SWITCH_TO_SPRINGBOARD);
-        if (!home_button_pending) {
+        bool posted = ui_post_event(UiEvent::HOME_SWITCH_TO_SPRINGBOARD);
+        if (posted) {
+            HomeInputState prev = home_input_state;
+            home_input_state = HOME_INPUT_SUPPRESS_UNTIL_RELEASE;
+            home_input_state_start_ms = now;
+            home_input_deadline_ms = now + 1500;
+            Serial.printf("[HOME INPUT] %s -> %s reason=callback\n",
+                          home_input_state_name(prev), home_input_state_name(home_input_state));
+        } else {
             Serial.println("[HOME] callback: queue full, event dropped");
         }
     }, NULL);
@@ -879,6 +885,7 @@ void idf_setup()
     cursor_y = epd_rotated_display_height() / 2 - 100 + 100;
     disp_init_status("RTC (PCF8563) Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_RTC]);
 
+    ui_event_q = xQueueCreate(16, sizeof(UiEvent));
     peri_buf[E_PERI_TOUCH]      = touch_gt911_init();  // Touch --- 0x5D;
     cursor_x = 100;
     cursor_y = epd_rotated_display_height() / 2 - 100 + 150;
@@ -901,12 +908,12 @@ void idf_setup()
     disp_init_status("GPS Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_GPS]);
 
     printf("LVGL Init\n");
-    ui_event_q = xQueueCreate(16, sizeof(UiEvent));
     lv_port_disp_init();
     Serial.println("[BOOT] after lv_port_disp_init()");
     xTaskCreatePinnedToCore(disp_flush_task, "disp_flush_task", 1024 * 6, NULL, 2, &disp_flush_handle, 0);
 
     printf("LVGL UI Entry\n");
+    ui_task_handle = xTaskGetCurrentTaskHandle();
     ui_entry();
     Serial.printf("[EPD SAFE] screen root bg=0x%06X\n", EPD_COLOR_BG);
     Serial.println("[BOOT] after ui_entry()");
@@ -923,12 +930,14 @@ bool ui_is_ui_thread()
 void idf_loop() 
 {
     ui_task_handle = xTaskGetCurrentTaskHandle();
+    bool skip_lv_task_handler = false;
     UiEvent event;
     while (ui_event_q && xQueueReceive(ui_event_q, &event, 0) == pdTRUE) {
         switch (event) {
             case UiEvent::BOOT_SLEEP:
                 scr_mgr_switch(SCREEN0_ID, false);
                 ui_sleep();
+                skip_lv_task_handler = true;
                 break;
             case UiEvent::TOGGLE_BACKLIGHT: {
                 int bl = 0;
@@ -940,7 +949,6 @@ void idf_loop()
                 if (home_nav_in_progress) {
                     break;
                 }
-                home_button_pending = false;
                 home_nav_in_progress = true;
                 Serial.println("[HOME] idf_loop: switching to springboard");
                 if (touch_indev) {
@@ -959,11 +967,16 @@ void idf_loop()
                               home_input_state_name(prev), home_input_state_name(home_input_state));
                 home_nav_in_progress = false;
                 Serial.println("[HOME] idf_loop: switch complete, skipped one LVGL handler");
+                skip_lv_task_handler = true;
                 break;
             }
         }
     }
-    lv_task_handler();
+    if (!skip_lv_task_handler) {
+        lv_task_handler();
+    } else {
+        Serial.println("[UI EVENT] skipped lv_task_handler after queued UI transition");
+    }
 
     ui_wifi_service_loop();
     delay(1);
