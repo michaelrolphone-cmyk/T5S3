@@ -131,6 +131,7 @@ static volatile uint32_t display_seq_counter = 0;
 static volatile uint32_t disp_last_flush_ms = 0;
 static constexpr uint32_t EPD_FRAME_SETTLE_MS = 150;
 static volatile DisplayUpdateKind display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
+static volatile DisplayUpdateKind display_reliable_pending_kind = DISPLAY_UPDATE_NONE;
 static uint32_t disp_lvgl_flush_count = 0;
 static uint32_t disp_physical_commit_count = 0;
 static uint32_t disp_replace_commit_count = 0;
@@ -388,6 +389,18 @@ static void display_set_next_snapshot_kind(DisplayUpdateKind kind)
     }
 }
 
+static void display_mark_reliable_pending(DisplayUpdateKind kind)
+{
+    if (!display_cmd_is_reliable(kind)) {
+        return;
+    }
+    DisplayUpdateKind old_kind = display_reliable_pending_kind;
+    if (display_update_kind_priority(kind) > display_update_kind_priority(old_kind)) {
+        display_reliable_pending_kind = kind;
+        Serial.printf("[DISPLAY QUEUE] reliable request pending kind=%d old=%d\n", (int)kind, (int)old_kind);
+    }
+}
+
 static void release_snapshot(uint32_t seq, uint8_t *snapshot)
 {
     if (!display_snapshot_mutex) {
@@ -453,6 +466,12 @@ static void disp_flush_task(void *param)
                 release_snapshot(in.seq, in.snapshot);
                 return;
             }
+            DisplayUpdateKind reliable_pending = display_reliable_pending_kind;
+            if (display_cmd_is_reliable(reliable_pending)) {
+                Serial.println("[DISPLAY QUEUE] normal suppressed while reliable publish pending");
+                release_snapshot(in.seq, in.snapshot);
+                return;
+            }
             queue_or_replace(pending_normal, has_pending_normal, in, "coalesce normal");
         };
 
@@ -477,9 +496,19 @@ static void disp_flush_task(void *param)
             Serial.printf("[DISPLAY QUEUE] commit reliable seq=%lu kind=%d\n",
                           (unsigned long)pending_reliable.seq, (int)pending_reliable.kind);
             display_commit_frame(pending_reliable.kind, pending_reliable.snapshot);
+            if (display_reliable_pending_kind == pending_reliable.kind) {
+                display_reliable_pending_kind = DISPLAY_UPDATE_NONE;
+                Serial.println("[DISPLAY QUEUE] reliable physical commit complete; pending cleared");
+            }
             release_snapshot(pending_reliable.seq, pending_reliable.snapshot);
             has_pending_reliable = false;
         } else if (has_pending_normal) {
+            if (display_cmd_is_reliable(display_reliable_pending_kind)) {
+                Serial.println("[DISPLAY QUEUE] normal suppressed while reliable publish pending");
+                release_snapshot(pending_normal.seq, pending_normal.snapshot);
+                has_pending_normal = false;
+                continue;
+            }
             Serial.printf("[DISPLAY QUEUE] commit normal seq=%lu kind=%d\n",
                           (unsigned long)pending_normal.seq, (int)pending_normal.kind);
             display_commit_frame(pending_normal.kind, pending_normal.snapshot);
@@ -552,7 +581,7 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
             Serial.printf("[DISPLAY QUEUE] force-clear consumed by published reliable kind=%d\n", (int)requested_kind);
         }
     } else if (!published && requested_kind != DISPLAY_UPDATE_NONE) {
-        Serial.printf("[DISPLAY QUEUE ERROR] publish failed; retaining pending replace kind=%d\n", (int)requested_kind);
+        Serial.printf("[DISPLAY QUEUE] reliable publish failed; retained kind=%d\n", (int)requested_kind);
         Serial.println("[DISPLAY QUEUE] pending kind retained after publish failure");
         lv_obj_t *act = lv_scr_act();
         if (act) {
@@ -577,6 +606,7 @@ void disp_request_normal_frame(void)
 void disp_request_screen_replace(void)
 {
     disp_force_clear_next_flush = true;
+    display_mark_reliable_pending(DISPLAY_UPDATE_SCREEN_REPLACE);
     display_set_next_snapshot_kind(DISPLAY_UPDATE_SCREEN_REPLACE);
     lv_obj_t *act = lv_scr_act();
     if (act) lv_obj_invalidate(act);
@@ -586,6 +616,7 @@ void disp_request_screen_replace(void)
 void disp_request_boot_replace(void)
 {
     disp_force_clear_next_flush = true;
+    display_mark_reliable_pending(DISPLAY_UPDATE_BOOT_REPLACE);
     display_set_next_snapshot_kind(DISPLAY_UPDATE_BOOT_REPLACE);
     lv_obj_t *act = lv_scr_act();
     if (act) lv_obj_invalidate(act);
@@ -595,6 +626,7 @@ void disp_request_boot_replace(void)
 void disp_request_recovery_clean(void)
 {
     disp_force_clear_next_flush = true;
+    display_mark_reliable_pending(DISPLAY_UPDATE_RECOVERY_CLEAN);
     display_set_next_snapshot_kind(DISPLAY_UPDATE_RECOVERY_CLEAN);
     lv_obj_t *act = lv_scr_act();
     if (act) lv_obj_invalidate(act);
@@ -1390,21 +1422,26 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         Serial.println("[DISPLAY LIFECYCLE] FAST/DU disabled; using GL16 safe mode");
     }
 
-    bool do_hard_clean = (kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_BOOT_REPLACE);
-    if (kind == DISPLAY_UPDATE_RECOVERY_CLEAN && !display_safe_for_recovery_clean()) {
+    bool is_replacement_commit = (kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_BOOT_REPLACE);
+    bool do_hard_clean = is_replacement_commit;
+    bool safe_for_hard_clean = true;
+    if (is_replacement_commit) {
+        safe_for_hard_clean = display_safe_for_recovery_clean();
+    }
+    if (kind == DISPLAY_UPDATE_RECOVERY_CLEAN && !safe_for_hard_clean) {
         Serial.println("[EPD POWER] recovery clean downgraded to single GL16 replacement");
         do_hard_clean = false;
     }
-    if (kind == DISPLAY_UPDATE_SCREEN_REPLACE && !display_safe_for_recovery_clean()) {
+    if (kind == DISPLAY_UPDATE_SCREEN_REPLACE && !safe_for_hard_clean) {
         Serial.println("[EPD POWER] screen replace hard clean downgraded to single GL16 replacement");
         do_hard_clean = false;
     }
-    if (kind == DISPLAY_UPDATE_BOOT_REPLACE && !display_safe_for_recovery_clean()) {
-        Serial.println("[EPD POWER] boot replace hard clean downgraded to single GL16 replacement");
-        do_hard_clean = false;
-    }
     if (kind == DISPLAY_UPDATE_BOOT_REPLACE) {
-        do_hard_clean = do_hard_clean || display_safe_for_recovery_clean();
+        do_hard_clean = safe_for_hard_clean;
+        Serial.printf("[EPD POWER] boot replace hard clean decision safe=%d\n", safe_for_hard_clean ? 1 : 0);
+        if (!safe_for_hard_clean) {
+            Serial.println("[EPD POWER] boot replace hard clean downgraded to single GL16 replacement");
+        }
     }
 
     if (do_hard_clean) {
@@ -1443,7 +1480,7 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         }
         return;
     }
-    if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE) {
+    if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN) {
         disp_replace_commit_count++;
         Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame begin");
         epd_hl_set_all_white(&hl);
@@ -1460,7 +1497,8 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         vTaskDelay(pdMS_TO_TICKS(20));
         epd_poweroff();
         Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame complete");
-        if (home_waiting_for_redraw_commit && (kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN)) {
+        if (home_waiting_for_redraw_commit &&
+            (kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_BOOT_REPLACE)) {
             home_waiting_for_redraw_commit = false;
             Serial.println("[HOME REDRAW] guard released after physical commit");
         }
