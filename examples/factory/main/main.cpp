@@ -35,7 +35,6 @@
 #include "firasans_20.h"
 #include "ui_port.h"
 #include "nvs_param.h"
-#include <PNGdec.h>
 
 char global_buf[GLOBAL_BUF_LEN];
 
@@ -54,10 +53,6 @@ BQ27220 bq27220;
 #define WAVEFORM EPD_BUILTIN_WAVEFORM
 #define DEMO_BOARD epd_board_v7
 EpdiyHighlevelState hl;
-
-#ifndef CONFIG_EPD_LUT_MODE
-#define CONFIG_EPD_LUT_MODE EPD_LUT_64K
-#endif
 
 #ifndef EPD_SELFTEST_ON_BOOT
 #define EPD_SELFTEST_ON_BOOT 0
@@ -98,6 +93,7 @@ static TaskHandle_t ui_task_handle = NULL;
 
 enum class UiEvent : uint8_t {
     BOOT_SLEEP,
+    TOGGLE_BACKLIGHT,
     HOME_SWITCH_TO_SPRINGBOARD,
 };
 
@@ -183,35 +179,12 @@ void sd_guard_unlock()
  * *******************************************************************************/
 void btn_task(void *param)
 {
-    Serial.println("[BUTTON] task started");
-    Serial.println("[BUTTON] source=GPIO48+PCA9535");
-    Serial.printf("[BUTTON] polarity gpio48_active_low=%d pca_active_high=%d\n",
-                  BOARD_IO48_BTN_ACTIVE_LOW, BOARD_PCA_BUTTON_ACTIVE_HIGH);
-#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
-    int last_gpio_raw = digitalRead(BOARD_IO48_BTN);
-#else
-    int last_gpio_raw = -1;
-#endif
-#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
-    int last_pca_raw = -1;
-    Serial.println("[BUTTON] initial button_read=skipped (GPIO48 primary)");
-#else
-    int last_pca_raw = button_read() ? 1 : 0;
-    Serial.printf("[BUTTON] initial button_read=%d\n", last_pca_raw);
-#endif
     bool boot_btn_pressed = false;
-    bool toggle_armed = false;
-    enum ButtonSource { BUTTON_SRC_NONE, BUTTON_SRC_GPIO48, BUTTON_SRC_PCA9535 };
-    ButtonSource pressed_source = BUTTON_SRC_NONE;
-    bool stable_pressed = false;
-    bool candidate_pressed = false;
-    uint32_t candidate_since_ms = millis();
-    uint32_t task_start_ms = millis();
-    uint32_t last_raw_log_ms = 0;
+    // Seed with the current level to avoid a false release edge right after boot.
+    bool ioext_btn_pressed = button_read();
 
     while(1)
     {
-        uint32_t now_ms = millis();
         if (digitalRead(BOARD_BOOT_BTN) == LOW)
         {
             if (!boot_btn_pressed) {
@@ -223,82 +196,18 @@ void btn_task(void *param)
             boot_btn_pressed = false;
         }
 
-        bool gpio_pressed = false;
-        bool pca_pressed = false;
-        int gpio_raw = -1;
-        int pca_raw = -1;
-#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
-        gpio_raw = digitalRead(BOARD_IO48_BTN);
-        gpio_pressed = BOARD_IO48_BTN_ACTIVE_LOW ? (gpio_raw == LOW) : (gpio_raw == HIGH);
-#else
-        pca_raw = button_read() ? 1 : 0;
-        pca_pressed = BOARD_PCA_BUTTON_ACTIVE_HIGH ? (pca_raw == HIGH) : (pca_raw == LOW);
-#endif
-
-        bool raw_edge = (gpio_raw != last_gpio_raw) || (pca_raw != last_pca_raw);
-        if ((now_ms - task_start_ms) < 10000U || raw_edge) {
-            if (raw_edge || (now_ms - last_raw_log_ms) > 1000U) {
-                Serial.printf("[BUTTON RAW] gpio48=%d pca_button=%d\n", gpio_raw, pca_raw);
-                last_raw_log_ms = now_ms;
+        // Read the IO expander key level every cycle and toggle on release edge.
+        // Relying solely on INT can miss transitions once the line returns high.
+        if(button_read()) {
+            ioext_btn_pressed = true;
+        }
+        else {
+            if(ioext_btn_pressed) {
+                ui_post_event(UiEvent::TOGGLE_BACKLIGHT);
             }
+            ioext_btn_pressed = false;
         }
-        last_gpio_raw = gpio_raw;
-        last_pca_raw = pca_raw;
-
-        bool any_pressed = false;
-        ButtonSource active_source = BUTTON_SRC_NONE;
-#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
-        any_pressed = gpio_pressed;
-        if (gpio_pressed) {
-            active_source = BUTTON_SRC_GPIO48;
-        }
-#else
-        any_pressed = pca_pressed;
-        if (pca_pressed) {
-            active_source = BUTTON_SRC_PCA9535;
-        }
-#endif
-
-        if (any_pressed != candidate_pressed) {
-            candidate_pressed = any_pressed;
-            candidate_since_ms = now_ms;
-        }
-
-        if ((now_ms - candidate_since_ms) >= 100U && stable_pressed != candidate_pressed) {
-            stable_pressed = candidate_pressed;
-            if (stable_pressed) {
-                pressed_source = active_source;
-                if (!toggle_armed) {
-                    toggle_armed = true;
-                    Serial.printf("[BUTTON] diagnostic armed source=%s gpio48=%d pca=%d\n",
-                                  (pressed_source == BUTTON_SRC_GPIO48) ? "GPIO48" :
-                                  (pressed_source == BUTTON_SRC_PCA9535) ? "PCA9535" : "NONE",
-                                  gpio_raw, pca_raw);
-                }
-            } else if (toggle_armed) {
-                int bl = 0;
-                ui_setting_get_backlight(&bl);
-                int new_bl = (bl == 0) ? 1 : 0;
-                ui_setting_set_backlight(new_bl);
-                Serial.printf("[BUTTON] release source=%s old=%d new=%d gpio48=%d pca=%d\n",
-                              (pressed_source == BUTTON_SRC_GPIO48) ? "GPIO48" :
-                              (pressed_source == BUTTON_SRC_PCA9535) ? "PCA9535" : "NONE",
-                              bl, new_bl, gpio_raw, pca_raw);
-            }
-            pressed_source = BUTTON_SRC_NONE;
-        }
-
-        if (Serial.available() > 0) {
-            int ch = Serial.read();
-            if (ch == 'b' || ch == 'B') {
-                int bl = 0;
-                ui_setting_get_backlight(&bl);
-                int new_bl = (bl == 0) ? 1 : 0;
-                ui_setting_set_backlight(new_bl);
-                Serial.printf("[BUTTON TEST] serial backlight toggle old=%d new=%d\n", bl, new_bl);
-            }
-        }
-        delay(20);
+        delay(80);
     }
 }
 
@@ -456,169 +365,6 @@ static inline void epd_image_set_pixel_4bpp(uint8_t *buf, int32_t width, int32_t
     } else {
         *dst = (uint8_t)((*dst & 0xF0) | gray4);
     }
-}
-
-struct SleepPngDecodeCtx {
-    uint8_t *dst4bpp;
-    int dst_w;
-    int dst_h;
-    float scale;
-    int offset_x;
-    int offset_y;
-};
-
-static PNG s_sleep_png_decoder;
-static uint16_t *s_sleep_png_line_buf = NULL;
-static SleepPngDecodeCtx s_sleep_decode_ctx = {};
-
-static int sleep_png_draw_cb(PNGDRAW *pDraw)
-{
-    if (!pDraw || !s_sleep_decode_ctx.dst4bpp || !s_sleep_png_line_buf) {
-        return 0;
-    }
-
-    s_sleep_png_decoder.getLineAsRGB565(pDraw, s_sleep_png_line_buf, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
-    const int src_y = pDraw->y;
-    int dst_y0 = s_sleep_decode_ctx.offset_y + (int)floorf(src_y * s_sleep_decode_ctx.scale);
-    int dst_y1 = s_sleep_decode_ctx.offset_y + (int)floorf((src_y + 1) * s_sleep_decode_ctx.scale);
-    if (dst_y1 <= dst_y0) dst_y1 = dst_y0 + 1;
-
-    for (int src_x = 0; src_x < pDraw->iWidth; ++src_x) {
-        const uint16_t c = s_sleep_png_line_buf[src_x];
-        const int r = ((c >> 11) & 0x1F) * 255 / 31;
-        const int g = ((c >> 5) & 0x3F) * 255 / 63;
-        const int b = (c & 0x1F) * 255 / 31;
-        const uint8_t gray4 = (uint8_t)(((299 * r + 587 * g + 114 * b) / 1000) >> 4);
-
-        int dst_x0 = s_sleep_decode_ctx.offset_x + (int)floorf(src_x * s_sleep_decode_ctx.scale);
-        int dst_x1 = s_sleep_decode_ctx.offset_x + (int)floorf((src_x + 1) * s_sleep_decode_ctx.scale);
-        if (dst_x1 <= dst_x0) dst_x1 = dst_x0 + 1;
-
-        for (int yy = dst_y0; yy < dst_y1; ++yy) {
-            if (yy < 0 || yy >= s_sleep_decode_ctx.dst_h) continue;
-            for (int xx = dst_x0; xx < dst_x1; ++xx) {
-                if (xx < 0 || xx >= s_sleep_decode_ctx.dst_w) continue;
-                epd_image_set_pixel_4bpp(s_sleep_decode_ctx.dst4bpp, s_sleep_decode_ctx.dst_w, xx, yy, gray4);
-            }
-        }
-    }
-
-    return 1;
-}
-
-bool disp_show_sleep_png_from_sd(const char *preferred_path)
-{
-    const char *path = (preferred_path && preferred_path[0]) ? preferred_path : "/sleep.png";
-    if (!decodebuffer || !displaybuffer || !framebuffer_mutex) {
-        Serial.println("[SLEEP PNG] unavailable framebuffer/mutex");
-        return false;
-    }
-    if (!peri_buf[E_PERI_SD_CARD]) {
-        Serial.printf("[SLEEP PNG] sd unavailable path=%s\n", path);
-        return false;
-    }
-    if (!sd_guard_lock(3000)) {
-        Serial.println("[SLEEP PNG] sd lock timeout");
-        return false;
-    }
-
-    bool ok = false;
-    uint8_t *png_raw = NULL;
-    size_t png_raw_size = 0;
-    int rc = PNG_FAIL;
-    int src_w = 0;
-    int src_h = 0;
-    const int dst_w = epd_rotated_display_width();
-    const int dst_h = epd_rotated_display_height();
-    float scale = 1.0f;
-    int scaled_w = 0;
-    int scaled_h = 0;
-
-    File f = SD.open(path, FILE_READ);
-    if (!f || f.isDirectory()) {
-        Serial.printf("[SLEEP PNG] open failed path=%s\n", path);
-        goto out;
-    }
-    png_raw_size = (size_t)f.size();
-    if (png_raw_size < 8 || png_raw_size > (8 * 1024 * 1024)) {
-        Serial.printf("[SLEEP PNG] invalid file size=%u\n", (unsigned)png_raw_size);
-        f.close();
-        goto out;
-    }
-    png_raw = (uint8_t *)ps_malloc(png_raw_size);
-    if (!png_raw) {
-        Serial.println("[SLEEP PNG] raw alloc failed");
-        f.close();
-        goto out;
-    }
-    if (f.read(png_raw, png_raw_size) != png_raw_size) {
-        Serial.println("[SLEEP PNG] short read");
-        f.close();
-        goto out;
-    }
-    f.close();
-
-    if (!s_sleep_png_line_buf) s_sleep_png_line_buf = (uint16_t *)ps_malloc(4096 * sizeof(uint16_t));
-    if (!s_sleep_png_line_buf) {
-        Serial.println("[SLEEP PNG] line alloc failed");
-        goto out;
-    }
-
-    auto open_cb = [](PNGDRAW *pDraw) -> int { (void)pDraw; return 1; };
-    rc = s_sleep_png_decoder.openRAM(png_raw, (int)png_raw_size, open_cb);
-    if (rc != PNG_SUCCESS) {
-        Serial.printf("[SLEEP PNG] openRAM failed rc=%d\n", rc);
-        goto out;
-    }
-    src_w = s_sleep_png_decoder.getWidth();
-    src_h = s_sleep_png_decoder.getHeight();
-    s_sleep_png_decoder.close();
-    if (src_w <= 0 || src_h <= 0 || src_w > 4096 || src_h > 4096) {
-        Serial.printf("[SLEEP PNG] invalid dimensions %dx%d\n", src_w, src_h);
-        goto out;
-    }
-
-    scale = (float)dst_w / (float)src_w;
-    scaled_w = dst_w;
-    scaled_h = (int)((float)src_h * scale);
-    if (scaled_h > dst_h) {
-        scale = (float)dst_h / (float)src_h;
-        scaled_h = dst_h;
-        scaled_w = (int)((float)src_w * scale);
-    }
-    if (scaled_w < 1) scaled_w = 1;
-    if (scaled_h < 1) scaled_h = 1;
-
-    if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
-        Serial.println("[SLEEP PNG] framebuffer lock timeout");
-        goto out;
-    }
-    memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
-    s_sleep_decode_ctx.dst4bpp = decodebuffer;
-    s_sleep_decode_ctx.dst_w = dst_w;
-    s_sleep_decode_ctx.dst_h = dst_h;
-    s_sleep_decode_ctx.scale = scale;
-    s_sleep_decode_ctx.offset_x = (dst_w - scaled_w) / 2;
-    s_sleep_decode_ctx.offset_y = (dst_h - scaled_h) / 2;
-    rc = s_sleep_png_decoder.openRAM(png_raw, (int)png_raw_size, sleep_png_draw_cb);
-    if (rc == PNG_SUCCESS) rc = s_sleep_png_decoder.decode(NULL, 0);
-    s_sleep_png_decoder.close();
-    if (rc != PNG_SUCCESS) {
-        xSemaphoreGive(framebuffer_mutex);
-        Serial.printf("[SLEEP PNG] decode failed rc=%d\n", rc);
-        goto out;
-    }
-    memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
-    xSemaphoreGive(framebuffer_mutex);
-
-    display_commit_frame(DISPLAY_UPDATE_SCREEN_REPLACE, displaybuffer);
-    ok = true;
-    Serial.printf("[SLEEP PNG] rendered path=%s\n", path);
-
-out:
-    if (png_raw) free(png_raw);
-    sd_guard_unlock();
-    return ok;
 }
 
 static bool display_cmd_is_reliable(DisplayUpdateKind kind)
@@ -995,22 +741,11 @@ bool touch_reject_stale_home_event(void)
 static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
 {
     static int16_t x=0, y=0;
-    static uint32_t low_mem_log_ms = 0;
 
     (void)drv;
 
     uint32_t now = millis();
-    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    bool i2c_ready = (free_internal >= 12 * 1024) && (largest_internal >= 1024);
-    if (!i2c_ready && (now - low_mem_log_ms) > 1000U) {
-        Serial.printf("[TOUCH] skip I2C poll low heap free_internal=%u largest_internal=%u\n",
-                      (unsigned)free_internal,
-                      (unsigned)largest_internal);
-        low_mem_log_ms = now;
-    }
-
-    bool raw_pressed = indev_touch_enabled && i2c_ready && touch.isPressed();
+    bool raw_pressed = indev_touch_enabled && touch.isPressed();
 
     if (home_waiting_for_redraw_commit) {
         data->state = LV_INDEV_STATE_RELEASED;
@@ -1273,15 +1008,7 @@ static void disp_init_status(const char *name, int *x, int *y, bool init_st)
 
 static bool screen_init(void)
 {
-    Serial.printf("[EPD INIT] pre epd_init free_internal=%u largest_internal=%u free_psram=%u\n",
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    epd_init(&DEMO_BOARD, &ED047TC1, CONFIG_EPD_LUT_MODE);
-    Serial.printf("[EPD INIT] epd_init complete free_internal=%u largest_internal=%u free_psram=%u\n",
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_64K);
     // Set VCOM for boards that allow to set this in software (in mV).
     // This will print an error if unsupported. In this case,
     // set VCOM using the hardware potentiometer and delete this line.
@@ -1430,14 +1157,6 @@ static bool display_have_vbus_provisional(void)
 #define CONFIG_EPD_HARD_CLEAN_MIN_VBAT 0.0f
 #endif
 
-
-static bool display_i2c_heap_ready()
-{
-    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    return (free_internal >= 12 * 1024) && (largest_internal >= 1024);
-}
-
 static bool display_safe_for_hard_clean_boot(void)
 {
     if (peri_buf[E_PERI_BQ25896]) {
@@ -1449,9 +1168,6 @@ static bool display_safe_for_hard_clean_boot(void)
 static bool display_safe_for_hard_clean(void)
 {
     if (!peri_buf[E_PERI_BQ25896]) return false;
-    if (!display_i2c_heap_ready()) {
-        return false;
-    }
     if (display_have_vbus()) return true;
     return battery_25896_get_VBAT() >= CONFIG_EPD_HARD_CLEAN_MIN_VBAT;
 }
@@ -1506,8 +1222,6 @@ void idf_setup()
     Serial.printf("[BOOT] reset_reason=%d wakeup_cause=%d\n",
                   rr,
                   esp_sleep_get_wakeup_cause());
-    Serial.printf("[BOOT BUILD] version=%s source=H752-01 button_fix=io48_diag_v2 built=%s %s\n",
-                  UI_T5_EPARPER_S3_PRO_VERSION, __DATE__, __TIME__);
     SerialGPS.begin(38400, SERIAL_8N1, BOARD_GPS_RXD, BOARD_GPS_TXD);
     // // while (!Serial);
 
@@ -1521,44 +1235,31 @@ void idf_setup()
     // Init system
     ui_nvs_set_defaulat_param();
 
-#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
-    pinMode(BOARD_IO48_BTN, INPUT_PULLUP);
-#endif
-
     WiFi.persistent(false);
     WiFi.disconnect(true, true);
     WiFi.mode(WIFI_OFF);
     delay(100);
 
-    Serial.println("[BOOT PHASE] before PMIC");
     peri_buf[E_PERI_BQ27220]    = bq27220_init();   // PMU --- 0x55
     peri_buf[E_PERI_BQ25896]    = bq25896_init();   // PMU --- 0x6B
     Serial.printf("[BOOT] bq25896 init before screen_init: %d\n", peri_buf[E_PERI_BQ25896]);
 
-    Serial.println("[BOOT PHASE] before screen_init");
+    Serial.println("[BOOT] before screen_init()");
     screen_init();
-    Serial.println("[BOOT PHASE] after screen_init");
     io_extend_lora_gps_power_on(true);
 
-    BaseType_t btn_rc = xTaskCreate(btn_task, "btn_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
-    Serial.printf("[BUTTON TASK] deferred create after epd_init rc=%ld handle=%p free_internal=%u largest_internal=%u\n",
-                  (long)btn_rc,
-                  (void*)btn_handle,
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-    if (btn_rc != pdPASS) {
-        Serial.printf("[BUTTON TASK ERROR] create failed after epd_init rc=%ld free_internal=%u largest_internal=%u\n",
-                      (long)btn_rc,
-                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-    }
-
-
+    int cursor_x = 100;
+    int cursor_y = epd_rotated_display_height() / 2 - 100 - 50;
     uint8_t io_val0 = pca9555_read_input(BOARD_I2C_PORT, 0);
     uint8_t io_val1 = pca9555_read_input(BOARD_I2C_PORT, 1);
-    bool io_ret = ((io_val0 & 0x01) && (io_val1 & 0x04));
-    Serial.printf("[BOOT STATUS] io_extend=%s io0=0x%02x io1=0x%02x\n", io_ret ? "PASS" : "FAIL", io_val0, io_val1);
-    Serial.printf("[BOOT STATUS] BQ27220=%s\n", peri_buf[E_PERI_BQ27220] ? "PASS" : "FAIL");
+    bool io_ret = false;
+    lv_snprintf(global_buf, GLOBAL_BUF_LEN, "io_extend: 0x%02x, 0x%02x", io_val0, io_val1);
+    if(((io_val0 & 0x01) && (io_val1 & 0x04))) io_ret = true;
+    disp_init_status(global_buf, &cursor_x, &cursor_y, io_ret);
+
+    cursor_x = 100;
+    cursor_y = epd_rotated_display_height() / 2 - 100 - 0;
+    disp_init_status("BQ27220 Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_BQ27220]);
 
     peri_buf[E_PERI_INK_POWER]  = false; 
 
@@ -1570,39 +1271,32 @@ void idf_setup()
                       battery_25896_get_VBAT(),
                       battery_25896_is_chr());
     }
-    Serial.printf("[BOOT STATUS] BQ25896=%s\n", peri_buf[E_PERI_BQ25896] ? "PASS" : "FAIL");
+    cursor_x = 100;
+    cursor_y = epd_rotated_display_height() / 2 - 100 + 50;
+    disp_init_status("BQ25896 Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_BQ25896]);
 
     peri_buf[E_PERI_RTC]        = rtc_pcf8563_init(); // RTC --- 0x51
-    Serial.printf("[BOOT STATUS] RTC=%s\n", peri_buf[E_PERI_RTC] ? "PASS" : "FAIL");
+    cursor_x = 100;
+    cursor_y = epd_rotated_display_height() / 2 - 100 + 100;
+    disp_init_status("RTC (PCF8563) Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_RTC]);
 
     ui_event_q = xQueueCreate(16, sizeof(UiEvent));
-    Serial.println("[BOOT PHASE] before Touch");
     peri_buf[E_PERI_TOUCH]      = touch_gt911_init();  // Touch --- 0x5D;
-    Serial.printf("[BOOT STATUS] Touch=%s\n", peri_buf[E_PERI_TOUCH] ? "PASS" : "FAIL");
+    cursor_x = 100;
+    cursor_y = epd_rotated_display_height() / 2 - 100 + 150;
+    disp_init_status("Touch (GT911) Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_TOUCH]);
 
-    Serial.println("[BOOT PHASE] before LoRa");
     peri_buf[E_PERI_LORA]       = lora_sx1262_init();
-    Serial.printf("[BOOT STATUS] LoRa=%s\n", peri_buf[E_PERI_LORA] ? "PASS" : "FAIL");
+    cursor_x = 100;
+    cursor_y = epd_rotated_display_height() / 2 - 100 + 200;
+    disp_init_status("LoRa (SX1262) Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_LORA]);
 
     peri_buf[E_PERI_SD_CARD]    = sd_card_init();
     sd_guard_init();
-    Serial.printf("[BOOT STATUS] SD=%s\n", peri_buf[E_PERI_SD_CARD] ? "PASS" : "FAIL");
+    cursor_x = 100;
+    cursor_y = epd_rotated_display_height() / 2 - 100 + 250;
+    disp_init_status("SD Card Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_SD_CARD]);
 
-    size_t gps_pre_free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    size_t gps_pre_largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    size_t gps_pre_free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    Serial.println("[BOOT PHASE] before GPS");
-    Serial.printf("[GPS INIT] pre free_internal=%u largest_internal=%u free_psram=%u\n",
-                  (unsigned)gps_pre_free_internal, (unsigned)gps_pre_largest_internal, (unsigned)gps_pre_free_psram);
-    peri_buf[E_PERI_GPS]        = gps_init();
-    Serial.printf("[BOOT STATUS] GPS=%s\n", peri_buf[E_PERI_GPS] ? "PASS" : "FAIL");
-    Serial.printf("[GPS INIT] result=%d free_internal=%u largest_internal=%u\n",
-                  peri_buf[E_PERI_GPS] ? 1 : 0,
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-    Serial.printf("[BOOT PHASE] after GPS result=%d\n", peri_buf[E_PERI_GPS] ? 1 : 0);
-
-    Serial.println("[BOOT PHASE] before LVGL");
     printf("LVGL Init\n");
     lv_port_disp_init();
     Serial.println("[BOOT] after lv_port_disp_init()");
@@ -1613,6 +1307,13 @@ void idf_setup()
     Serial.printf("[EPD SAFE] screen root bg=0x%06X\n", EPD_COLOR_BG);
     Serial.println("[BOOT] after ui_entry()");
 
+    peri_buf[E_PERI_GPS]        = gps_init();
+    cursor_x = 100;
+    cursor_y = epd_rotated_display_height() / 2 - 100 +300;
+    disp_init_status("GPS Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_GPS]);
+
+    // task
+    xTaskCreate(btn_task, "lora_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
 }
 
 bool ui_is_ui_thread()
@@ -1632,6 +1333,12 @@ void idf_loop()
                 ui_sleep();
                 skip_lv_task_handler = true;
                 break;
+            case UiEvent::TOGGLE_BACKLIGHT: {
+                int bl = 0;
+                ui_setting_get_backlight(&bl);
+                ui_setting_set_backlight(bl == 0 ? 1 : 0);
+                break;
+            }
             case UiEvent::HOME_SWITCH_TO_SPRINGBOARD: {
                 if (home_nav_in_progress) {
                     break;
@@ -1692,7 +1399,6 @@ void idf_loop()
         Serial.println("[UI EVENT] skipped lv_task_handler after queued UI transition");
     }
 
-    gps_service_loop();
     ui_wifi_service_loop();
     delay(1);
 }
@@ -1767,10 +1473,6 @@ static void display_log_power(const char *phase, DisplayUpdateKind kind)
         Serial.printf("[EPD POWER] %s kind=%d bq25896_unavailable\n", phase, (int)kind);
         return;
     }
-    if (!display_i2c_heap_ready()) {
-        Serial.printf("[EPD POWER] %s kind=%d skip_i2c_low_heap\n", phase, (int)kind);
-        return;
-    }
 
     Serial.printf("[EPD POWER] %s kind=%d usb=%d vbus=%.3f vsys=%.3f vbat=%.3f charging=%d\n",
                   phase,
@@ -1787,14 +1489,9 @@ static bool display_safe_for_recovery_clean()
     if (!peri_buf[E_PERI_BQ25896]) return true;
 
     if (!display_safe_for_hard_clean()) {
-        if (!display_i2c_heap_ready()) {
-            Serial.printf("[EPD POWER] hard clean unsafe: low internal heap threshold=%.3f\n",
-                          (float)CONFIG_EPD_HARD_CLEAN_MIN_VBAT);
-        } else {
-            Serial.printf("[EPD POWER] hard clean unsafe: vbat=%.3f threshold=%.3f\n",
-                          battery_25896_get_VBAT(),
-                          (float)CONFIG_EPD_HARD_CLEAN_MIN_VBAT);
-        }
+        Serial.printf("[EPD POWER] hard clean unsafe: vbat=%.3f threshold=%.3f\n",
+                      battery_25896_get_VBAT(),
+                      (float)CONFIG_EPD_HARD_CLEAN_MIN_VBAT);
         return false;
     }
 
