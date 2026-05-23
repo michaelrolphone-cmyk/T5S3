@@ -4014,6 +4014,12 @@ static bool maps_render_from_cache = false;
 static char maps_render_path[128] = {0};
 static PNG maps_png_decoder;
 static const int MAPS_TILE_SIZE = 256;
+static const int MAPS_GRID_COLS = 2;
+static const int MAPS_GRID_ROWS = 3;
+static const int MAPS_CANVAS_W = MAPS_TILE_SIZE * MAPS_GRID_COLS;
+static const int MAPS_CANVAS_H = MAPS_TILE_SIZE * MAPS_GRID_ROWS;
+static int maps_decode_dest_x = 0;
+static int maps_decode_dest_y = 0;
 
 static bool maps_coord_valid(double lat, double lon)
 {
@@ -4121,8 +4127,10 @@ static bool maps_decode_png_to_canvas(const char *path, String &decode_result)
             int gray = (299 * r + 587 * g + 114 * b) / 1000;
             bool black = gray < 180;
             if (black) maps_nonwhite_pixels++;
-            if (pDraw->y >= 0 && pDraw->y < MAPS_TILE_SIZE) {
-                maps_canvas_buf[pDraw->y * MAPS_TILE_SIZE + x] = black ? lv_color_black() : lv_color_white();
+            int dst_x = maps_decode_dest_x + x;
+            int dst_y = maps_decode_dest_y + pDraw->y;
+            if (dst_x >= 0 && dst_x < MAPS_CANVAS_W && dst_y >= 0 && dst_y < MAPS_CANVAS_H) {
+                maps_canvas_buf[dst_y * MAPS_CANVAS_W + dst_x] = black ? lv_color_black() : lv_color_white();
             }
         }
         return 1;
@@ -4134,77 +4142,107 @@ static bool maps_decode_png_to_canvas(const char *path, String &decode_result)
     rc = maps_png_decoder.decode(NULL, 0);
     maps_png_decoder.close();
     if (rc != PNG_SUCCESS) { decode_result = "decode_failed"; return false; }
-    lv_canvas_set_buffer(maps_canvas, maps_canvas_buf, MAPS_TILE_SIZE, MAPS_TILE_SIZE, LV_IMG_CF_TRUE_COLOR);
-    lv_obj_invalidate(maps_canvas);
     decode_result = "ok";
     Serial.printf("[MAP] nonwhite_pixels=%d\n", maps_nonwhite_pixels);
     return true;
 }
 
-static void maps_write_debug(double lat, double lon, const char *source, const char *decode_result)
+static void maps_write_debug(const String &dbg_text)
 {
-    File latest = SD.open("/cache/maps/latest.png", FILE_WRITE);
-    if (latest) {
-        File src = SD.open(maps_render_path, FILE_READ);
-        if (src) { uint8_t b[512]; while (src.available()) { size_t n=src.read(b,sizeof(b)); if(n) latest.write(b,n); else break; } src.close(); }
-        latest.close();
-    }
     File dbg = SD.open("/cache/maps/latest_debug.txt", FILE_WRITE);
     if (dbg) {
-        dbg.printf("lat=%.6f\nlon=%.6f\nzoom=%d\ntile_x=%d\ntile_y=%d\npixel_x=%d\npixel_y=%d\nsource=%s\nfile_size=%u\npng_magic_ok=%d\ndecode_result=%s\n",
-                   lat, lon, maps_render_zoom, maps_render_x, maps_render_y, maps_render_px, maps_render_py, source,
-                   (unsigned)maps_render_file_size, maps_render_png_magic_ok ? 1 : 0, decode_result);
+        dbg.print(dbg_text);
         dbg.close();
     }
 }
 
 static bool maps_try_render(double lat,double lon)
 {
-    const int zooms[] = {18,17,16};
-    for (size_t zi = 0; zi < ARRAY_LEN(zooms); ++zi) {
-        int z = zooms[zi];
-        int x,y,px,py; maps_tile_for(lat,lon,z,&x,&y,&px,&py);
-        char tile[96]; lv_snprintf(tile,sizeof(tile),"/cache/maps/%d/%d/%d.png",z,x,y);
-        bool has_sd = peri_buf[E_PERI_SD_CARD];
-        bool cache_hit = has_sd && SD.exists(tile);
-        if(!cache_hit){
-            if (WiFi.status()!=WL_CONNECTED){
-                wifi_load_saved_settings();
-                if(wifi_sta_ssid.length()==0){ maps_set_status("No saved WiFi credentials. Open WiFi Settings first."); return false; }
-                if(!maps_waiting_wifi){ maps_wifi_start_ms=millis(); maps_waiting_wifi=true; maps_set_status("Connecting WiFi..."); wifi_connect_saved_sta("maps tile download"); }
-                return false;
+    const int z = 18;
+    int base_x, base_y, px, py;
+    maps_tile_for(lat, lon, z, &base_x, &base_y, &px, &py);
+    int left_x = (px < MAPS_TILE_SIZE / 2) ? base_x - 1 : base_x;
+    int top_y = base_y - 1;
+    int n = 1 << z;
+    bool has_sd = peri_buf[E_PERI_SD_CARD];
+    bool any_decoded = false;
+    bool any_failed = false;
+    maps_set_status("Loading map...");
+    lv_canvas_fill_bg(maps_canvas, lv_color_white(), LV_OPA_COVER);
+    String dbg;
+    dbg.reserve(2048);
+    dbg += "lat=" + String(lat, 6) + "\nlon=" + String(lon, 6) + "\n";
+    dbg += "zoom=" + String(z) + "\n";
+    dbg += "base_tile_x=" + String(base_x) + "\nbase_tile_y=" + String(base_y) + "\n";
+    dbg += "base_pixel_x=" + String(px) + "\nbase_pixel_y=" + String(py) + "\n";
+    dbg += "left_x=" + String(left_x) + "\ntop_y=" + String(top_y) + "\n";
+    for (int row = 0; row < MAPS_GRID_ROWS; ++row) {
+        for (int col = 0; col < MAPS_GRID_COLS; ++col) {
+            int tile_x_raw = left_x + col;
+            int tile_y = top_y + row;
+            int tile_x = (tile_x_raw % n + n) % n;
+            maps_decode_dest_x = col * MAPS_TILE_SIZE;
+            maps_decode_dest_y = row * MAPS_TILE_SIZE;
+            if (tile_y < 0 || tile_y >= n) {
+                Serial.printf("[MAP] grid tile row=%d col=%d z=%d x=%d y=%d source=clamped decode=skip\n", row, col, z, tile_x, tile_y);
+                dbg += "tile[" + String(row) + "," + String(col) + "] path=(clamped y) source=none decode=skip\n";
+                continue;
             }
-            if(!has_sd){ maps_set_status("SD unavailable: tile not cached."); return false; }
-            maps_cache_dirs(z,x);
-            if(!maps_download_tile(tile,z,x,y)){ maps_set_status("map tile unavailable offline"); continue; }
+            char tile[96];
+            lv_snprintf(tile, sizeof(tile), "/cache/maps/%d/%d/%d.png", z, tile_x, tile_y);
+            bool cache_hit = has_sd && SD.exists(tile);
+            const char *source = cache_hit ? "cache" : "download";
+            if (!cache_hit) {
+                if (WiFi.status() != WL_CONNECTED) {
+                    wifi_load_saved_settings();
+                    if (wifi_sta_ssid.length() == 0) { maps_set_status("Map unavailable"); return false; }
+                    if (!maps_waiting_wifi) { maps_wifi_start_ms = millis(); maps_waiting_wifi = true; maps_set_status("Connecting WiFi..."); wifi_connect_saved_sta("maps tile download"); }
+                    return false;
+                }
+                if (!has_sd) { maps_set_status("SD unavailable"); return false; }
+                maps_cache_dirs(z, tile_x);
+                if (!maps_download_tile(tile, z, tile_x, tile_y)) {
+                    any_failed = true;
+                    Serial.printf("[MAP] grid tile row=%d col=%d z=%d x=%d y=%d source=download decode=download_failed\n", row, col, z, tile_x, tile_y);
+                    dbg += "tile[" + String(row) + "," + String(col) + "] path=" + String(tile) + " source=download decode=download_failed\n";
+                    continue;
+                }
+            }
+            size_t file_size = 0;
+            bool png_magic_ok = false;
+            if (!maps_check_png_file(tile, &file_size, &png_magic_ok) || file_size <= 100 || !png_magic_ok) {
+                any_failed = true;
+                Serial.printf("[MAP] grid tile row=%d col=%d z=%d x=%d y=%d source=%s decode=invalid_png\n", row, col, z, tile_x, tile_y, source);
+                dbg += "tile[" + String(row) + "," + String(col) + "] path=" + String(tile) + " source=" + String(source) + " decode=invalid_png\n";
+                continue;
+            }
+            String decode_result;
+            bool decoded = maps_decode_png_to_canvas(tile, decode_result);
+            Serial.printf("[MAP] grid tile row=%d col=%d z=%d x=%d y=%d source=%s decode=%s\n", row, col, z, tile_x, tile_y, source, decode_result.c_str());
+            dbg += "tile[" + String(row) + "," + String(col) + "] path=" + String(tile) + " source=" + String(source) + " decode=" + decode_result + "\n";
+            if (decoded) {
+                any_decoded = true;
+            } else {
+                any_failed = true;
+            }
         }
-        maps_render_zoom=z; maps_render_x=x; maps_render_y=y; maps_render_px=px; maps_render_py=py; maps_render_from_cache=cache_hit;
-        lv_snprintf(maps_render_path, sizeof(maps_render_path), "%s", tile);
-        if (!maps_check_png_file(tile, &maps_render_file_size, &maps_render_png_magic_ok) || maps_render_file_size <= 100 || !maps_render_png_magic_ok) continue;
-        String decode_result;
-        bool decoded = maps_decode_png_to_canvas(tile, decode_result);
-        maps_write_debug(lat, lon, cache_hit ? "cache" : "download", decode_result.c_str());
-        lv_obj_align(maps_canvas, LV_ALIGN_TOP_MID, 0, 130);
-        int sx = lv_obj_get_x(maps_canvas) + maps_render_px;
-        int sy = lv_obj_get_y(maps_canvas) + maps_render_py;
-        lv_obj_set_pos(maps_marker, sx - 16, sy - 16);
-        if (!decoded) {
-            maps_set_status("Tile downloaded but PNG decode/render failed.");
-        } else if (maps_nonwhite_pixels < 32) {
-            maps_set_status("Tile appears blank; trying lower zoom...");
-            continue;
-        } else {
-            maps_set_status(cache_hit ? "Tile loaded from SD cache" : "Tile downloaded");
-            lv_snprintf(md_text_buf, sizeof(md_text_buf), "lat=%.6f lon=%.6f\nzoom=%d tile=%d/%d/%d\npx/py=%d/%d\nsource=%s size=%u\npath=%s",
-                        lat, lon, z, z, x, y, px, py, cache_hit ? "cache" : "download", (unsigned)maps_render_file_size, tile);
-            lv_label_set_text(maps_info, md_text_buf);
-            return true;
-        }
-        lv_snprintf(md_text_buf, sizeof(md_text_buf), "Tile downloaded but PNG decode/render failed.\nlat=%.6f lon=%.6f\nz/x/y=%d/%d/%d px/py=%d/%d\nsource=%s size=%u\npath=%s",
-                    lat, lon, z, x, y, px, py, cache_hit ? "cache" : "download", (unsigned)maps_render_file_size, tile);
-        lv_label_set_text(maps_info, md_text_buf);
     }
-    return false;
+    int marker_canvas_x = (base_x - left_x) * MAPS_TILE_SIZE + px;
+    int marker_canvas_y = (base_y - top_y) * MAPS_TILE_SIZE + py;
+    int sx = lv_obj_get_x(maps_canvas) + marker_canvas_x;
+    int sy = lv_obj_get_y(maps_canvas) + marker_canvas_y;
+    lv_obj_set_pos(maps_marker, sx - 16, sy - 16);
+    lv_obj_move_foreground(maps_marker);
+    lv_obj_invalidate(maps_canvas);
+    dbg += "marker_canvas_x=" + String(marker_canvas_x) + "\nmarker_canvas_y=" + String(marker_canvas_y) + "\n";
+    maps_write_debug(dbg);
+    if (!any_decoded) {
+        maps_set_status(has_sd ? "Map unavailable" : "SD unavailable");
+        return false;
+    }
+    if (any_failed) maps_set_status("Tile decode failed");
+    else { lv_label_set_text(maps_status, ""); lv_obj_add_flag(maps_status, LV_OBJ_FLAG_HIDDEN); }
+    return true;
 }
 
 static void maps_timer_cb(lv_timer_t *t)
@@ -4212,8 +4250,7 @@ static void maps_timer_cb(lv_timer_t *t)
     (void)t;
     if(maps_waiting_wifi && WiFi.status()!=WL_CONNECTED){
         uint32_t e=millis()-maps_wifi_start_ms;
-        lv_snprintf(md_text_buf,sizeof(md_text_buf),"Connecting WiFi...\nSSID: %s\n%lus", wifi_sta_ssid.c_str(), (unsigned long)(e/1000));
-        maps_set_status(md_text_buf);
+        maps_set_status("Connecting WiFi...");
         if(e>MAPS_WIFI_TIMEOUT_MS){ maps_waiting_wifi=false; maps_set_status("WiFi timeout"); }
         return;
     }
@@ -4228,13 +4265,13 @@ static void create13(lv_obj_t *p){
     scr_back_btn_create(p, "Maps", maps_back);
     maps_status=lv_label_create(p); lv_obj_align(maps_status, LV_ALIGN_TOP_LEFT, 20, 80); lv_obj_set_width(maps_status, lv_pct(95));
     maps_canvas=lv_canvas_create(p);
-    lv_obj_set_size(maps_canvas, MAPS_TILE_SIZE, MAPS_TILE_SIZE);
+    lv_obj_set_size(maps_canvas, MAPS_CANVAS_W, MAPS_CANVAS_H);
     lv_obj_set_style_bg_color(maps_canvas, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(maps_canvas, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(maps_canvas, 2, 0);
+    lv_obj_set_style_border_width(maps_canvas, 0, 0);
     lv_obj_set_style_border_color(maps_canvas, lv_color_black(), 0);
-    lv_obj_align(maps_canvas, LV_ALIGN_TOP_MID, 0, 130);
-    if (!maps_canvas_buf) maps_canvas_buf = (lv_color_t *)ps_malloc(MAPS_TILE_SIZE * MAPS_TILE_SIZE * sizeof(lv_color_t));
+    lv_obj_align(maps_canvas, LV_ALIGN_TOP_MID, 0, 90);
+    if (!maps_canvas_buf) maps_canvas_buf = (lv_color_t *)ps_malloc(MAPS_CANVAS_W * MAPS_CANVAS_H * sizeof(lv_color_t));
     if (!maps_png_line_buf) maps_png_line_buf = (uint16_t *)ps_malloc(MAPS_TILE_SIZE * sizeof(uint16_t));
     if (!maps_canvas_buf || !maps_png_line_buf) {
         if (!maps_canvas_buf) Serial.println("[MAP] maps_canvas_buf allocation failed");
@@ -4242,19 +4279,11 @@ static void create13(lv_obj_t *p){
         maps_set_status("Map buffer allocation failed");
     }
     if (maps_canvas_buf) {
-        lv_canvas_set_buffer(maps_canvas, maps_canvas_buf, MAPS_TILE_SIZE, MAPS_TILE_SIZE, LV_IMG_CF_TRUE_COLOR);
+        lv_canvas_set_buffer(maps_canvas, maps_canvas_buf, MAPS_CANVAS_W, MAPS_CANVAS_H, LV_IMG_CF_TRUE_COLOR);
         lv_canvas_fill_bg(maps_canvas, lv_color_white(), LV_OPA_COVER);
-        lv_draw_line_dsc_t line; lv_draw_line_dsc_init(&line); line.color = lv_color_black(); line.width = 2;
-        lv_point_t d1[2] = {{0,0},{MAPS_TILE_SIZE-1,MAPS_TILE_SIZE-1}}; lv_point_t d2[2] = {{MAPS_TILE_SIZE-1,0},{0,MAPS_TILE_SIZE-1}};
-        lv_canvas_draw_line(maps_canvas, d1, 2, &line);
-        lv_canvas_draw_line(maps_canvas, d2, 2, &line);
-        lv_draw_rect_dsc_t rect; lv_draw_rect_dsc_init(&rect); rect.border_color=lv_color_black(); rect.border_width=2; rect.bg_opa=LV_OPA_TRANSP;
-        lv_canvas_draw_rect(maps_canvas, 0, 0, MAPS_TILE_SIZE, MAPS_TILE_SIZE, &rect);
-        lv_draw_label_dsc_t lab; lv_draw_label_dsc_init(&lab); lab.color=lv_color_black();
-        lv_canvas_draw_text(maps_canvas, 10, 8, MAPS_TILE_SIZE - 20, &lab, "MAP RENDER TEST");
     }
     maps_marker=lv_obj_create(p); lv_obj_set_size(maps_marker, 32, 32); lv_obj_set_style_radius(maps_marker, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_opa(maps_marker, LV_OPA_TRANSP, 0); lv_obj_set_style_border_width(maps_marker, 3, 0);
-    maps_info=lv_label_create(p); lv_obj_align(maps_info, LV_ALIGN_BOTTOM_LEFT, 20, -30); lv_obj_set_width(maps_info, lv_pct(95));
+    maps_info=lv_label_create(p); lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN);
 }
 static void entry13(void){ Serial.println("[MAP] entry"); ui_gps_task_resume(); maps_waiting_wifi=false; maps_set_status("Waiting for GPS fix..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 2500, NULL); lv_timer_ready(maps_timer);}
 static void exit13(void){ if(maps_timer){ lv_timer_del(maps_timer); maps_timer=NULL; } maps_waiting_wifi=false; }
