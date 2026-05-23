@@ -4888,8 +4888,54 @@ static void scr9_shutdown_timer_event(lv_timer_t *t)
     ui_sleep();
 }
 
+static lv_color_t *sleep_screen_png_buf = NULL;
+static lv_img_dsc_t sleep_screen_png_dsc = {
+    .header = {.always_zero = 0, .w = SPRINGBOARD_ICON_W, .h = SPRINGBOARD_ICON_H, .cf = LV_IMG_CF_TRUE_COLOR},
+    .data_size = SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t),
+    .data = NULL,
+};
+static bool sleep_screen_png_ready = false;
+
+static void sleep_screen_free_png(void)
+{
+    if (sleep_screen_png_buf) {
+        free(sleep_screen_png_buf);
+        sleep_screen_png_buf = NULL;
+    }
+    sleep_screen_png_dsc.data = NULL;
+    sleep_screen_png_ready = false;
+}
+
 static void create9(lv_obj_t *parent)
 {
+    lv_obj_t *img = lv_img_create(parent);
+    bool use_fallback = true;
+
+    if (springboard_icon_png_exists("/system/display/sleep.png")) {
+        if (!sleep_screen_png_buf) {
+            sleep_screen_png_buf = (lv_color_t *)ps_malloc(SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t));
+        }
+        if (sleep_screen_png_buf) {
+            char reason[64] = {0};
+            if (springboard_decode_png_to_buf("/system/display/sleep.png", sleep_screen_png_buf, reason, sizeof(reason))) {
+                sleep_screen_png_dsc.data = (const uint8_t *)sleep_screen_png_buf;
+                lv_img_set_src(img, &sleep_screen_png_dsc);
+                sleep_screen_png_ready = true;
+                use_fallback = false;
+            } else {
+                Serial.printf("[SLEEP] decode failed /system/display/sleep.png: %s; using fallback img_sleep\n", reason);
+            }
+        } else {
+            Serial.println("[SLEEP] allocation failed for /system/display/sleep.png; using fallback img_sleep");
+        }
+    } else {
+        Serial.println("[SLEEP] missing /system/display/sleep.png; using fallback img_sleep");
+    }
+
+    if (use_fallback) {
+        lv_img_set_src(img, &img_sleep);
+    }
+    lv_obj_center(img);
     scr_back_btn_create(parent, "Sleep", scr9_btn_event_cb);
 
     lv_timer_create(scr9_shutdown_timer_event, 3000, NULL);
@@ -4901,7 +4947,7 @@ static void entry9(void) {
 static void exit9(void) {
 }
 static void destroy9(void) { 
-
+    sleep_screen_free_png();
 }
 
 static scr_lifecycle_t screen9 = {
