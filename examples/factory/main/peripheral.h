@@ -41,5 +41,8 @@ void gps_get_data(uint16_t *year, uint8_t *month, uint8_t *day);
 void gps_get_time(uint8_t *hour, uint8_t *minute, uint8_t *second);
 void gps_get_satellites(uint32_t *vsat);
 void gps_get_speed(double *speed);
+bool gps_is_ready(void);
+bool gps_has_serial_data(void);
+bool gps_has_fix(void);
 
 #endif

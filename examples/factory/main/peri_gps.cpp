@@ -5,6 +5,7 @@
 #include <TinyGPS++.h>
 #include <time.h>
 #include <math.h>
+#include "esp_heap_caps.h"
 
 /* clang-format off */
 
@@ -38,10 +39,15 @@ static void gps_debug_log(const char *msg);
 static bool gps_snapshot_fix_valid(const gps_fix_snapshot_t *snapshot, uint32_t now_ms);
 static void gps_log_status(const gps_fix_snapshot_t *snapshot);
 static void gps_status_csv_append(const gps_fix_snapshot_t *snapshot);
+static void gps_log_parser_heartbeat(uint32_t now_ms);
 void gps_logger_task(void *param);
 
 TaskHandle_t gps_handle = NULL;
 static TaskHandle_t gps_logger_handle = NULL;
+static StaticTask_t gps_task_tcb;
+static StackType_t gps_task_stack[1024 * 6];
+static StaticTask_t gps_logger_task_tcb;
+static StackType_t gps_logger_task_stack[1024 * 4];
 static gps_fix_snapshot_t gps_latest_fix = {0};
 static portMUX_TYPE gps_fix_mux = portMUX_INITIALIZER_UNLOCKED;
 double gps_lat=0, gps_lng=0, gps_altitude=0, gps_speed=0;
@@ -50,6 +56,7 @@ uint8_t gps_month=0, gps_day=0;
 uint8_t gps_hour=0, gps_minute=0, gps_second=0;
 static uint32_t gps_vsat=0;
 static bool gps_ready = false;
+static bool gps_logger_ready = false;
 static int gps_last_sync_minute = -1;
 static uint32_t gps_last_csv_write_ms = 0;
 static const uint32_t GPS_CSV_PERIOD_MS = 10000;
@@ -96,6 +103,7 @@ bool gps_init(void)
 
 void gps_task(void *param)
 {
+    uint32_t last_heartbeat_ms = 0;
     while(1)
     {
         while (Serial.available()) {
@@ -135,9 +143,27 @@ void gps_task(void *param)
             }
         }
 
-        if (millis() > 30000 && gps.charsProcessed() < 10) {
+        uint32_t now = millis();
+        if (now > 30000 && gps.charsProcessed() < 10) {
             Serial.println(F("No GPS detected: check wiring."));
             delay(1000);
+        }
+        if (now - last_heartbeat_ms >= 10000) {
+            last_heartbeat_ms = now;
+            gps_log_parser_heartbeat(now);
+            UBaseType_t parser_hwm = uxTaskGetStackHighWaterMark(NULL);
+            Serial.printf("[GPS TASK] parser stack_hwm=%u\n", (unsigned)parser_hwm);
+        }
+        if (!gps_logger_ready) {
+            gps_fix_snapshot_t snapshot = {0};
+            portENTER_CRITICAL(&gps_fix_mux);
+            snapshot = gps_latest_fix;
+            portEXIT_CRITICAL(&gps_fix_mux);
+            if (gps_snapshot_fix_valid(&snapshot, now) && (now - gps_last_csv_write_ms >= GPS_CSV_PERIOD_MS)) {
+                if (gps_csv_append_snapshot_fix(&snapshot)) {
+                    gps_last_csv_write_ms = now;
+                }
+            }
         }
         delay(1);
     }
@@ -157,6 +183,8 @@ void gps_logger_task(void *param)
             last_status_csv_ms = now;
             gps_log_status(&snapshot);
             gps_status_csv_append(&snapshot);
+            UBaseType_t logger_hwm = uxTaskGetStackHighWaterMark(NULL);
+            Serial.printf("[GPS TASK] logger stack_hwm=%u\n", (unsigned)logger_hwm);
         }
         if (gps_snapshot_fix_valid(&snapshot, now) && (now - gps_last_csv_write_ms >= GPS_CSV_PERIOD_MS)) {
             if (gps_csv_append_snapshot_fix(&snapshot)) {
@@ -173,20 +201,54 @@ void gps_task_create(void)
         return;
     }
 
-    if (xTaskCreate(gps_task, "gps_task", 1024 * 6, NULL, GPS_PRIORITY, &gps_handle) != pdPASS) {
-        Serial.println("GPS task create failed!");
-        gps_handle = NULL;
+    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    Serial.printf("[GPS TASK] create parser pre free_internal=%u largest_internal=%u free_psram=%u\n",
+                  (unsigned)free_internal, (unsigned)largest_internal, (unsigned)free_psram);
+
+    gps_handle = xTaskCreateStatic(gps_task, "gps_task", sizeof(gps_task_stack) / sizeof(StackType_t), NULL,
+                                   GPS_PRIORITY, gps_task_stack, &gps_task_tcb);
+    BaseType_t parser_rc = (gps_handle != NULL) ? pdPASS : errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+    Serial.printf("[GPS TASK] parser create rc=%d handle=%p\n", (int)parser_rc, gps_handle);
+    if (gps_handle == NULL) {
+        Serial.println("[GPS TASK ERROR] parser task create failed");
         gps_ready = false;
         return;
     }
+
     UBaseType_t logger_priority = (GPS_PRIORITY > 0) ? (GPS_PRIORITY - 1) : GPS_PRIORITY;
-    if (xTaskCreate(gps_logger_task, "gps_logger_task", 1024 * 8, NULL, logger_priority, &gps_logger_handle) != pdPASS) {
-        Serial.println("GPS logger task create failed!");
-        gps_logger_handle = NULL;
+    free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    Serial.printf("[GPS TASK] create logger pre free_internal=%u largest_internal=%u free_psram=%u\n",
+                  (unsigned)free_internal, (unsigned)largest_internal, (unsigned)free_psram);
+    gps_logger_handle = xTaskCreateStatic(gps_logger_task, "gps_logger_task",
+                                          sizeof(gps_logger_task_stack) / sizeof(StackType_t), NULL,
+                                          logger_priority, gps_logger_task_stack, &gps_logger_task_tcb);
+    BaseType_t logger_rc = (gps_logger_handle != NULL) ? pdPASS : errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+    Serial.printf("[GPS TASK] logger create rc=%d handle=%p\n", (int)logger_rc, gps_logger_handle);
+    gps_logger_ready = (gps_logger_handle != NULL);
+    if (!gps_logger_ready) {
+        Serial.println("[GPS TASK WARN] logger task create failed; parser remains active");
     }
 
     gps_ready = true;
-    gps_debug_log("[GPS CSV] task running; logger active");
+    gps_debug_log(gps_logger_ready ? "[GPS CSV] task running; logger active" : "[GPS CSV] logger unavailable; parser-only CSV mode active");
+}
+
+
+static void gps_log_parser_heartbeat(uint32_t now_ms)
+{
+    (void)now_ms;
+    uint32_t chars = gps.charsProcessed();
+    bool valid = gps.location.isValid();
+    uint32_t age = gps.location.age();
+    uint32_t sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
+    double lat = gps.location.isValid() ? gps.location.lat() : gps_lat;
+    double lon = gps.location.isValid() ? gps.location.lng() : gps_lng;
+    Serial.printf("[GPS TASK] chars=%u valid=%u age=%u sats=%u lat=%.6f lon=%.6f\n",
+                  (unsigned)chars, valid ? 1U : 0U, (unsigned)age, (unsigned)sats, lat, lon);
 }
 
 uint32_t gps_get_charsProcessed(void)
@@ -236,6 +298,21 @@ void gps_get_satellites(uint32_t *vsat)
 void gps_get_speed(double *speed)
 {
     *speed = gps_speed;
+}
+
+bool gps_is_ready(void)
+{
+    return gps_ready;
+}
+
+bool gps_has_serial_data(void)
+{
+    return gps_ready && (millis() > 30000) && (gps.charsProcessed() > 0);
+}
+
+bool gps_has_fix(void)
+{
+    return gps.location.isValid();
 }
 
 /* clang-format on */
