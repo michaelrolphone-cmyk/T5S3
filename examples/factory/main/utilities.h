@@ -45,3 +45,6 @@
 
 
 #define BOARD_IO48_BTN      (48)
+
+#define BOARD_IO48_BTN_ACTIVE_LOW      (1)
+#define BOARD_PCA_BUTTON_ACTIVE_HIGH   (0)

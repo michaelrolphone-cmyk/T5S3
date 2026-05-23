@@ -179,18 +179,29 @@ void sd_guard_unlock()
 void btn_task(void *param)
 {
     Serial.println("[BUTTON] task started");
+    Serial.println("[BUTTON] source=GPIO48+PCA9535");
+    Serial.printf("[BUTTON] polarity gpio48_active_low=%d pca_active_high=%d\n",
+                  BOARD_IO48_BTN_ACTIVE_LOW, BOARD_PCA_BUTTON_ACTIVE_HIGH);
 #if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
-    Serial.println("[BUTTON] source=GPIO48");
-    bool ioext_btn_pressed = (digitalRead(BOARD_IO48_BTN) == LOW);
+    int last_gpio_raw = digitalRead(BOARD_IO48_BTN);
 #else
-    Serial.println("[BUTTON] source=PCA9535/button_read");
-    bool ioext_btn_pressed = button_read();
+    int last_gpio_raw = -1;
 #endif
-    Serial.printf("[BUTTON] initial button_read=%d\n", ioext_btn_pressed);
+    int last_pca_raw = button_read() ? 1 : 0;
+    Serial.printf("[BUTTON] initial button_read=%d\n", last_pca_raw);
     bool boot_btn_pressed = false;
+    bool toggle_armed = false;
+    enum ButtonSource { BUTTON_SRC_NONE, BUTTON_SRC_GPIO48, BUTTON_SRC_PCA9535 };
+    ButtonSource pressed_source = BUTTON_SRC_NONE;
+    bool stable_pressed = false;
+    bool candidate_pressed = false;
+    uint32_t candidate_since_ms = millis();
+    uint32_t task_start_ms = millis();
+    uint32_t last_raw_log_ms = 0;
 
     while(1)
     {
+        uint32_t now_ms = millis();
         if (digitalRead(BOARD_BOOT_BTN) == LOW)
         {
             if (!boot_btn_pressed) {
@@ -202,32 +213,75 @@ void btn_task(void *param)
             boot_btn_pressed = false;
         }
 
-        // Read the IO expander key level every cycle and toggle on release edge.
-        // Relying solely on INT can miss transitions once the line returns high.
-        bool io_pressed = false;
+        bool gpio_pressed = false;
+        bool pca_pressed = false;
+        int gpio_raw = -1;
+        int pca_raw = button_read() ? 1 : 0;
 #if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
-        io_pressed = (digitalRead(BOARD_IO48_BTN) == LOW);
-#else
-        io_pressed = button_read();
+        gpio_raw = digitalRead(BOARD_IO48_BTN);
+        gpio_pressed = BOARD_IO48_BTN_ACTIVE_LOW ? (gpio_raw == LOW) : (gpio_raw == HIGH);
 #endif
+        pca_pressed = BOARD_PCA_BUTTON_ACTIVE_HIGH ? (pca_raw == HIGH) : (pca_raw == LOW);
 
-        if(io_pressed) {
-            if(!ioext_btn_pressed) {
-                Serial.println("[BUTTON] io button pressed");
+        bool raw_edge = (gpio_raw != last_gpio_raw) || (pca_raw != last_pca_raw);
+        if ((now_ms - task_start_ms) < 10000U || raw_edge) {
+            if (raw_edge || (now_ms - last_raw_log_ms) > 1000U) {
+                Serial.printf("[BUTTON RAW] gpio48=%d pca_button=%d\n", gpio_raw, pca_raw);
+                last_raw_log_ms = now_ms;
             }
-            ioext_btn_pressed = true;
         }
-        else {
-            if(ioext_btn_pressed) {
+        last_gpio_raw = gpio_raw;
+        last_pca_raw = pca_raw;
+
+        bool any_pressed = gpio_pressed || pca_pressed;
+        ButtonSource active_source = BUTTON_SRC_NONE;
+        if (gpio_pressed) {
+            active_source = BUTTON_SRC_GPIO48;
+        }
+        else if (pca_pressed) {
+            active_source = BUTTON_SRC_PCA9535;
+        }
+
+        if (any_pressed != candidate_pressed) {
+            candidate_pressed = any_pressed;
+            candidate_since_ms = now_ms;
+        }
+
+        if ((now_ms - candidate_since_ms) >= 100U && stable_pressed != candidate_pressed) {
+            stable_pressed = candidate_pressed;
+            if (stable_pressed) {
+                pressed_source = active_source;
+                if (!toggle_armed) {
+                    toggle_armed = true;
+                    Serial.printf("[BUTTON] diagnostic armed source=%s gpio48=%d pca=%d\n",
+                                  (pressed_source == BUTTON_SRC_GPIO48) ? "GPIO48" :
+                                  (pressed_source == BUTTON_SRC_PCA9535) ? "PCA9535" : "NONE",
+                                  gpio_raw, pca_raw);
+                }
+            } else if (toggle_armed) {
                 int bl = 0;
                 ui_setting_get_backlight(&bl);
                 int new_bl = (bl == 0) ? 1 : 0;
                 ui_setting_set_backlight(new_bl);
-                Serial.printf("[BUTTON] io button released; backlight old=%d new=%d\n", bl, new_bl);
+                Serial.printf("[BUTTON] release source=%s old=%d new=%d gpio48=%d pca=%d\n",
+                              (pressed_source == BUTTON_SRC_GPIO48) ? "GPIO48" :
+                              (pressed_source == BUTTON_SRC_PCA9535) ? "PCA9535" : "NONE",
+                              bl, new_bl, gpio_raw, pca_raw);
             }
-            ioext_btn_pressed = false;
+            pressed_source = BUTTON_SRC_NONE;
         }
-        delay(80);
+
+        if (Serial.available() > 0) {
+            int ch = Serial.read();
+            if (ch == 'b' || ch == 'B') {
+                int bl = 0;
+                ui_setting_get_backlight(&bl);
+                int new_bl = (bl == 0) ? 1 : 0;
+                ui_setting_set_backlight(new_bl);
+                Serial.printf("[BUTTON TEST] serial backlight toggle old=%d new=%d\n", bl, new_bl);
+            }
+        }
+        delay(20);
     }
 }
 
@@ -1242,6 +1296,8 @@ void idf_setup()
     Serial.printf("[BOOT] reset_reason=%d wakeup_cause=%d\n",
                   rr,
                   esp_sleep_get_wakeup_cause());
+    Serial.printf("[BOOT BUILD] version=%s source=H752-01 button_fix=io48_diag_v2 built=%s %s\n",
+                  UI_T5_EPARPER_S3_PRO_VERSION, __DATE__, __TIME__);
     SerialGPS.begin(38400, SERIAL_8N1, BOARD_GPS_RXD, BOARD_GPS_TXD);
     // // while (!Serial);
 
