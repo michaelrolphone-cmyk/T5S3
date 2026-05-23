@@ -87,6 +87,9 @@ static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
 static volatile bool disp_force_clear_next_flush = false;
 static volatile bool disp_force_hl_white_next_update = false;
+static volatile bool disp_force_physical_clean_next_update = false;
+static volatile uint32_t disp_last_flush_ms = 0;
+static constexpr uint32_t EPD_FRAME_SETTLE_MS = 120;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 static SemaphoreHandle_t sd_mutex = NULL;
@@ -227,7 +230,7 @@ void disp_refresh_screen(void)
     disp_full_clean();
     epd_hl_set_all_white(&hl);
     epd_poweron();
-    checkError(epd_hl_update_screen(&hl, MODE_DU, epd_ambient_temperature()));
+    checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
     epd_poweroff();
 
     epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
@@ -269,6 +272,12 @@ static void disp_flush_task(void *param)
     (void)param;
     while (1) {
         if (disp_flush_pending) {
+            uint32_t now = millis();
+            if (now - disp_last_flush_ms < EPD_FRAME_SETTLE_MS) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+            Serial.println("[EPD SAFE] settled frame; physical update starting");
             disp_flush_pending = false;
             framebuffer_dirty = false;
 
@@ -291,42 +300,30 @@ static void disp_flush_task(void *param)
 
             bool force_hl_white = disp_force_hl_white_next_update;
             disp_force_hl_white_next_update = false;
+            bool force_physical_clean = disp_force_physical_clean_next_update;
+            disp_force_physical_clean_next_update = false;
 
-            if (force_hl_white) {
-                Serial.println("[EPD] clearing high-level framebuffer to white before UI draw");
+            if (ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) {
+                Serial.println("[EPD SAFE] FAST/DU disabled; using full GL16");
+            }
+            if (force_physical_clean) {
+                Serial.println("[EPD SAFE] physical clean before replacement frame");
+                disp_full_clean();
                 epd_hl_set_all_white(&hl);
-            }
-
-            if (force_hl_white)
-            {
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-                epd_poweron();
-                Serial.println("[EPD] forced full GL16 update after clear");
-                checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
-                epd_poweroff();
-            }
-            else if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
-            {
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-                epd_poweron();
-                checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), rener_area));
-                epd_poweroff();
-            }
-            else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
-            {
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
-                epd_poweron();
-                checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
-                epd_poweroff();
-            }
-            else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
-            {
-                disp_full_refresh();
-                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
                 checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
                 epd_poweroff();
             }
+
+            if (force_hl_white) {
+                Serial.println("[EPD] clearing high-level framebuffer to white before UI draw");
+            }
+            epd_hl_set_all_white(&hl);
+            epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+            epd_poweron();
+            checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+            epd_poweroff();
+            Serial.println("[EPD SAFE] full GL16 replacement frame complete");
 
             if (framebuffer_dirty) {
                 disp_flush_pending = true;
@@ -384,26 +381,18 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         framebuffer_dirty = true;
         // printf("[disp_flush] x1:%d, y1:%d, w:%d, h:%d\n", area->x1, area->y1, w, h);
     }
-    if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
-    {
-        disp_flush_pending = true;
-    }
-    else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NORMAL)
-    {
-        disp_flush_pending = true;
-    }
-    else if(ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT)
-    {
-        disp_flush_pending = true;
-    }
+    disp_last_flush_ms = millis();
+    disp_flush_pending = true;
     /* Inform the graphics library that you are ready with the flushing */
     lv_disp_flush_ready(disp);
 }
 
 void disp_request_full_clear(void)
 {
+    Serial.println("[EPD SAFE] disp_request_full_clear");
     disp_force_clear_next_flush = true;
     disp_force_hl_white_next_update = true;
+    disp_force_physical_clean_next_update = true;
 }
 
 static void touch_cancel_current_press(const char *reason)
@@ -947,6 +936,7 @@ void idf_setup()
 
     printf("LVGL UI Entry\n");
     ui_entry();
+    Serial.printf("[EPD SAFE] screen root bg=0x%06X\n", EPD_COLOR_BG);
     Serial.println("[BOOT] after ui_entry()");
 
     // task
