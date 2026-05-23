@@ -154,6 +154,9 @@ void disp_request_screen_replace(void);
 void disp_request_boot_replace(void);
 void disp_request_recovery_clean(void);
 static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp);
+static bool display_internal_heap_ok_for_hard_clean();
+static bool display_internal_heap_critical();
+
 static bool publish_snapshot(DisplayUpdateKind kind, bool has_dirty_union, const lv_area_t *dirty_union);
 static bool display_cmd_is_reliable(DisplayUpdateKind kind);
 static void release_snapshot(uint32_t seq, uint8_t *snapshot);
@@ -225,16 +228,36 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
         return false;
     }
 
-    const char *path = (preferred_path && preferred_path[0]) ? preferred_path : "/sleep.png";
+    const char *preferred = (preferred_path && preferred_path[0]) ? preferred_path : "/system/display/sleep.png";
+    const char *candidates[] = {
+        preferred,
+        "/system/display/sleep.png",
+        "/sleep.png",
+        "/icons/apps/sleep.png",
+    };
+
     if (!sd_guard_lock(3000)) {
         Serial.println("[SLEEP IMG] sd lock timeout");
         return false;
     }
 
-    File f = SD.open(path, FILE_READ);
-    if (!f || f.isDirectory()) {
+    File f;
+    const char *path = NULL;
+    for (const char *candidate : candidates) {
+        if (!candidate || !candidate[0]) continue;
+        if (path && strcmp(path, candidate) == 0) continue;
+        File try_f = SD.open(candidate, FILE_READ);
+        if (try_f && !try_f.isDirectory()) {
+            f = try_f;
+            path = candidate;
+            break;
+        }
+        if (try_f) try_f.close();
+    }
+
+    if (!f || f.isDirectory() || !path) {
         sd_guard_unlock();
-        Serial.printf("[SLEEP IMG] open failed: %s\n", path);
+        Serial.printf("[SLEEP IMG] open failed preferred=%s\n", preferred);
         return false;
     }
 
@@ -1694,8 +1717,31 @@ static bool publish_snapshot(DisplayUpdateKind kind, bool has_dirty_union, const
     return true;
 }
 
+static bool display_internal_heap_ok_for_hard_clean()
+{
+    size_t free_i = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largest_i = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    return free_i >= 8192 && largest_i >= 1024;
+}
+
+static bool display_internal_heap_critical()
+{
+    size_t free_i = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largest_i = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    return free_i < 4096 || largest_i < 256;
+}
+
 static void display_log_power(const char *phase, DisplayUpdateKind kind)
 {
+    if (display_internal_heap_critical()) {
+        Serial.printf("[EPD POWER] %s kind=%d power_log_skipped low_internal_heap free=%u largest=%u\n",
+                      phase,
+                      (int)kind,
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        return;
+    }
+
     if (!peri_buf[E_PERI_BQ25896]) {
         Serial.printf("[EPD POWER] %s kind=%d bq25896_unavailable\n", phase, (int)kind);
         return;
@@ -1764,8 +1810,15 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         Serial.println("[EPD POWER] screen replace hard clean downgraded to single GL16 replacement");
         do_hard_clean = false;
     }
+    if (do_hard_clean && !display_internal_heap_ok_for_hard_clean()) {
+        Serial.printf("[EPD POWER] hard clean skipped low internal heap free=%u largest=%u\n",
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        do_hard_clean = false;
+    }
+
     if (kind == DISPLAY_UPDATE_BOOT_REPLACE) {
-        do_hard_clean = safe_for_hard_clean;
+        do_hard_clean = do_hard_clean && safe_for_hard_clean;
         Serial.printf("[EPD POWER] boot replace hard clean decision safe=%d\n", safe_for_hard_clean ? 1 : 0);
         if (!safe_for_hard_clean) {
             Serial.println("[EPD POWER] boot replace hard clean downgraded to single GL16 replacement");

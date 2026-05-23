@@ -565,13 +565,15 @@ void ui_shutdown_vcom(int v)
 
 void ui_shutdown(void)
 {
-    disp_show_sleep_png_from_sd("/sleep.png");
+    bool ok = disp_show_sleep_png_from_sd("/system/display/sleep.png");
+    Serial.printf("[SLEEP IMG] pre-shutdown display %s\n", ok ? "ok" : "failed");
     PPM.shutdown();
 }
 
 void ui_sleep(void)
 {
-    disp_show_sleep_png_from_sd("/sleep.png");
+    bool ok = disp_show_sleep_png_from_sd("/system/display/sleep.png");
+    Serial.printf("[SLEEP IMG] pre-sleep display %s\n", ok ? "ok" : "failed");
 
     touch.sleep();
     lora_sleep();
