@@ -340,6 +340,27 @@ bool gps_has_fix(void)
     return gps.location.isValid();
 }
 
+void gps_get_status(gps_status_t *out)
+{
+    if (!out) {
+        return;
+    }
+
+    out->ready = gps_ready;
+    out->chars_processed = gps.charsProcessed();
+    out->has_serial_data = (out->chars_processed > 0);
+    out->has_fix = gps.location.isValid();
+    out->fix_age_ms = gps.location.age();
+    out->satellites = gps.satellites.isValid() ? gps.satellites.value() : gps_vsat;
+    out->lat = gps_lat;
+    out->lon = gps_lng;
+
+    if (out->has_fix) {
+        out->lat = gps.location.lat();
+        out->lon = gps.location.lng();
+    }
+}
+
 /* clang-format on */
 void displayInfo()
 {

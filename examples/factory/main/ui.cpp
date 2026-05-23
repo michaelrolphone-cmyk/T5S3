@@ -3529,6 +3529,7 @@ static lv_obj_t * scr3_create_label(lv_obj_t *parent)
 
 static void scr3_GPS_updata(void)
 {
+    gps_status_t gps_status = {0};
     double lat      = 0; // Latitude
     double lon      = 0; // Longitude
     double speed    = 0; // Speed over ground
@@ -3545,9 +3546,11 @@ static void scr3_GPS_updata(void)
 
     static int cnt = 0;
 
-    lv_label_set_text_fmt(scr3_cnt_lab, " %05d ", ui_gps_get_charsProcessed());
+    ui_gps_get_status(&gps_status);
+    lv_label_set_text_fmt(scr3_cnt_lab, " %05u ", (unsigned)gps_status.chars_processed);
 
-    ui_gps_get_coord(&lat, &lon);
+    lat = gps_status.lat;
+    lon = gps_status.lon;
     ui_gps_get_data(&year, &month, &day);
     ui_gps_get_time(&hour, &min, &sec);
     ui_gps_get_satellites(&vsat);
@@ -4285,6 +4288,11 @@ static lv_color_t *maps_decode_tile_dst = NULL;
 static int maps_bw_threshold = 180;
 static MapsTileProvider maps_tile_provider = MAPS_PROVIDER_STADIA_STAMEN_TONER;
 static String maps_stadia_api_key;
+static bool maps_coord_valid(double lat, double lon);
+static const bool MAPS_DEBUG_LOCATION_ENABLE = false;
+static double maps_debug_lat = 0.0;
+static double maps_debug_lon = 0.0;
+static bool maps_debug_location_valid = false;
 
 static int maps_png_tile_draw_cb(PNGDRAW *pDraw)
 {
@@ -4374,6 +4382,33 @@ static void maps_load_stadia_key()
     sd_guard_unlock();
     if (maps_stadia_api_key.length() > 0) Serial.println("[MAP] Stadia API key loaded");
     else Serial.println("[MAP] No Stadia API key configured");
+}
+
+static void maps_load_debug_location()
+{
+    maps_debug_location_valid = false;
+    maps_debug_lat = 0.0;
+    maps_debug_lon = 0.0;
+    if (!MAPS_DEBUG_LOCATION_ENABLE) return;
+    if (!peri_buf[E_PERI_SD_CARD]) return;
+    if (!sd_guard_lock(1000)) return;
+    File f = SD.open("/config/maps_debug_location.txt", FILE_READ);
+    if (f) {
+        String line = f.readString();
+        f.close();
+        line.trim();
+        int comma = line.indexOf(',');
+        if (comma > 0) {
+            String lat_s = line.substring(0, comma);
+            String lon_s = line.substring(comma + 1);
+            lat_s.trim();
+            lon_s.trim();
+            maps_debug_lat = lat_s.toDouble();
+            maps_debug_lon = lon_s.toDouble();
+            maps_debug_location_valid = maps_coord_valid(maps_debug_lat, maps_debug_lon);
+        }
+    }
+    sd_guard_unlock();
 }
 
 static bool maps_coord_valid(double lat, double lon)
@@ -4617,6 +4652,7 @@ render_done:
 static void maps_timer_cb(lv_timer_t *t)
 {
     (void)t;
+    gps_service_loop();
     if(maps_waiting_wifi && WiFi.status()!=WL_CONNECTED){
         uint32_t e=millis()-maps_wifi_start_ms;
         maps_show_loading("Connecting WiFi...");
@@ -4624,9 +4660,24 @@ static void maps_timer_cb(lv_timer_t *t)
         return;
     }
     maps_waiting_wifi=false;
-    double lat=0,lon=0; ui_gps_get_coord(&lat,&lon);
-    Serial.printf("[MAP] gps lat=%.6f lon=%.6f\n",lat,lon);
-    if(!maps_coord_valid(lat,lon)){ maps_show_loading("Waiting for GPS..."); return; }
+    gps_status_t gps = {0};
+    ui_gps_get_status(&gps);
+    Serial.printf("[MAP] gps ready=%u chars=%u fix=%u age=%u sats=%u lat=%.6f lon=%.6f\n",
+                  gps.ready ? 1U : 0U, (unsigned)gps.chars_processed, gps.has_fix ? 1U : 0U,
+                  (unsigned)gps.fix_age_ms, (unsigned)gps.satellites, gps.lat, gps.lon);
+    if (!gps.ready) { maps_show_loading("GPS not started"); return; }
+    if (!gps.has_serial_data || gps.chars_processed == 0) { maps_show_loading("No GPS serial data"); return; }
+    if (!gps.has_fix) {
+        if (MAPS_DEBUG_LOCATION_ENABLE && maps_debug_location_valid) {
+            Serial.printf("[MAP] using debug location lat=%.6f lon=%.6f\n", maps_debug_lat, maps_debug_lon);
+            if (maps_try_render(maps_debug_lat, maps_debug_lon)) { lv_timer_del(maps_timer); maps_timer=NULL; return; }
+        }
+        maps_show_loading("Waiting for GPS fix...");
+        return;
+    }
+    if (!maps_coord_valid(gps.lat, gps.lon)) { maps_show_loading("GPS fix invalid"); return; }
+    double lat = gps.lat;
+    double lon = gps.lon;
     if(maps_try_render(lat,lon)){ lv_timer_del(maps_timer); maps_timer=NULL; return; }
 }
 static void maps_back(lv_event_t *e){ if(e->code==LV_EVENT_CLICKED) scr_mgr_pop(false);}
@@ -4661,7 +4712,7 @@ static void create13(lv_obj_t *p){
     maps_info=lv_label_create(p); lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN);
     maps_loading = lv_label_create(maps_view); lv_label_set_text(maps_loading, "Loading map..."); lv_obj_center(maps_loading); lv_obj_add_flag(maps_loading, LV_OBJ_FLAG_HIDDEN);
 }
-static void entry13(void){ Serial.println("[MAP] entry"); maps_load_stadia_key(); ui_gps_task_resume(); maps_waiting_wifi=false; if (maps_status) lv_obj_add_flag(maps_status, LV_OBJ_FLAG_HIDDEN); if (maps_info) lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN); maps_show_loading("Waiting for GPS..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 1000, NULL);}
+static void entry13(void){ Serial.println("[MAP] entry"); maps_load_stadia_key(); maps_load_debug_location(); ui_gps_task_resume(); maps_waiting_wifi=false; if (maps_status) lv_obj_add_flag(maps_status, LV_OBJ_FLAG_HIDDEN); if (maps_info) lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN); maps_show_loading("Waiting for GPS..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 1000, NULL);}
 static void exit13(void){ if(maps_timer){ lv_timer_del(maps_timer); maps_timer=NULL; } maps_waiting_wifi=false; }
 static void destroy13(void){ for (int row = 0; row < MAPS_GRID_ROWS; ++row) for (int col = 0; col < MAPS_GRID_COLS; ++col) { if(maps_tile_buf[row][col]){ free(maps_tile_buf[row][col]); maps_tile_buf[row][col]=NULL; } } if(maps_png_line_buf){ free(maps_png_line_buf); maps_png_line_buf=NULL; } if(maps_png_raw){ free(maps_png_raw); maps_png_raw=NULL; maps_png_raw_size=0; } }
 static scr_lifecycle_t screen13 = {.create=create13,.entry=entry13,.exit=exit13,.destroy=destroy13};

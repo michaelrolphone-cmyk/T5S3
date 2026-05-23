@@ -18,6 +18,17 @@
 #define LORA_MODE_SEND 0
 #define LORA_MODE_RECV 1
 
+typedef struct {
+    bool ready;
+    bool has_serial_data;
+    bool has_fix;
+    uint32_t chars_processed;
+    uint32_t satellites;
+    uint32_t fix_age_ms;
+    double lat;
+    double lon;
+} gps_status_t;
+
 bool lora_sx1262_init(void);
 void lora_set_mode(int mode);
 int lora_get_mode(void);
@@ -45,5 +56,6 @@ void gps_get_speed(double *speed);
 bool gps_is_ready(void);
 bool gps_has_serial_data(void);
 bool gps_has_fix(void);
+void gps_get_status(gps_status_t *out);
 
 #endif
