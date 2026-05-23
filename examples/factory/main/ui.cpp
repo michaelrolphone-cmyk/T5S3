@@ -4501,8 +4501,17 @@ static bool maps_download_tile(const char *path, MapsTileProvider provider, int 
     File f=SD.open(path, FILE_WRITE);
     if(!f){ sd_guard_unlock(); http.end(); return false;}
     uint8_t buf[512]; int total=0;
+    uint32_t last_progress_ms = millis();
     while(http.connected() && (http.getSize()>0 || stream->available())){
-        int n=stream->readBytes(buf,sizeof(buf)); if(n<=0) break; f.write(buf,n); total+=n;
+        int n=stream->readBytes(buf,sizeof(buf));
+        if(n>0){
+            f.write(buf,n);
+            total+=n;
+            last_progress_ms = millis();
+        } else if (millis() - last_progress_ms > 1500) {
+            break;
+        }
+        delay(1);
     }
     f.close(); sd_guard_unlock(); http.end();
     Serial.printf("[MAP] saved tile bytes=%d\n", total);
@@ -4623,6 +4632,7 @@ static bool maps_try_render(double lat,double lon)
                 dbg += "tile[" + String(row) + "," + String(col) + "] path=" + String(tile) + " status=" + (ok ? String("ok") : decode_result) + "\n";
                 if (ok) decoded_count++;
                 maps_show_loading((String("Loading map ") + String((row*MAPS_GRID_COLS+col+1)) + "/6").c_str());
+                delay(1);
             }
             if (decoded_count > 0) {
                 accepted_z = z; accepted_provider = provider_name; accepted_decoded = decoded_count;
