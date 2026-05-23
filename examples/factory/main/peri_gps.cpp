@@ -41,6 +41,7 @@ static void gps_log_status(const gps_fix_snapshot_t *snapshot);
 static void gps_status_csv_append(const gps_fix_snapshot_t *snapshot);
 static void gps_log_parser_heartbeat(uint32_t now_ms);
 void gps_logger_task(void *param);
+void gps_service_loop(void);
 
 TaskHandle_t gps_handle = NULL;
 static TaskHandle_t gps_logger_handle = NULL;
@@ -57,6 +58,10 @@ static int gps_last_sync_minute = -1;
 static uint32_t gps_last_csv_write_ms = 0;
 static const uint32_t GPS_CSV_PERIOD_MS = 10000;
 static const bool GPS_SERIAL_VERBOSE = false;
+static const bool GPS_BRIDGE_SERIAL_INPUT = false;
+static const uint32_t GPS_HEARTBEAT_PERIOD_MS = 10000;
+static uint32_t gps_last_heartbeat_ms = 0;
+static uint32_t gps_last_no_data_warn_ms = 0;
 
 uint8_t buffer[256];
 
@@ -85,81 +90,93 @@ bool gps_init(void)
     }
 
     if(result) {
+        gps_ready = true;
         Serial.println("GPS Task Create...!");
         gps_task_create();
         if (peri_buf[E_PERI_SD_CARD]) {
             gps_debug_log("[GPS CSV] boot: logger active");
         }
-        result = (gps_handle != NULL);
     } else {
         SerialGPS.end();
     }
     return result;
 }
 
-void gps_task(void *param)
+
+void gps_service_loop(void)
 {
-    uint32_t last_heartbeat_ms = 0;
-    while(1)
-    {
+    if (GPS_BRIDGE_SERIAL_INPUT) {
         while (Serial.available()) {
             SerialGPS.write(Serial.read());
         }
+    }
 
-        while (SerialGPS.available()) {
-            int c = SerialGPS.read();
-            if (gps.encode(c)) {
-                displayInfo();
-                if (gps.location.isValid()) {
-                    gps_fix_snapshot_t snapshot = {0};
-                    snapshot.valid = true;
-                    snapshot.lat = gps.location.lat();
-                    snapshot.lon = gps.location.lng();
-                    snapshot.speed_kmph = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
-                    snapshot.satellites = gps.satellites.isValid() ? gps.satellites.value() : 0;
-                    snapshot.chars_processed = gps.charsProcessed();
-                    snapshot.fix_age_ms = gps.location.age();
-                    snapshot.captured_ms = millis();
-                    snapshot.date_valid = gps.date.isValid();
-                    snapshot.time_valid = gps.time.isValid();
-                    if (snapshot.date_valid) {
-                        snapshot.year = gps.date.year();
-                        snapshot.month = gps.date.month();
-                        snapshot.day = gps.date.day();
-                    }
-                    if (snapshot.time_valid) {
-                        snapshot.hour = gps.time.hour();
-                        snapshot.minute = gps.time.minute();
-                        snapshot.second = gps.time.second();
-                    }
-                    portENTER_CRITICAL(&gps_fix_mux);
-                    gps_latest_fix = snapshot;
-                    portEXIT_CRITICAL(&gps_fix_mux);
+    while (SerialGPS.available()) {
+        int c = SerialGPS.read();
+        if (gps.encode(c)) {
+            displayInfo();
+            if (gps.location.isValid()) {
+                gps_fix_snapshot_t snapshot = {0};
+                snapshot.valid = true;
+                snapshot.lat = gps.location.lat();
+                snapshot.lon = gps.location.lng();
+                snapshot.speed_kmph = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
+                snapshot.satellites = gps.satellites.isValid() ? gps.satellites.value() : 0;
+                snapshot.chars_processed = gps.charsProcessed();
+                snapshot.fix_age_ms = gps.location.age();
+                snapshot.captured_ms = millis();
+                snapshot.date_valid = gps.date.isValid();
+                snapshot.time_valid = gps.time.isValid();
+                if (snapshot.date_valid) {
+                    snapshot.year = gps.date.year();
+                    snapshot.month = gps.date.month();
+                    snapshot.day = gps.date.day();
                 }
+                if (snapshot.time_valid) {
+                    snapshot.hour = gps.time.hour();
+                    snapshot.minute = gps.time.minute();
+                    snapshot.second = gps.time.second();
+                }
+                portENTER_CRITICAL(&gps_fix_mux);
+                gps_latest_fix = snapshot;
+                portEXIT_CRITICAL(&gps_fix_mux);
             }
         }
+    }
 
-        uint32_t now = millis();
-        if (now > 30000 && gps.charsProcessed() < 10) {
-            Serial.println(F("No GPS detected: check wiring."));
-            delay(1000);
+    uint32_t now = millis();
+    if ((now > 30000) && (gps.charsProcessed() < 10) && (now - gps_last_no_data_warn_ms >= 1000)) {
+        gps_last_no_data_warn_ms = now;
+        Serial.println(F("No GPS detected: check wiring."));
+    }
+    if (now - gps_last_heartbeat_ms >= GPS_HEARTBEAT_PERIOD_MS) {
+        gps_last_heartbeat_ms = now;
+        gps_log_parser_heartbeat(now);
+    }
+    if (!gps_logger_ready) {
+        gps_fix_snapshot_t snapshot = {0};
+        portENTER_CRITICAL(&gps_fix_mux);
+        snapshot = gps_latest_fix;
+        portEXIT_CRITICAL(&gps_fix_mux);
+        if (gps_snapshot_fix_valid(&snapshot, now) && (now - gps_last_csv_write_ms >= GPS_CSV_PERIOD_MS)) {
+            if (gps_csv_append_snapshot_fix(&snapshot)) {
+                gps_last_csv_write_ms = now;
+            }
         }
-        if (now - last_heartbeat_ms >= 10000) {
-            last_heartbeat_ms = now;
-            gps_log_parser_heartbeat(now);
+    }
+}
+
+void gps_task(void *param)
+{
+    uint32_t last_stack_log_ms = 0;
+    while(1)
+    {
+        gps_service_loop();
+        uint32_t now = millis();
+        if (now - last_stack_log_ms >= GPS_HEARTBEAT_PERIOD_MS) {
+            last_stack_log_ms = now;
             UBaseType_t parser_hwm = uxTaskGetStackHighWaterMark(NULL);
             Serial.printf("[GPS TASK] parser stack_hwm=%u\n", (unsigned)parser_hwm);
-        }
-        if (!gps_logger_ready) {
-            gps_fix_snapshot_t snapshot = {0};
-            portENTER_CRITICAL(&gps_fix_mux);
-            snapshot = gps_latest_fix;
-            portEXIT_CRITICAL(&gps_fix_mux);
-            if (gps_snapshot_fix_valid(&snapshot, now) && (now - gps_last_csv_write_ms >= GPS_CSV_PERIOD_MS)) {
-                if (gps_csv_append_snapshot_fix(&snapshot)) {
-                    gps_last_csv_write_ms = now;
-                }
-            }
         }
         delay(1);
     }
@@ -203,13 +220,15 @@ void gps_task_create(void)
     Serial.printf("[GPS TASK] create parser pre free_internal=%u largest_internal=%u free_psram=%u\n",
                   (unsigned)free_internal, (unsigned)largest_internal, (unsigned)free_psram);
 
-    BaseType_t parser_rc = xTaskCreate(gps_task, "gps_task", 1024 * 6, NULL, GPS_PRIORITY, &gps_handle);
+    BaseType_t parser_rc = xTaskCreate(gps_task, "gps_task", 1024 * 3, NULL, GPS_PRIORITY, &gps_handle);
     Serial.printf("[GPS TASK] parser create rc=%d handle=%p\n", (int)parser_rc, gps_handle);
     if (gps_handle == NULL) {
-        Serial.println("[GPS TASK ERROR] parser task create failed");
-        gps_ready = false;
+        Serial.println("[GPS TASK WARN] parser task create failed; using polling parser");
+        Serial.println("[GPS] hardware init ok; parser mode=polling");
+        gps_logger_ready = false;
         return;
     }
+    Serial.println("[GPS] hardware init ok; parser task started");
 
     UBaseType_t logger_priority = (GPS_PRIORITY > 0) ? (GPS_PRIORITY - 1) : GPS_PRIORITY;
     free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -239,13 +258,14 @@ static void gps_log_parser_heartbeat(uint32_t now_ms)
     uint32_t sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
     double lat = gps.location.isValid() ? gps.location.lat() : gps_lat;
     double lon = gps.location.isValid() ? gps.location.lng() : gps_lng;
-    Serial.printf("[GPS TASK] chars=%u valid=%u age=%u sats=%u lat=%.6f lon=%.6f\n",
-                  (unsigned)chars, valid ? 1U : 0U, (unsigned)age, (unsigned)sats, lat, lon);
+    const char *mode = (gps_handle != NULL) ? "task" : "polling";
+    Serial.printf("[GPS] mode=%s chars=%u valid=%u age=%u sats=%u lat=%.6f lon=%.6f\n",
+                  mode, (unsigned)chars, valid ? 1U : 0U, (unsigned)age, (unsigned)sats, lat, lon);
 }
 
 uint32_t gps_get_charsProcessed(void)
 {
-    return gps_ready ? gps.charsProcessed() : 0;
+    return gps.charsProcessed();
 }
 
 void gps_task_suspend(void)
@@ -299,7 +319,7 @@ bool gps_is_ready(void)
 
 bool gps_has_serial_data(void)
 {
-    return gps_ready && (millis() > 30000) && (gps.charsProcessed() > 0);
+    return (millis() > 30000) && (gps.charsProcessed() > 0);
 }
 
 bool gps_has_fix(void)

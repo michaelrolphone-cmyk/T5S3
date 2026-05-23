@@ -3549,7 +3549,7 @@ static void scr3_GPS_updata(void)
     lv_label_set_text_fmt(scr3_cnt_lab, " %05d ", chars);
 
     if (!ui_gps_is_ready()) {
-        lv_label_set_text(scr8_lab_buf[0], "GPS task failed");
+        lv_label_set_text(scr8_lab_buf[0], "GPS hardware failed");
     } else if (!ui_gps_has_serial_data()) {
         lv_label_set_text(scr8_lab_buf[0], "No GPS serial data");
     } else if (!ui_gps_has_fix()) {
