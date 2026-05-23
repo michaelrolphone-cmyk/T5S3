@@ -67,20 +67,19 @@ uint8_t *displaybuffer = NULL;
 static constexpr uint8_t EPD_LOGICAL_WHITE_BYTE = 0xFF;
 volatile bool disp_flush_enabled = true;
 volatile bool indev_touch_enabled = true;
-static volatile bool touch_ignore_until_release = false;
+enum HomeInputState {
+    HOME_INPUT_IDLE = 0,
+    HOME_INPUT_SUPPRESS_UNTIL_RELEASE,
+    HOME_INPUT_POST_RELEASE_DEADBAND,
+    HOME_INPUT_WAIT_FRESH_PRESS
+};
+
+static volatile HomeInputState home_input_state = HOME_INPUT_IDLE;
+static volatile uint32_t home_input_state_start_ms = 0;
+static volatile uint32_t home_input_deadline_ms = 0;
 static volatile bool home_button_pending = false;
-static volatile uint32_t touch_ignore_start_ms = 0;
-static volatile uint32_t touch_ignore_max_ms = 800;
+static volatile bool home_nav_in_progress = false;
 static volatile uint32_t home_button_last_ms = 0;
-static volatile uint32_t touch_block_until_ms = 0;
-static volatile bool home_transition_guard_active = false;
-static volatile bool home_transition_wait_release = false;
-static volatile uint32_t home_transition_guard_until_ms = 0;
-static volatile uint32_t home_transition_guard_start_ms = 0;
-static volatile bool home_waiting_for_physical_release = false;
-static volatile bool home_waiting_for_fresh_press = false;
-static volatile bool home_fresh_press_seen = false;
-static volatile uint32_t home_post_release_block_until_ms = 0;
 static lv_indev_t *touch_indev = NULL;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
@@ -406,95 +405,41 @@ void disp_request_boot_replace(void)
     Serial.println("[DISPLAY LIFECYCLE] boot replace requested");
 }
 
-static void touch_cancel_current_press(const char *reason)
+static const char *home_input_state_name(HomeInputState s)
 {
-    touch_ignore_until_release = true;
-    touch_ignore_start_ms = millis();
-    touch_ignore_max_ms = 800;
-
-    if (touch_indev) {
-        lv_indev_reset(touch_indev, NULL);
+    switch (s) {
+        case HOME_INPUT_IDLE: return "IDLE";
+        case HOME_INPUT_SUPPRESS_UNTIL_RELEASE: return "SUPPRESS_UNTIL_RELEASE";
+        case HOME_INPUT_POST_RELEASE_DEADBAND: return "POST_RELEASE_DEADBAND";
+        case HOME_INPUT_WAIT_FRESH_PRESS: return "WAIT_FRESH_PRESS";
+        default: return "UNKNOWN";
     }
-
-    Serial.printf("[TOUCH] suppress current press: %s\n", reason ? reason : "");
 }
 
 
 void touch_begin_home_transition_guard(uint32_t min_block_ms)
 {
     uint32_t now = millis();
-
-    home_transition_guard_active = true;
-    home_transition_wait_release = true;
-    home_transition_guard_start_ms = now;
-    home_transition_guard_until_ms = now + min_block_ms;
-
-    touch_ignore_until_release = true;
-    touch_ignore_start_ms = now;
-    touch_ignore_max_ms = 3000;
-    touch_block_until_ms = now + min_block_ms;
-
-    home_waiting_for_physical_release = true;
-    home_waiting_for_fresh_press = true;
-    home_fresh_press_seen = false;
-    home_post_release_block_until_ms = 0;
-
-    if (touch_indev) {
-        lv_indev_reset(touch_indev, NULL);
-    }
-
-    Serial.printf("[HOME GUARD] begin min_block=%lu\n", (unsigned long)min_block_ms);
+    HomeInputState prev = home_input_state;
+    home_input_state = HOME_INPUT_SUPPRESS_UNTIL_RELEASE;
+    home_input_state_start_ms = now;
+    uint32_t guard_ms = (min_block_ms > 1000) ? min_block_ms : 1000;
+    home_input_deadline_ms = now + guard_ms;
+    Serial.printf("[HOME INPUT] %s -> %s reason=compat_guard_begin ms=%lu\n",
+                  home_input_state_name(prev), home_input_state_name(home_input_state), (unsigned long)min_block_ms);
 }
 
 bool touch_home_transition_guard_active(void)
 {
-    if (!home_transition_guard_active) return false;
-
-    uint32_t now = millis();
-
-    if (home_transition_wait_release) {
-        bool still_pressed = indev_touch_enabled && touch.isPressed();
-
-        if (!still_pressed && now >= home_transition_guard_until_ms) {
-            home_transition_wait_release = false;
-            home_transition_guard_active = false;
-            touch_block_until_ms = 0;
-            touch_ignore_until_release = false;
-            Serial.println("[HOME GUARD] release observed; guard ended");
-            return false;
-        }
-
-        if (now - home_transition_guard_start_ms > 3000) {
-            home_transition_wait_release = false;
-            home_transition_guard_active = false;
-            touch_block_until_ms = 0;
-            touch_ignore_until_release = false;
-            Serial.println("[HOME GUARD WARN] timeout; guard force-ended");
-            return false;
-        }
-
-        return true;
-    }
-
-    if (now < home_transition_guard_until_ms) {
-        return true;
-    }
-
-    home_transition_guard_active = false;
-    return false;
+    return home_input_state != HOME_INPUT_IDLE;
 }
 
 
 bool touch_reject_stale_home_event(void)
 {
-    uint32_t now = millis();
-
-    if (home_transition_guard_active) return true;
-    if (home_waiting_for_physical_release) return true;
-    if (home_post_release_block_until_ms != 0 && now < home_post_release_block_until_ms) return true;
-    if (home_waiting_for_fresh_press && !home_fresh_press_seen) return true;
-
-    return false;
+    return home_input_state == HOME_INPUT_SUPPRESS_UNTIL_RELEASE ||
+           home_input_state == HOME_INPUT_POST_RELEASE_DEADBAND ||
+           home_input_state == HOME_INPUT_WAIT_FRESH_PRESS;
 }
 
 static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
@@ -504,79 +449,73 @@ static void my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data)
     (void)drv;
 
     uint32_t now = millis();
+    bool raw_pressed = indev_touch_enabled && touch.isPressed();
 
-    if (home_waiting_for_physical_release) {
-        bool still_pressed = indev_touch_enabled && touch.isPressed();
+    if (home_input_state != HOME_INPUT_IDLE && (now - home_input_state_start_ms) > 5000) {
+        Serial.println("[HOME INPUT ERROR] state stuck; forcing IDLE");
+        home_input_state = HOME_INPUT_IDLE;
+    }
 
+    if (home_input_state == HOME_INPUT_SUPPRESS_UNTIL_RELEASE) {
         data->state = LV_INDEV_STATE_RELEASED;
         data->point.x = x;
         data->point.y = y;
 
-        if (!still_pressed) {
-            home_waiting_for_physical_release = false;
-            home_post_release_block_until_ms = now + 300;
-            Serial.println("[HOME GUARD] physical release observed; blocking post-release events");
+        if (!raw_pressed) {
+            Serial.printf("[HOME INPUT] %s -> %s reason=release\n",
+                          home_input_state_name(HOME_INPUT_SUPPRESS_UNTIL_RELEASE),
+                          home_input_state_name(HOME_INPUT_POST_RELEASE_DEADBAND));
+            home_input_state = HOME_INPUT_POST_RELEASE_DEADBAND;
+            home_input_state_start_ms = now;
+            home_input_deadline_ms = now + 250;
+            Serial.println("[HOME INPUT] release observed; entering deadband");
+        } else if (now >= home_input_deadline_ms) {
+            Serial.printf("[HOME INPUT] %s -> %s reason=timeout\n",
+                          home_input_state_name(HOME_INPUT_SUPPRESS_UNTIL_RELEASE),
+                          home_input_state_name(HOME_INPUT_POST_RELEASE_DEADBAND));
+            home_input_state = HOME_INPUT_POST_RELEASE_DEADBAND;
+            home_input_state_start_ms = now;
+            home_input_deadline_ms = now + 250;
+            Serial.println("[HOME INPUT WARN] release wait timed out; entering deadband");
         }
 
         return;
     }
 
-    if (home_post_release_block_until_ms != 0) {
+    if (home_input_state == HOME_INPUT_POST_RELEASE_DEADBAND) {
         data->state = LV_INDEV_STATE_RELEASED;
         data->point.x = x;
         data->point.y = y;
 
-        if (now < home_post_release_block_until_ms) {
-            return;
+        if (now >= home_input_deadline_ms) {
+            Serial.printf("[HOME INPUT] %s -> %s\n",
+                          home_input_state_name(HOME_INPUT_POST_RELEASE_DEADBAND),
+                          home_input_state_name(HOME_INPUT_WAIT_FRESH_PRESS));
+            home_input_state = HOME_INPUT_WAIT_FRESH_PRESS;
+            home_input_state_start_ms = now;
+            home_input_deadline_ms = now + 3000;
+            Serial.println("[HOME INPUT] deadband ended; waiting for fresh press");
         }
-
-        home_post_release_block_until_ms = 0;
-        Serial.println("[HOME GUARD] post-release block ended; waiting for fresh press");
-    }
-
-    if (touch_home_transition_guard_active()) {
-        data->state = LV_INDEV_STATE_RELEASED;
-        data->point.x = x;
-        data->point.y = y;
-        return;
-    }
-    if (touch_block_until_ms != 0 && now < touch_block_until_ms) {
-        data->state = LV_INDEV_STATE_RELEASED;
-        data->point.x = x;
-        data->point.y = y;
         return;
     }
 
-    if (touch_block_until_ms != 0 && now >= touch_block_until_ms) {
-        touch_block_until_ms = 0;
-        Serial.println("[TOUCH] post-home input block ended");
-    }
-
-    if (touch_ignore_until_release) {
-        bool still_pressed = indev_touch_enabled && touch.isPressed();
-        uint32_t elapsed = millis() - touch_ignore_start_ms;
-
-        data->state = LV_INDEV_STATE_RELEASED;
-        data->point.x = x;
-        data->point.y = y;
-
-        if (!still_pressed) {
-            touch_ignore_until_release = false;
-            Serial.println("[TOUCH] release observed; touch input re-enabled");
-        } else if (elapsed >= touch_ignore_max_ms) {
-            touch_ignore_until_release = false;
-            Serial.println("[TOUCH WARN] release timeout; touch input force re-enabled");
+    if (home_input_state == HOME_INPUT_WAIT_FRESH_PRESS) {
+        if (raw_pressed) {
+            Serial.printf("[HOME INPUT] %s -> %s reason=fresh_press\n",
+                          home_input_state_name(HOME_INPUT_WAIT_FRESH_PRESS),
+                          home_input_state_name(HOME_INPUT_IDLE));
+            home_input_state = HOME_INPUT_IDLE;
+            Serial.println("[HOME INPUT] fresh press accepted");
+        } else if (now >= home_input_deadline_ms) {
+            Serial.printf("[HOME INPUT] %s -> %s reason=timeout\n",
+                          home_input_state_name(HOME_INPUT_WAIT_FRESH_PRESS),
+                          home_input_state_name(HOME_INPUT_IDLE));
+            home_input_state = HOME_INPUT_IDLE;
+            Serial.println("[HOME INPUT] fresh-press wait expired; returning idle");
         }
-
-        return;
     }
 
-    bool pressed = indev_touch_enabled && touch.isPressed();
-    if (pressed && home_waiting_for_fresh_press && !home_fresh_press_seen) {
-        home_fresh_press_seen = true;
-        home_waiting_for_fresh_press = false;
-        Serial.println("[HOME GUARD] fresh touch press accepted");
-    }
+    bool pressed = raw_pressed;
     if(pressed) {
         data->state = LV_INDEV_STATE_PRESSED;
         // Keep PRESSED state even if one coordinate sample is missed.
@@ -657,10 +596,14 @@ static bool touch_gt911_init(void)
 
         home_button_last_ms = now;
 
-        Serial.println("[HOME] GT911 home callback; queue springboard");
-
-        touch_begin_home_transition_guard(1200);
+        Serial.println("[HOME] callback: schedule springboard");
         home_button_pending = true;
+        HomeInputState prev = home_input_state;
+        home_input_state = HOME_INPUT_SUPPRESS_UNTIL_RELEASE;
+        home_input_state_start_ms = now;
+        home_input_deadline_ms = now + 1500;
+        Serial.printf("[HOME INPUT] %s -> %s reason=callback\n",
+                      home_input_state_name(prev), home_input_state_name(home_input_state));
     }, NULL);
 
     touch.setInterruptMode(LOW_LEVEL_QUERY);
@@ -963,13 +906,15 @@ void idf_setup()
 
 void idf_loop() 
 {
-    bool handled_home = false;
-
-    if (home_button_pending) {
+    if (home_button_pending && !home_nav_in_progress) {
         home_button_pending = false;
-        handled_home = true;
+        home_nav_in_progress = true;
 
-        Serial.println("[HOME] switching to springboard");
+        Serial.println("[HOME] idf_loop: switching to springboard");
+
+        if (touch_indev) {
+            lv_indev_reset(touch_indev, NULL);
+        }
 
         scr_mgr_switch(SCREEN0_ID, false);
 
@@ -977,13 +922,18 @@ void idf_loop()
             lv_indev_reset(touch_indev, NULL);
         }
 
-        touch_begin_home_transition_guard(1200);
-    }
+        uint32_t now = millis();
+        HomeInputState prev = home_input_state;
+        home_input_state = HOME_INPUT_SUPPRESS_UNTIL_RELEASE;
+        home_input_state_start_ms = now;
+        home_input_deadline_ms = now + 1500;
+        Serial.printf("[HOME INPUT] %s -> %s reason=idf_loop_switch\n",
+                      home_input_state_name(prev), home_input_state_name(home_input_state));
 
-    if (!handled_home) {
-        lv_task_handler();
+        home_nav_in_progress = false;
+        Serial.println("[HOME] idf_loop: switch complete, skipped one LVGL handler");
     } else {
-        Serial.println("[HOME] skipped lv_task_handler during home switch");
+        lv_task_handler();
     }
 
     ui_wifi_service_loop();
