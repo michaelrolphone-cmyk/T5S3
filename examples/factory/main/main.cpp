@@ -161,6 +161,7 @@ static inline int display_update_kind_priority(DisplayUpdateKind kind);
 static void display_set_next_snapshot_kind(DisplayUpdateKind kind);
 static void ensure_display_flush_task_started(void);
 bool disp_show_sleep_png_from_sd(const char *preferred_path);
+static inline void epd_image_set_pixel_4bpp(uint8_t *buf, int32_t width, int32_t x, int32_t y, uint8_t gray4);
 
 static inline uint8_t rgb565_to_gray4(uint16_t rgb565)
 {
@@ -333,6 +334,8 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
     free(png_raw);
 
     if (rc != PNG_SUCCESS) {
+        sleep_png_decoder_ctx = NULL;
+        sleep_png_line_buf_ctx = NULL;
         xSemaphoreGive(framebuffer_mutex);
         Serial.printf("[SLEEP IMG] decode failed rc=%d\n", rc);
         return false;
