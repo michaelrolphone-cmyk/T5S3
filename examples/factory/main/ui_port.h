@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lvgl.h"
+#include "peripheral.h"
 
 #define UI_REFRESH_MODE_NORMAL 0
 #define UI_REFRESH_MODE_FAST   1
