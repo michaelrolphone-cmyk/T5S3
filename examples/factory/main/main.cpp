@@ -138,14 +138,8 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
 static bool publish_snapshot(DisplayUpdateKind kind, bool has_dirty_union, const lv_area_t *dirty_union);
 static bool display_cmd_is_reliable(DisplayUpdateKind kind);
 static void release_snapshot(uint32_t seq, uint8_t *snapshot);
-static void display_accumulate_cmd(
-    const DisplayCmd &cmd,
-    DisplayCmd *pending_reliable,
-    size_t *pending_reliable_count,
-    size_t pending_reliable_cap,
-    DisplayCmd *newest_normal,
-    bool *has_normal
-);
+static inline int display_update_kind_priority(DisplayUpdateKind kind);
+static void display_set_next_snapshot_kind(DisplayUpdateKind kind);
 
 void sd_guard_init()
 {
@@ -323,6 +317,27 @@ static bool display_cmd_is_reliable(DisplayUpdateKind kind)
            kind == DISPLAY_UPDATE_RECOVERY_CLEAN;
 }
 
+static inline int display_update_kind_priority(DisplayUpdateKind kind)
+{
+    switch (kind) {
+        case DISPLAY_UPDATE_RECOVERY_CLEAN: return 4;
+        case DISPLAY_UPDATE_BOOT_REPLACE: return 3;
+        case DISPLAY_UPDATE_SCREEN_REPLACE: return 2;
+        case DISPLAY_UPDATE_NORMAL_FRAME: return 1;
+        case DISPLAY_UPDATE_NONE:
+        default: return 0;
+    }
+}
+
+static void display_set_next_snapshot_kind(DisplayUpdateKind kind)
+{
+    DisplayUpdateKind old_kind = display_next_snapshot_kind;
+    if (display_update_kind_priority(kind) > display_update_kind_priority(old_kind)) {
+        display_next_snapshot_kind = kind;
+        Serial.printf("[DISPLAY QUEUE] next kind set old=%d new=%d\n", (int)old_kind, (int)kind);
+    }
+}
+
 static void release_snapshot(uint32_t seq, uint8_t *snapshot)
 {
     if (!display_snapshot_mutex) {
@@ -343,83 +358,52 @@ static void release_snapshot(uint32_t seq, uint8_t *snapshot)
     xSemaphoreGive(display_snapshot_mutex);
 }
 
-static void display_accumulate_cmd(
-    const DisplayCmd &cmd,
-    DisplayCmd *pending_reliable,
-    size_t *pending_reliable_count,
-    size_t pending_reliable_cap,
-    DisplayCmd *newest_normal,
-    bool *has_normal
-)
-{
-    if (cmd.kind == DISPLAY_UPDATE_NONE) {
-        release_snapshot(cmd.seq, cmd.snapshot);
-        return;
-    }
-    if (cmd.kind == DISPLAY_UPDATE_NORMAL_FRAME) {
-        if (*has_normal) {
-            Serial.printf("[DISPLAY QUEUE] coalesce normal dropped seq=%lu\n", (unsigned long)newest_normal->seq);
-            release_snapshot(newest_normal->seq, newest_normal->snapshot);
-        }
-        *newest_normal = cmd;
-        *has_normal = true;
-        return;
-    }
-
-    if (*has_normal) {
-        if (*pending_reliable_count >= pending_reliable_cap) {
-            Serial.println("[DISPLAY QUEUE ERROR] reliable overflow");
-            display_commit_frame(newest_normal->kind, newest_normal->snapshot);
-            release_snapshot(newest_normal->seq, newest_normal->snapshot);
-            *has_normal = false;
-            *pending_reliable_count = 0;
-        } else {
-            pending_reliable[(*pending_reliable_count)++] = *newest_normal;
-            *has_normal = false;
-        }
-    }
-
-    if (display_cmd_is_reliable(cmd.kind) || cmd.kind == DISPLAY_UPDATE_NORMAL_FRAME) {
-        if (*pending_reliable_count >= pending_reliable_cap) {
-            Serial.println("[DISPLAY QUEUE ERROR] reliable overflow");
-            display_commit_frame(cmd.kind, cmd.snapshot);
-            release_snapshot(cmd.seq, cmd.snapshot);
-            return;
-        }
-        pending_reliable[(*pending_reliable_count)++] = cmd;
-        return;
-    }
-
-    release_snapshot(cmd.seq, cmd.snapshot);
-}
-
 static void disp_flush_task(void *param)
 {
     (void)param;
     DisplayCmd cmd;
+    DisplayCmd pending_normal = {};
+    bool has_pending_normal = false;
     while (1) {
         if (xQueueReceive(display_q, &cmd, pdMS_TO_TICKS(20)) != pdTRUE) {
             continue;
         }
+        do {
+            if (cmd.kind == DISPLAY_UPDATE_NONE) {
+                release_snapshot(cmd.seq, cmd.snapshot);
+                continue;
+            }
+            if (cmd.kind == DISPLAY_UPDATE_NORMAL_FRAME) {
+                if (has_pending_normal) {
+                    Serial.printf("[DISPLAY QUEUE] coalesce normal dropped seq=%lu\n", (unsigned long)pending_normal.seq);
+                    release_snapshot(pending_normal.seq, pending_normal.snapshot);
+                }
+                pending_normal = cmd;
+                has_pending_normal = true;
+                continue;
+            }
+            if (display_cmd_is_reliable(cmd.kind)) {
+                if (has_pending_normal) {
+                    Serial.printf("[DISPLAY QUEUE] commit seq=%lu kind=%d\n",
+                                  (unsigned long)pending_normal.seq, (int)pending_normal.kind);
+                    display_commit_frame(pending_normal.kind, pending_normal.snapshot);
+                    release_snapshot(pending_normal.seq, pending_normal.snapshot);
+                    has_pending_normal = false;
+                }
+                Serial.printf("[DISPLAY QUEUE] commit seq=%lu kind=%d\n", (unsigned long)cmd.seq, (int)cmd.kind);
+                display_commit_frame(cmd.kind, cmd.snapshot);
+                release_snapshot(cmd.seq, cmd.snapshot);
+                continue;
+            }
+            release_snapshot(cmd.seq, cmd.snapshot);
+        } while (xQueueReceive(display_q, &cmd, 0) == pdTRUE);
 
-        DisplayCmd pending_reliable[24];
-        size_t pending_reliable_count = 0;
-        DisplayCmd newest_normal = {};
-        bool has_normal = false;
-        display_accumulate_cmd(cmd, pending_reliable, &pending_reliable_count, 24, &newest_normal, &has_normal);
-
-        while (xQueueReceive(display_q, &cmd, 0) == pdTRUE) {
-            display_accumulate_cmd(cmd, pending_reliable, &pending_reliable_count, 24, &newest_normal, &has_normal);
-        }
-
-        if (has_normal) {
-            pending_reliable[pending_reliable_count++] = newest_normal;
-        }
-        for (size_t i = 0; i < pending_reliable_count; ++i) {
+        if (has_pending_normal) {
             Serial.printf("[DISPLAY QUEUE] commit seq=%lu kind=%d\n",
-                          (unsigned long)pending_reliable[i].seq, (int)pending_reliable[i].kind);
-            display_commit_frame(pending_reliable[i].kind, pending_reliable[i].snapshot);
-            release_snapshot(pending_reliable[i].seq, pending_reliable[i].snapshot);
+                          (unsigned long)pending_normal.seq, (int)pending_normal.kind);
+            display_commit_frame(pending_normal.kind, pending_normal.snapshot);
+            release_snapshot(pending_normal.seq, pending_normal.snapshot);
+            has_pending_normal = false;
         }
     }
 }
@@ -478,12 +462,15 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
     }
 
     disp_last_flush_ms = millis();
-    DisplayUpdateKind kind = DISPLAY_UPDATE_NORMAL_FRAME;
-    if (display_next_snapshot_kind != DISPLAY_UPDATE_NONE) {
-        kind = display_next_snapshot_kind;
+    DisplayUpdateKind requested_kind = display_next_snapshot_kind;
+    DisplayUpdateKind kind = requested_kind != DISPLAY_UPDATE_NONE ? requested_kind : DISPLAY_UPDATE_NORMAL_FRAME;
+    bool published = publish_snapshot(kind, true, area);
+    if (published && requested_kind != DISPLAY_UPDATE_NONE) {
         display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
+    } else if (!published && requested_kind != DISPLAY_UPDATE_NONE) {
+        Serial.printf("[DISPLAY QUEUE ERROR] publish failed; retaining pending replace kind=%d\n", (int)requested_kind);
+        Serial.println("[DISPLAY QUEUE] pending kind retained after publish failure");
     }
-    publish_snapshot(kind, true, area);
     /* Inform the graphics library that you are ready with the flushing */
     lv_disp_flush_ready(disp);
 }
@@ -501,20 +488,20 @@ void disp_request_normal_frame(void)
 void disp_request_screen_replace(void)
 {
     disp_force_clear_next_flush = true;
-    display_next_snapshot_kind = DISPLAY_UPDATE_SCREEN_REPLACE;
+    display_set_next_snapshot_kind(DISPLAY_UPDATE_SCREEN_REPLACE);
     Serial.println("[DISPLAY LIFECYCLE] screen replace requested");
 }
 
 void disp_request_boot_replace(void)
 {
     disp_force_clear_next_flush = true;
-    display_next_snapshot_kind = DISPLAY_UPDATE_BOOT_REPLACE;
+    display_set_next_snapshot_kind(DISPLAY_UPDATE_BOOT_REPLACE);
     Serial.println("[DISPLAY LIFECYCLE] boot replace requested");
 }
 
 void disp_request_recovery_clean(void)
 {
-    display_next_snapshot_kind = DISPLAY_UPDATE_RECOVERY_CLEAN;
+    display_set_next_snapshot_kind(DISPLAY_UPDATE_RECOVERY_CLEAN);
     Serial.println("[DISPLAY LIFECYCLE] recovery clean requested");
 }
 
