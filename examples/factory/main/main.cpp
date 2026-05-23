@@ -827,18 +827,19 @@ static bool screen_init(void)
         epd_rotated_display_height()
     );
 
-    epd_hl_set_all_white(&hl);
-    epd_poweron();
-    epd_clear();
-    epd_poweroff();
-
     // The display bus settings for V7 may be conservative, you can manually
     // override the bus speed to tune for speed, i.e., if you set the PSRAM speed
     // to 120MHz.
     epd_set_lcd_pixel_clock_MHz(17);
+    Serial.println("[EPD INIT] pixel clock set before boot clear");
 
     heap_caps_print_heap_info(MALLOC_CAP_INTERNAL);
     heap_caps_print_heap_info(MALLOC_CAP_SPIRAM);
+
+    epd_poweron();
+    epd_clear();
+    epd_poweroff();
+    Serial.println("[EPD INIT] boot epd_clear complete");
 
     int cursor_x = 250;
     int cursor_y = epd_rotated_display_height() / 2 - 250;
@@ -911,21 +912,16 @@ static bool bq25896_init(void)
     // To obtain voltage data, the ADC must be enabled first
     PPM.enableMeasure();
 
-    // Turn on charging function
-    // If there is no battery connected, do not turn on the charging function
-    PPM.enableCharge();
-
-    // Turn off charging function
-    // If USB is used as the only power input, it is best to turn off the charging function,
-    // otherwise the VSYS power supply will have a sawtooth wave, affecting the discharge output capability.
-    // PPM.disableCharge();
-
-
-    // The OTG function needs to enable OTG, and set the OTG control pin to HIGH
-    // After OTG is enabled, if an external power supply is plugged in, OTG will be turned off
-
-    PPM.enableOTG();
     PPM.disableOTG();
+
+    if (battery_25896_is_vbus_in()) {
+        PPM.enableCharge();
+        Serial.println("[PMIC] VBUS present: charging enabled");
+    } else {
+        PPM.disableCharge();
+        Serial.println("[PMIC] battery-only: charging disabled");
+    }
+
     // pinMode(OTG_ENABLE_PIN, OUTPUT);
     // digitalWrite(OTG_ENABLE_PIN, HIGH);
 
@@ -1205,6 +1201,41 @@ static bool publish_snapshot(DisplayUpdateKind kind, bool has_dirty_union, const
     return true;
 }
 
+static void display_log_power(const char *phase, DisplayUpdateKind kind)
+{
+    if (!peri_buf[E_PERI_BQ25896]) {
+        Serial.printf("[EPD POWER] %s kind=%d bq25896_unavailable\n", phase, (int)kind);
+        return;
+    }
+
+    Serial.printf("[EPD POWER] %s kind=%d usb=%d vbus=%.3f vsys=%.3f vbat=%.3f charging=%d\n",
+                  phase,
+                  (int)kind,
+                  battery_25896_is_vbus_in(),
+                  battery_25896_get_VBUS(),
+                  battery_25896_get_VSYS(),
+                  battery_25896_get_VBAT(),
+                  battery_25896_is_chr());
+}
+
+static bool display_safe_for_recovery_clean()
+{
+    if (!peri_buf[E_PERI_BQ25896]) return true;
+
+    bool usb = battery_25896_is_vbus_in();
+    float vsys = battery_25896_get_VSYS();
+    float vbat = battery_25896_get_VBAT();
+
+    if (usb) return true;
+
+    if (vsys > 0.0f && vsys < 3.55f) {
+        Serial.printf("[EPD POWER] recovery clean unsafe: vsys=%.3f vbat=%.3f\n", vsys, vbat);
+        return false;
+    }
+
+    return true;
+}
+
 static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp)
 {
     if (kind == DISPLAY_UPDATE_NONE) {
@@ -1218,12 +1249,25 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
     if (ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) {
         Serial.println("[DISPLAY LIFECYCLE] FAST/DU disabled; using GL16 safe mode");
     }
-    if (kind == DISPLAY_UPDATE_RECOVERY_CLEAN) {
+
+    bool do_recovery_clean = (kind == DISPLAY_UPDATE_RECOVERY_CLEAN);
+    if (kind == DISPLAY_UPDATE_RECOVERY_CLEAN && !display_safe_for_recovery_clean()) {
+        Serial.println("[EPD POWER] recovery clean downgraded to single GL16 replacement");
+        do_recovery_clean = false;
+    }
+
+    if (do_recovery_clean) {
         disp_replace_commit_count++;
         Serial.println("[DISPLAY LIFECYCLE] physical white erase begin");
         epd_hl_set_all_white(&hl);
         epd_poweron();
+        display_log_power("before_update", kind);
+        uint32_t t0_gc16 = millis();
         checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+        uint32_t dt_gc16 = millis() - t0_gc16;
+        Serial.printf("[EPD POWER] update complete kind=%d mode=GC16 duration_ms=%lu\n",
+                      (int)kind, (unsigned long)dt_gc16);
+        display_log_power("after_update", kind);
         epd_poweroff();
         Serial.println("[DISPLAY LIFECYCLE] physical white erase complete");
         Serial.println("[DISPLAY LIFECYCLE] recovery replacement GL16 frame begin");
@@ -1231,7 +1275,13 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
         epd_poweron();
         vTaskDelay(pdMS_TO_TICKS(50));
+        display_log_power("before_update", kind);
+        uint32_t t0_gl16 = millis();
         checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+        uint32_t dt_gl16 = millis() - t0_gl16;
+        Serial.printf("[EPD POWER] update complete kind=%d mode=GL16 duration_ms=%lu\n",
+                      (int)kind, (unsigned long)dt_gl16);
+        display_log_power("after_update", kind);
         vTaskDelay(pdMS_TO_TICKS(20));
         epd_poweroff();
         Serial.println("[DISPLAY LIFECYCLE] recovery replacement GL16 frame complete");
@@ -1244,7 +1294,13 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
         epd_poweron();
         vTaskDelay(pdMS_TO_TICKS(50));
+        display_log_power("before_update", kind);
+        uint32_t t0 = millis();
         checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+        uint32_t dt = millis() - t0;
+        Serial.printf("[EPD POWER] update complete kind=%d mode=GL16 duration_ms=%lu\n",
+                      (int)kind, (unsigned long)dt);
+        display_log_power("after_update", kind);
         vTaskDelay(pdMS_TO_TICKS(20));
         epd_poweroff();
         Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame complete");
@@ -1254,7 +1310,13 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
     epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
     epd_poweron();
     vTaskDelay(pdMS_TO_TICKS(50));
+    display_log_power("before_update", kind);
+    uint32_t t0 = millis();
     checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+    uint32_t dt = millis() - t0;
+    Serial.printf("[EPD POWER] update complete kind=%d mode=GL16 duration_ms=%lu\n",
+                  (int)kind, (unsigned long)dt);
+    display_log_power("after_update", kind);
     vTaskDelay(pdMS_TO_TICKS(20));
     epd_poweroff();
     Serial.println("[DISPLAY LIFECYCLE] normal full GL16 frame complete");
