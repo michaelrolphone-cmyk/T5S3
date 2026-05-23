@@ -44,10 +44,6 @@ void gps_logger_task(void *param);
 
 TaskHandle_t gps_handle = NULL;
 static TaskHandle_t gps_logger_handle = NULL;
-static StaticTask_t gps_task_tcb;
-static StackType_t gps_task_stack[1024 * 6];
-static StaticTask_t gps_logger_task_tcb;
-static StackType_t gps_logger_task_stack[1024 * 4];
 static gps_fix_snapshot_t gps_latest_fix = {0};
 static portMUX_TYPE gps_fix_mux = portMUX_INITIALIZER_UNLOCKED;
 double gps_lat=0, gps_lng=0, gps_altitude=0, gps_speed=0;
@@ -207,9 +203,7 @@ void gps_task_create(void)
     Serial.printf("[GPS TASK] create parser pre free_internal=%u largest_internal=%u free_psram=%u\n",
                   (unsigned)free_internal, (unsigned)largest_internal, (unsigned)free_psram);
 
-    gps_handle = xTaskCreateStatic(gps_task, "gps_task", sizeof(gps_task_stack) / sizeof(StackType_t), NULL,
-                                   GPS_PRIORITY, gps_task_stack, &gps_task_tcb);
-    BaseType_t parser_rc = (gps_handle != NULL) ? pdPASS : errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+    BaseType_t parser_rc = xTaskCreate(gps_task, "gps_task", 1024 * 6, NULL, GPS_PRIORITY, &gps_handle);
     Serial.printf("[GPS TASK] parser create rc=%d handle=%p\n", (int)parser_rc, gps_handle);
     if (gps_handle == NULL) {
         Serial.println("[GPS TASK ERROR] parser task create failed");
@@ -223,10 +217,8 @@ void gps_task_create(void)
     free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     Serial.printf("[GPS TASK] create logger pre free_internal=%u largest_internal=%u free_psram=%u\n",
                   (unsigned)free_internal, (unsigned)largest_internal, (unsigned)free_psram);
-    gps_logger_handle = xTaskCreateStatic(gps_logger_task, "gps_logger_task",
-                                          sizeof(gps_logger_task_stack) / sizeof(StackType_t), NULL,
-                                          logger_priority, gps_logger_task_stack, &gps_logger_task_tcb);
-    BaseType_t logger_rc = (gps_logger_handle != NULL) ? pdPASS : errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+    BaseType_t logger_rc = xTaskCreate(gps_logger_task, "gps_logger_task",
+                                         1024 * 4, NULL, logger_priority, &gps_logger_handle);
     Serial.printf("[GPS TASK] logger create rc=%d handle=%p\n", (int)logger_rc, gps_logger_handle);
     gps_logger_ready = (gps_logger_handle != NULL);
     if (!gps_logger_ready) {

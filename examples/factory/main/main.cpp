@@ -54,6 +54,10 @@ BQ27220 bq27220;
 #define DEMO_BOARD epd_board_v7
 EpdiyHighlevelState hl;
 
+#ifndef CONFIG_EPD_LUT_MODE
+#define CONFIG_EPD_LUT_MODE EPD_LUT_64K
+#endif
+
 #ifndef EPD_SELFTEST_ON_BOOT
 #define EPD_SELFTEST_ON_BOOT 0
 #endif
@@ -1086,7 +1090,7 @@ static bool screen_init(void)
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_64K);
+    epd_init(&DEMO_BOARD, &ED047TC1, CONFIG_EPD_LUT_MODE);
     Serial.printf("[EPD INIT] epd_init complete free_internal=%u largest_internal=%u free_psram=%u\n",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
@@ -1328,17 +1332,15 @@ void idf_setup()
     WiFi.mode(WIFI_OFF);
     delay(100);
 
-    Serial.println("[BOOT] before screen_init()");
-    // epdiy installs its own I2C driver during panel init. If Arduino Wire keeps
-    // the same bus active here, ESP-IDF returns "i2c driver install error" and
-    // epd_init can abort before LUT allocation.
-    Wire.end();
-    screen_init();
-    Wire.begin(BOARD_SDA, BOARD_SCL);
-    io_extend_lora_gps_power_on(true);
+    Serial.println("[BOOT PHASE] before PMIC");
     peri_buf[E_PERI_BQ27220]    = bq27220_init();   // PMU --- 0x55
     peri_buf[E_PERI_BQ25896]    = bq25896_init();   // PMU --- 0x6B
-    Serial.printf("[BOOT] bq25896 init after screen_init: %d\n", peri_buf[E_PERI_BQ25896]);
+    Serial.printf("[BOOT] bq25896 init before screen_init: %d\n", peri_buf[E_PERI_BQ25896]);
+
+    Serial.println("[BOOT PHASE] before screen_init");
+    screen_init();
+    Serial.println("[BOOT PHASE] after screen_init");
+    io_extend_lora_gps_power_on(true);
 
     BaseType_t btn_rc = xTaskCreate(btn_task, "btn_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
     Serial.printf("[BUTTON TASK] deferred create after epd_init rc=%ld handle=%p free_internal=%u largest_internal=%u\n",
@@ -1387,11 +1389,13 @@ void idf_setup()
     disp_init_status("RTC (PCF8563) Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_RTC]);
 
     ui_event_q = xQueueCreate(16, sizeof(UiEvent));
+    Serial.println("[BOOT PHASE] before Touch");
     peri_buf[E_PERI_TOUCH]      = touch_gt911_init();  // Touch --- 0x5D;
     cursor_x = 100;
     cursor_y = epd_rotated_display_height() / 2 - 100 + 150;
     disp_init_status("Touch (GT911) Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_TOUCH]);
 
+    Serial.println("[BOOT PHASE] before LoRa");
     peri_buf[E_PERI_LORA]       = lora_sx1262_init();
     cursor_x = 100;
     cursor_y = epd_rotated_display_height() / 2 - 100 + 200;
@@ -1413,6 +1417,7 @@ void idf_setup()
     Serial.printf("[EPD SAFE] screen root bg=0x%06X\n", EPD_COLOR_BG);
     Serial.println("[BOOT] after ui_entry()");
 
+    Serial.println("[BOOT PHASE] before GPS");
     peri_buf[E_PERI_GPS]        = gps_init();
     cursor_x = 100;
     cursor_y = epd_rotated_display_height() / 2 - 100 +300;
