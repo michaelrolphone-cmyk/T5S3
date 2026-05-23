@@ -1320,10 +1320,6 @@ void idf_setup()
     WiFi.mode(WIFI_OFF);
     delay(100);
 
-    peri_buf[E_PERI_BQ27220]    = bq27220_init();   // PMU --- 0x55
-    peri_buf[E_PERI_BQ25896]    = bq25896_init();   // PMU --- 0x6B
-    Serial.printf("[BOOT] bq25896 init before screen_init: %d\n", peri_buf[E_PERI_BQ25896]);
-
     Serial.println("[BOOT] before screen_init()");
     // epdiy installs its own I2C driver during panel init. If Arduino Wire keeps
     // the same bus active here, ESP-IDF returns "i2c driver install error" and
@@ -1332,6 +1328,10 @@ void idf_setup()
     screen_init();
     Wire.begin(BOARD_SDA, BOARD_SCL);
     io_extend_lora_gps_power_on(true);
+    peri_buf[E_PERI_BQ27220]    = bq27220_init();   // PMU --- 0x55
+    peri_buf[E_PERI_BQ25896]    = bq25896_init();   // PMU --- 0x6B
+    Serial.printf("[BOOT] bq25896 init after screen_init: %d\n", peri_buf[E_PERI_BQ25896]);
+
     BaseType_t btn_rc = xTaskCreate(btn_task, "btn_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
     Serial.printf("[BUTTON TASK] create rc=%ld handle=%p free_internal=%u largest_internal=%u\n",
                   (long)btn_rc,
