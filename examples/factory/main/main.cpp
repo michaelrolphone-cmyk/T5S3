@@ -580,8 +580,29 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
     disp_last_flush_ms = millis();
     DisplayUpdateKind requested_kind = display_next_snapshot_kind;
     DisplayUpdateKind kind = requested_kind != DISPLAY_UPDATE_NONE ? requested_kind : DISPLAY_UPDATE_NORMAL_FRAME;
-    bool published = publish_snapshot(kind, true, area);
     bool worker_ready = disp_flush_task_started || (disp_flush_handle != NULL);
+
+    if (!worker_ready && disp_flush_task_create_failed) {
+        if (framebuffer_mutex && xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            display_commit_frame(kind, decodebuffer);
+            xSemaphoreGive(framebuffer_mutex);
+            if (requested_kind != DISPLAY_UPDATE_NONE) {
+                display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
+                if (display_reliable_pending_kind == requested_kind) {
+                    display_reliable_pending_kind = DISPLAY_UPDATE_NONE;
+                }
+            }
+            if (disp_force_clear_next_flush && display_cmd_is_reliable(kind)) {
+                disp_force_clear_next_flush = false;
+            }
+        } else {
+            Serial.println("[DISPLAY TASK ERROR] synchronous fallback lock timeout");
+        }
+        lv_disp_flush_ready(disp);
+        return;
+    }
+
+    bool published = publish_snapshot(kind, true, area);
     if (published && requested_kind != DISPLAY_UPDATE_NONE) {
         if (worker_ready) {
             display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
