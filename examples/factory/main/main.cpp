@@ -600,6 +600,8 @@ static bool touch_gt911_init(void)
         home_button_last_ms = now;
 
         Serial.println("[HOME] GT911 home callback; queue springboard");
+
+        touch_begin_home_transition_guard(1200);
         home_button_pending = true;
     }, NULL);
 

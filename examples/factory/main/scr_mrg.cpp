@@ -166,7 +166,7 @@ bool scr_mgr_switch(int id, bool anim)  // 清空栈，然后切换到指定 id�
     scr_mgr_active(stack_scr); // 设置屏幕卡片为活跃状态
 
     if(scr_anim_sw != LV_SCR_LOAD_ANIM_NONE && anim){
-        lv_scr_load_anim(stack_scr->obj, scr_anim_sw, scr_anim_time, 0, true);
+        lv_scr_load_anim(stack_scr->obj, scr_anim_sw, scr_anim_time, 0, false);
         lv_obj_invalidate(lv_scr_act());
     } else{
         lv_scr_load(stack_scr->obj);
