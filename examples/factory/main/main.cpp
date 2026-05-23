@@ -890,40 +890,28 @@ static bool bq25896_init(void)
     // Set the minimum operating voltage. Below this voltage, the PPM will protect
     PPM.setSysPowerDownVoltage(3300);
 
-    // Set input current limit, default is 500mA
-    PPM.setInputCurrentLimit(3250);
-
-    Serial.printf("getInputCurrentLimit: %d mA\n", PPM.getInputCurrentLimit());
-
-    // Disable current limit pin
-    PPM.disableCurrentLimitPin();
-
-    // Set the charging target voltage, Range:3840 ~ 4608mV ,step:16 mV
-    PPM.setChargeTargetVoltage(4208);
-
-    // Set the precharge current , Range: 64mA ~ 1024mA ,step:64mA
-    PPM.setPrechargeCurr(64);
-
-    // The premise is that Limit Pin is disabled, or it will only follow the maximum charging current set by Limi tPin.
-    // Set the charging current , Range:0~5056mA ,step:64mA
-    PPM.setChargerConstantCurr(1024);
-
-    // Get the set charging current
-    PPM.getChargerConstantCurr();
-    Serial.printf("getChargerConstantCurr: %d mA\n", PPM.getChargerConstantCurr());
-
-
     // To obtain voltage data, the ADC must be enabled first
     PPM.enableMeasure();
 
     PPM.disableOTG();
 
-    if (battery_25896_is_vbus_in()) {
+    if (display_have_vbus()) {
+        // Configure aggressive input/charge policy only when VBUS is actually present.
+        PPM.setInputCurrentLimit(3250);
+        Serial.printf("getInputCurrentLimit: %d mA\n", PPM.getInputCurrentLimit());
+        PPM.disableCurrentLimitPin();
+        PPM.setChargeTargetVoltage(4208);
+        PPM.setPrechargeCurr(64);
+        PPM.setChargerConstantCurr(1024);
+        Serial.printf("getChargerConstantCurr: %d mA\n", PPM.getChargerConstantCurr());
         PPM.enableCharge();
         Serial.println("[PMIC] VBUS present: charging enabled");
     } else {
+        // Conservative battery-only boot: keep charger path disabled and avoid
+        // forcing high-input/high-charge startup policy.
+        PPM.setInputCurrentLimit(500);
         PPM.disableCharge();
-        Serial.println("[PMIC] battery-only: charging disabled");
+        Serial.println("[PMIC] battery-only: charging disabled; conservative startup policy");
     }
 
     // pinMode(OTG_ENABLE_PIN, OUTPUT);
