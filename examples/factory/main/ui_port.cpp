@@ -588,8 +588,8 @@ void ui_shutdown(void)
 
     epd_poweroff();
 
-    esp_sleep_enable_ext0_wakeup((gpio_num_t)BOARD_BOOT_BTN, 0);
-    esp_deep_sleep_start();
+    // Use PMIC hard power-off for shutdown (not deep sleep).
+    PPM.shutdown();
 }
 
 void ui_sleep(void)
