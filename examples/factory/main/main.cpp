@@ -191,8 +191,13 @@ void btn_task(void *param)
 #else
     int last_gpio_raw = -1;
 #endif
+#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
+    int last_pca_raw = -1;
+    Serial.println("[BUTTON] initial button_read=skipped (GPIO48 primary)");
+#else
     int last_pca_raw = button_read() ? 1 : 0;
     Serial.printf("[BUTTON] initial button_read=%d\n", last_pca_raw);
+#endif
     bool boot_btn_pressed = false;
     bool toggle_armed = false;
     enum ButtonSource { BUTTON_SRC_NONE, BUTTON_SRC_GPIO48, BUTTON_SRC_PCA9535 };
@@ -220,12 +225,14 @@ void btn_task(void *param)
         bool gpio_pressed = false;
         bool pca_pressed = false;
         int gpio_raw = -1;
-        int pca_raw = button_read() ? 1 : 0;
+        int pca_raw = -1;
 #if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
         gpio_raw = digitalRead(BOARD_IO48_BTN);
         gpio_pressed = BOARD_IO48_BTN_ACTIVE_LOW ? (gpio_raw == LOW) : (gpio_raw == HIGH);
-#endif
+#else
+        pca_raw = button_read() ? 1 : 0;
         pca_pressed = BOARD_PCA_BUTTON_ACTIVE_HIGH ? (pca_raw == HIGH) : (pca_raw == LOW);
+#endif
 
         bool raw_edge = (gpio_raw != last_gpio_raw) || (pca_raw != last_pca_raw);
         if ((now_ms - task_start_ms) < 10000U || raw_edge) {
