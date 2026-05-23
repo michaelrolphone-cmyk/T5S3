@@ -565,11 +565,14 @@ void ui_shutdown_vcom(int v)
 
 void ui_shutdown(void)
 {
+    disp_show_sleep_png_from_sd("/sleep.png");
     PPM.shutdown();
 }
 
 void ui_sleep(void)
 {
+    disp_show_sleep_png_from_sd("/sleep.png");
+
     touch.sleep();
     lora_sleep();
 
