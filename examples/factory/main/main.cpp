@@ -86,6 +86,7 @@ bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
 static volatile bool disp_force_clear_next_flush = false;
+static volatile bool disp_force_hl_white_next_update = false;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 
@@ -272,7 +273,23 @@ static void disp_flush_task(void *param)
                 }
             }
 
-            if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
+            bool force_hl_white = disp_force_hl_white_next_update;
+            disp_force_hl_white_next_update = false;
+
+            if (force_hl_white) {
+                Serial.println("[EPD] clearing high-level framebuffer to white before UI draw");
+                epd_hl_set_all_white(&hl);
+            }
+
+            if (force_hl_white)
+            {
+                epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
+                epd_poweron();
+                Serial.println("[EPD] forced full GL16 update after clear");
+                checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+                epd_poweroff();
+            }
+            else if(ui_refresh_get_mode() == UI_REFRESH_MODE_FAST)
             {
                 epd_draw_rotated_image(rener_area, displaybuffer, epd_hl_get_framebuffer(&hl));
                 epd_poweron();
@@ -370,6 +387,7 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
 void disp_request_full_clear(void)
 {
     disp_force_clear_next_flush = true;
+    disp_force_hl_white_next_update = true;
 }
 
 static void touch_cancel_current_press(const char *reason)
