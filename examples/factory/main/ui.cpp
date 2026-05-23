@@ -464,6 +464,19 @@ static bool springboard_icon_png_exists(const char *path)
     return ok;
 }
 
+static bool springboard_path_exists(const char *path)
+{
+    if (!path || !path[0]) return false;
+    int sd_ok = 0;
+    ui_test_get_sd(&sd_ok);
+    if (sd_ok != 1) return false;
+    bool ok = false;
+    if (!sd_guard_lock(1000)) return false;
+    ok = SD.exists(path);
+    sd_guard_unlock();
+    return ok;
+}
+
 static bool springboard_decode_png_to_buf(const char *path, lv_color_t *dst, char *reason, size_t reason_len)
 {
     if (!path || !dst) { lv_snprintf(reason, reason_len, "invalid_argument"); return false; }
@@ -619,11 +632,17 @@ static void springboard_build_default_layout(void)
 
 static void springboard_overlay_json_layout(void)
 {
-    int sd_ok = 0; ui_test_get_sd(&sd_ok); if (sd_ok != 1 || !springboard_icon_png_exists(SPRINGBOARD_LAYOUT_PATH)) return;
+    int sd_ok = 0; ui_test_get_sd(&sd_ok); if (sd_ok != 1 || !springboard_path_exists(SPRINGBOARD_LAYOUT_PATH)) return;
     if (!sd_guard_lock(1000)) return;
     File f = SD.open(SPRINGBOARD_LAYOUT_PATH, FILE_READ);
     if (!f) { sd_guard_unlock(); return; }
-    StaticJsonDocument<16384> doc;
+    DynamicJsonDocument doc(8192);
+    if (doc.capacity() < 8192) {
+        Serial.println("[SPRINGBOARD] layout alloc failed");
+        f.close();
+        sd_guard_unlock();
+        return;
+    }
     DeserializationError err = deserializeJson(doc, f);
     f.close(); sd_guard_unlock();
     if (err) { Serial.printf("[SPRINGBOARD] parse layout failed: %s\n", err.c_str()); return; }
