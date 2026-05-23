@@ -557,6 +557,11 @@ void ui_gps_get_speed(double *speed)
     gps_get_speed(speed);
 }
 
+void ui_gps_get_status(gps_status_t *out)
+{
+    gps_get_status(out);
+}
+
 //************************************[ screen 8 ]****************************************** shutdown
 void ui_shutdown_vcom(int v)
 {
