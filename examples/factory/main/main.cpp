@@ -98,8 +98,6 @@ static bool ui_post_event(UiEvent event)
     return xQueueSend(ui_event_q, &event, 0) == pdTRUE;
 }
 bool disp_refr_is_busy = false;
-static volatile bool disp_flush_pending = false;
-static volatile bool framebuffer_dirty = false;
 static volatile bool disp_force_clear_next_flush = false;
 enum DisplayUpdateKind {
     DISPLAY_UPDATE_NONE = 0,
@@ -108,7 +106,20 @@ enum DisplayUpdateKind {
     DISPLAY_UPDATE_BOOT_REPLACE,
     DISPLAY_UPDATE_RECOVERY_CLEAN
 };
-static volatile DisplayUpdateKind disp_pending_update_kind = DISPLAY_UPDATE_NONE;
+
+struct DisplayCmd {
+    uint32_t seq;
+    DisplayUpdateKind kind;
+    uint8_t *snapshot;
+    bool has_dirty_union;
+    lv_area_t dirty_union;
+};
+
+static constexpr uint8_t DISPLAY_SNAPSHOT_COUNT = 3;
+static uint8_t *display_snapshot_pool[DISPLAY_SNAPSHOT_COUNT] = {NULL};
+static volatile int8_t display_snapshot_owner[DISPLAY_SNAPSHOT_COUNT] = {-1, -1, -1}; // -1 free, 0 producer, 1 worker
+static QueueHandle_t display_q = NULL;
+static volatile uint32_t display_seq_counter = 0;
 static volatile uint32_t disp_last_flush_ms = 0;
 static constexpr uint32_t EPD_FRAME_SETTLE_MS = 150;
 static uint32_t disp_lvgl_flush_count = 0;
@@ -121,8 +132,7 @@ void disp_request_normal_frame(void);
 void disp_request_screen_replace(void);
 void disp_request_boot_replace(void);
 static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp);
-static void display_set_pending_update_kind(DisplayUpdateKind kind);
-static inline int display_update_kind_priority(DisplayUpdateKind kind);
+static bool publish_snapshot(DisplayUpdateKind kind, bool has_dirty_union, const lv_area_t *dirty_union);
 
 void sd_guard_init()
 {
@@ -293,44 +303,52 @@ static inline void epd_image_set_pixel_4bpp(uint8_t *buf, int32_t width, int32_t
     }
 }
 
+static void release_snapshot(uint8_t *snapshot)
+{
+    for (uint8_t i = 0; i < DISPLAY_SNAPSHOT_COUNT; ++i) {
+        if (display_snapshot_pool[i] == snapshot) {
+            display_snapshot_owner[i] = -1;
+            return;
+        }
+    }
+}
+
 static void disp_flush_task(void *param)
 {
     (void)param;
+    DisplayCmd cmd;
     while (1) {
-        if (disp_flush_pending) {
-            uint32_t now = millis();
-            if (now - disp_last_flush_ms < EPD_FRAME_SETTLE_MS) {
-                vTaskDelay(pdMS_TO_TICKS(10));
+        if (xQueueReceive(display_q, &cmd, pdMS_TO_TICKS(20)) != pdTRUE) {
+            continue;
+        }
+
+        DisplayCmd pending_reliable[8];
+        size_t pending_reliable_count = 0;
+        DisplayCmd newest_normal = cmd;
+        bool has_normal = (cmd.kind == DISPLAY_UPDATE_NORMAL_FRAME);
+
+        while (xQueueReceive(display_q, &cmd, 0) == pdTRUE) {
+            if (cmd.kind == DISPLAY_UPDATE_NORMAL_FRAME) {
+                if (has_normal) {
+                    release_snapshot(newest_normal.snapshot);
+                }
+                newest_normal = cmd;
+                has_normal = true;
                 continue;
             }
-            if (!(framebuffer_mutex && decodebuffer && displaybuffer)) {
-                Serial.println("[DISPLAY LIFECYCLE] missing framebuffer resources; update deferred");
-                vTaskDelay(pdMS_TO_TICKS(10));
-                continue;
-            }
-
-            if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-                Serial.println("[DISPLAY LIFECYCLE] framebuffer mutex timeout; update deferred");
-                vTaskDelay(pdMS_TO_TICKS(10));
-                continue;
-            }
-
-            Serial.println("[DISPLAY LIFECYCLE] settled frame");
-            memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
-            xSemaphoreGive(framebuffer_mutex);
-
-            DisplayUpdateKind kind = disp_pending_update_kind;
-            disp_pending_update_kind = DISPLAY_UPDATE_NONE;
-            disp_flush_pending = false;
-            framebuffer_dirty = false;
-
-            display_commit_frame(kind, displaybuffer);
-
-            if (framebuffer_dirty) {
-                disp_flush_pending = true;
+            if (pending_reliable_count < 8) {
+                pending_reliable[pending_reliable_count++] = cmd;
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(2));
+
+        if (has_normal) {
+            display_commit_frame(newest_normal.kind, newest_normal.snapshot);
+            release_snapshot(newest_normal.snapshot);
+        }
+        for (size_t i = 0; i < pending_reliable_count; ++i) {
+            display_commit_frame(pending_reliable[i].kind, pending_reliable[i].snapshot);
+            release_snapshot(pending_reliable[i].snapshot);
+        }
     }
 }
 
@@ -379,13 +397,11 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
             xSemaphoreGive(framebuffer_mutex);
         }
 
-        framebuffer_dirty = true;
         disp_lvgl_flush_count++;
         // printf("[disp_flush] x1:%d, y1:%d, w:%d, h:%d\n", area->x1, area->y1, w, h);
     }
     disp_last_flush_ms = millis();
-    display_set_pending_update_kind(DISPLAY_UPDATE_NORMAL_FRAME);
-    disp_flush_pending = true;
+    publish_snapshot(DISPLAY_UPDATE_NORMAL_FRAME, true, area);
     /* Inform the graphics library that you are ready with the flushing */
     lv_disp_flush_ready(disp);
 }
@@ -397,23 +413,20 @@ void disp_request_full_clear(void)
 
 void disp_request_normal_frame(void)
 {
-    display_set_pending_update_kind(DISPLAY_UPDATE_NORMAL_FRAME);
-    disp_flush_pending = true;
+    publish_snapshot(DISPLAY_UPDATE_NORMAL_FRAME, false, NULL);
 }
 
 void disp_request_screen_replace(void)
 {
     disp_force_clear_next_flush = true;
-    display_set_pending_update_kind(DISPLAY_UPDATE_SCREEN_REPLACE);
-    disp_flush_pending = true;
+    publish_snapshot(DISPLAY_UPDATE_SCREEN_REPLACE, false, NULL);
     Serial.println("[DISPLAY LIFECYCLE] screen replace requested");
 }
 
 void disp_request_boot_replace(void)
 {
     disp_force_clear_next_flush = true;
-    display_set_pending_update_kind(DISPLAY_UPDATE_BOOT_REPLACE);
-    disp_flush_pending = true;
+    publish_snapshot(DISPLAY_UPDATE_BOOT_REPLACE, false, NULL);
     Serial.println("[DISPLAY LIFECYCLE] boot replace requested");
 }
 
@@ -552,6 +565,10 @@ static void lv_port_disp_init(void)
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     framebuffer_mutex = xSemaphoreCreateMutex();
+    display_q = xQueueCreate(16, sizeof(DisplayCmd));
+    for (uint8_t i = 0; i < DISPLAY_SNAPSHOT_COUNT; ++i) {
+        display_snapshot_pool[i] = (uint8_t *)heap_caps_malloc(EPD_IMAGE_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
     if (!lv_disp_buf_1 || !lv_disp_buf_2 || !decodebuffer || !displaybuffer || !framebuffer_mutex) {
         Serial.println("[DISPLAY LIFECYCLE] FATAL: display buffers/mutex allocation failed; LVGL display not registered");
         return;
@@ -981,23 +998,56 @@ void idf_loop()
     ui_wifi_service_loop();
     delay(1);
 }
-static inline int display_update_kind_priority(DisplayUpdateKind kind)
+static bool publish_snapshot(DisplayUpdateKind kind, bool has_dirty_union, const lv_area_t *dirty_union)
 {
-    switch (kind) {
-        case DISPLAY_UPDATE_RECOVERY_CLEAN: return 4;
-        case DISPLAY_UPDATE_BOOT_REPLACE: return 3;
-        case DISPLAY_UPDATE_SCREEN_REPLACE: return 2;
-        case DISPLAY_UPDATE_NORMAL_FRAME: return 1;
-        case DISPLAY_UPDATE_NONE:
-        default: return 0;
+    if (!(framebuffer_mutex && decodebuffer && display_q)) {
+        return false;
     }
-}
+    for (uint8_t i = 0; i < DISPLAY_SNAPSHOT_COUNT; ++i) {
+        if (!display_snapshot_pool[i]) {
+            return false;
+        }
+    }
 
-static void display_set_pending_update_kind(DisplayUpdateKind kind)
-{
-    if (display_update_kind_priority(kind) > display_update_kind_priority(disp_pending_update_kind)) {
-        disp_pending_update_kind = kind;
+    int8_t slot = -1;
+    for (uint8_t i = 0; i < DISPLAY_SNAPSHOT_COUNT; ++i) {
+        if (display_snapshot_owner[i] == -1) {
+            display_snapshot_owner[i] = 0;
+            slot = (int8_t)i;
+            break;
+        }
     }
+    if (slot < 0) {
+        Serial.println("[DISPLAY LIFECYCLE] no free snapshot slot");
+        return false;
+    }
+
+    if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        display_snapshot_owner[(uint8_t)slot] = -1;
+        return false;
+    }
+    memcpy(display_snapshot_pool[(uint8_t)slot], decodebuffer, EPD_IMAGE_BUF_SIZE);
+    xSemaphoreGive(framebuffer_mutex);
+
+    DisplayCmd cmd = {
+        .seq = ++display_seq_counter,
+        .kind = kind,
+        .snapshot = display_snapshot_pool[(uint8_t)slot],
+        .has_dirty_union = has_dirty_union,
+    };
+    if (has_dirty_union && dirty_union) {
+        cmd.dirty_union = *dirty_union;
+    } else {
+        cmd.dirty_union = {.x1 = 0, .y1 = 0, .x2 = 0, .y2 = 0};
+    }
+
+    display_snapshot_owner[(uint8_t)slot] = 1;
+    if (xQueueSend(display_q, &cmd, 0) != pdTRUE) {
+        display_snapshot_owner[(uint8_t)slot] = -1;
+        Serial.println("[DISPLAY LIFECYCLE] display queue full; command dropped");
+        return false;
+    }
+    return true;
 }
 
 static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp)
