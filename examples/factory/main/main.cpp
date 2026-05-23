@@ -430,11 +430,8 @@ void btn_task(void *param)
             if (gpio_pressed) {
                 gpio_btn_pressed = true;
             } else if (gpio_btn_pressed) {
-                int bl = 0;
-                ui_setting_get_backlight(&bl);
-                int new_bl = (bl == 0) ? 1 : 0;
-                ui_setting_set_backlight(new_bl);
-                Serial.printf("[BUTTON] release source=GPIO48 old=%d new=%d gpio48=%d\n", bl, new_bl, gpio_raw);
+                ui_post_event(UiEvent::TOGGLE_BACKLIGHT);
+                Serial.printf("[BUTTON] release source=GPIO48 queued_toggle gpio48=%d\n", gpio_raw);
                 gpio_btn_pressed = false;
             }
         }
