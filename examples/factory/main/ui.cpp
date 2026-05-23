@@ -11,6 +11,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <HTTPClient.h>
+#include <PNGdec.h>
 
 /* clang-format off */
 
@@ -3943,13 +3944,26 @@ static scr_lifecycle_t screen12 = {
 #if 1
 static lv_obj_t *maps_status = NULL;
 static lv_obj_t *maps_info = NULL;
-static lv_obj_t *maps_img = NULL;
+static lv_obj_t *maps_canvas = NULL;
 static lv_obj_t *maps_marker = NULL;
 static lv_timer_t *maps_timer = NULL;
 static uint32_t maps_wifi_start_ms = 0;
 static bool maps_waiting_wifi = false;
-static int maps_zoom_try = 18;
 static const uint32_t MAPS_WIFI_TIMEOUT_MS = 20000;
+static lv_color_t *maps_canvas_buf = NULL;
+static uint16_t *maps_png_line_buf = NULL;
+static uint8_t *maps_png_raw = NULL;
+static size_t maps_png_raw_size = 0;
+static int maps_nonwhite_pixels = 0;
+static int maps_render_zoom = 18;
+static int maps_render_x = 0;
+static int maps_render_y = 0;
+static int maps_render_px = 0;
+static int maps_render_py = 0;
+static size_t maps_render_file_size = 0;
+static bool maps_render_png_magic_ok = false;
+static bool maps_render_from_cache = false;
+static char maps_render_path[128] = {0};
 
 static bool maps_coord_valid(double lat, double lon)
 {
@@ -3963,7 +3977,7 @@ static void maps_set_status(const char *txt) { if (maps_status) lv_label_set_tex
 
 static void maps_tile_for(double lat,double lon,int z,int *tx,int *ty,int *px,int *py)
 {
-    double n=(double)(1<<z);
+    double n=pow(2.0, z);
     double x=((lon+180.0)/360.0)*n;
     double r=lat*M_PI/180.0;
     double y=(1.0-log(tan(r)+1.0/cos(r))/M_PI)/2.0*n;
@@ -4005,37 +4019,135 @@ static bool maps_download_tile(const char *path, int z,int x,int y)
     return total>0;
 }
 
+static bool maps_check_png_file(const char *path, size_t *file_size, bool *magic_ok)
+{
+    *file_size = 0;
+    *magic_ok = false;
+    if (!SD.exists(path)) return false;
+    File f = SD.open(path, FILE_READ);
+    if (!f) return false;
+    *file_size = (size_t)f.size();
+    uint8_t magic[8] = {0};
+    size_t read_n = f.read(magic, sizeof(magic));
+    f.close();
+    const uint8_t expect[8] = {0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A};
+    *magic_ok = (read_n == sizeof(magic) && memcmp(magic, expect, sizeof(expect)) == 0);
+    Serial.printf("[MAP] cache_path=%s\n", path);
+    Serial.printf("[MAP] cached_file_size=%u\n", (unsigned)*file_size);
+    Serial.printf("[MAP] png_magic_ok=%d\n", *magic_ok ? 1 : 0);
+    return true;
+}
+
+static bool maps_decode_png_to_canvas(const char *path, String &decode_result)
+{
+    File f = SD.open(path, FILE_READ);
+    if (!f) { decode_result = "open_failed"; return false; }
+    size_t sz = (size_t)f.size();
+    if (sz < 16 || sz > 1024 * 1024) { f.close(); decode_result = "size_invalid"; return false; }
+    if (maps_png_raw) { free(maps_png_raw); maps_png_raw = NULL; maps_png_raw_size = 0; }
+    maps_png_raw = (uint8_t*)ps_malloc(sz);
+    if (!maps_png_raw) { f.close(); decode_result = "psram_alloc_failed"; return false; }
+    size_t n = f.read(maps_png_raw, sz);
+    f.close();
+    if (n != sz) { decode_result = "read_failed"; return false; }
+    maps_png_raw_size = sz;
+    PNG png;
+    int rc = png.openRAM(maps_png_raw, (int)maps_png_raw_size, NULL);
+    if (rc != PNG_SUCCESS) { decode_result = "open_png_failed"; return false; }
+    if (png.getWidth() != 256 || png.getHeight() != 256) { png.close(); decode_result = "tile_not_256"; return false; }
+    maps_nonwhite_pixels = 0;
+    for (int y = 0; y < 256; ++y) {
+        PNGDRAW draw;
+        memset(&draw, 0, sizeof(draw));
+        draw.iWidth = 256;
+        draw.y = y;
+        draw.pPixels = NULL;
+        rc = png.decode(NULL, y);
+        if (rc != PNG_SUCCESS) { png.close(); decode_result = "decode_failed"; return false; }
+        png.getLineAsRGB565(&draw, maps_png_line_buf, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
+        for (int x = 0; x < 256; ++x) {
+            uint16_t c = maps_png_line_buf[x];
+            int r = ((c >> 11) & 0x1F) * 255 / 31;
+            int g = ((c >> 5) & 0x3F) * 255 / 63;
+            int b = (c & 0x1F) * 255 / 31;
+            int gray = (299 * r + 587 * g + 114 * b) / 1000;
+            bool black = gray < 180;
+            if (black) maps_nonwhite_pixels++;
+            maps_canvas_buf[y * 256 + x] = black ? lv_color_black() : lv_color_white();
+        }
+    }
+    png.close();
+    lv_canvas_set_buffer(maps_canvas, maps_canvas_buf, 256, 256, LV_IMG_CF_TRUE_COLOR);
+    lv_obj_invalidate(maps_canvas);
+    decode_result = "ok";
+    Serial.printf("[MAP] nonwhite_pixels=%d\n", maps_nonwhite_pixels);
+    return true;
+}
+
+static void maps_write_debug(double lat, double lon, const char *source, const char *decode_result)
+{
+    File latest = SD.open("/cache/maps/latest.png", FILE_WRITE);
+    if (latest) {
+        File src = SD.open(maps_render_path, FILE_READ);
+        if (src) { uint8_t b[512]; while (src.available()) { size_t n=src.read(b,sizeof(b)); if(n) latest.write(b,n); else break; } src.close(); }
+        latest.close();
+    }
+    File dbg = SD.open("/cache/maps/latest_debug.txt", FILE_WRITE);
+    if (dbg) {
+        dbg.printf("lat=%.6f\nlon=%.6f\nzoom=%d\ntile_x=%d\ntile_y=%d\npixel_x=%d\npixel_y=%d\nsource=%s\nfile_size=%u\npng_magic_ok=%d\ndecode_result=%s\n",
+                   lat, lon, maps_render_zoom, maps_render_x, maps_render_y, maps_render_px, maps_render_py, source,
+                   (unsigned)maps_render_file_size, maps_render_png_magic_ok ? 1 : 0, decode_result);
+        dbg.close();
+    }
+}
+
 static bool maps_try_render(double lat,double lon)
 {
-    int x,y,px,py; maps_tile_for(lat,lon,maps_zoom_try,&x,&y,&px,&py);
-    char tile[96]; lv_snprintf(tile,sizeof(tile),"/cache/maps/%d/%d/%d.png",maps_zoom_try,x,y);
-    Serial.printf("[MAP] tile z=%d x=%d y=%d px=%d py=%d\n",maps_zoom_try,x,y,px,py);
-    bool has_sd = SD.begin();
-    bool cache_hit = has_sd && SD.exists(tile);
-    if(cache_hit){ Serial.printf("[MAP] cache hit %s\n",tile); maps_set_status("Tile loaded from SD cache"); }
-    if(!cache_hit){
-        Serial.printf("[MAP] cache miss %s\n",tile);
-        if (WiFi.status()!=WL_CONNECTED){
-            wifi_load_saved_settings();
-            if(wifi_sta_ssid.length()==0){ maps_set_status("No saved WiFi credentials. Open WiFi Settings first."); return false; }
-            if(!maps_waiting_wifi){ maps_wifi_start_ms=millis(); maps_waiting_wifi=true; maps_set_status("Connecting WiFi..."); wifi_connect_saved_sta("maps tile download"); }
-            return false;
+    const int zooms[] = {18,17,16};
+    for (size_t zi = 0; zi < ARRAY_LEN(zooms); ++zi) {
+        int z = zooms[zi];
+        int x,y,px,py; maps_tile_for(lat,lon,z,&x,&y,&px,&py);
+        char tile[96]; lv_snprintf(tile,sizeof(tile),"/cache/maps/%d/%d/%d.png",z,x,y);
+        bool has_sd = SD.begin();
+        bool cache_hit = has_sd && SD.exists(tile);
+        if(!cache_hit){
+            if (WiFi.status()!=WL_CONNECTED){
+                wifi_load_saved_settings();
+                if(wifi_sta_ssid.length()==0){ maps_set_status("No saved WiFi credentials. Open WiFi Settings first."); return false; }
+                if(!maps_waiting_wifi){ maps_wifi_start_ms=millis(); maps_waiting_wifi=true; maps_set_status("Connecting WiFi..."); wifi_connect_saved_sta("maps tile download"); }
+                return false;
+            }
+            if(!has_sd){ maps_set_status("SD unavailable: tile not cached."); return false; }
+            maps_cache_dirs(z,x);
+            if(!maps_download_tile(tile,z,x,y)){ maps_set_status("map tile unavailable offline"); continue; }
         }
-        if(!has_sd){ maps_set_status("SD unavailable: tile not cached."); return false; }
-        maps_cache_dirs(maps_zoom_try,x);
-        if(!maps_download_tile(tile,maps_zoom_try,x,y)){ maps_set_status("map tile unavailable offline"); return false; }
-        maps_set_status("Tile saved to SD");
+        maps_render_zoom=z; maps_render_x=x; maps_render_y=y; maps_render_px=px; maps_render_py=py; maps_render_from_cache=cache_hit;
+        lv_snprintf(maps_render_path, sizeof(maps_render_path), "%s", tile);
+        if (!maps_check_png_file(tile, &maps_render_file_size, &maps_render_png_magic_ok) || maps_render_file_size <= 100 || !maps_render_png_magic_ok) continue;
+        String decode_result;
+        bool decoded = maps_decode_png_to_canvas(tile, decode_result);
+        maps_write_debug(lat, lon, cache_hit ? "cache" : "download", decode_result.c_str());
+        lv_obj_align(maps_canvas, LV_ALIGN_TOP_MID, 0, 130);
+        int sx = lv_obj_get_x(maps_canvas) + maps_render_px;
+        int sy = lv_obj_get_y(maps_canvas) + maps_render_py;
+        lv_obj_set_pos(maps_marker, sx - 16, sy - 16);
+        if (!decoded) {
+            maps_set_status("Tile downloaded but PNG decode/render failed.");
+        } else if (maps_nonwhite_pixels < 32) {
+            maps_set_status("Tile appears blank; trying lower zoom...");
+            continue;
+        } else {
+            maps_set_status(cache_hit ? "Tile loaded from SD cache" : "Tile downloaded");
+            lv_snprintf(md_text_buf, sizeof(md_text_buf), "lat=%.6f lon=%.6f\nzoom=%d tile=%d/%d/%d\npx/py=%d/%d\nsource=%s size=%u\npath=%s",
+                        lat, lon, z, z, x, y, px, py, cache_hit ? "cache" : "download", (unsigned)maps_render_file_size, tile);
+            lv_label_set_text(maps_info, md_text_buf);
+            return true;
+        }
+        lv_snprintf(md_text_buf, sizeof(md_text_buf), "Tile downloaded but PNG decode/render failed.\nlat=%.6f lon=%.6f\nz/x/y=%d/%d/%d px/py=%d/%d\nsource=%s size=%u\npath=%s",
+                    lat, lon, z, x, y, px, py, cache_hit ? "cache" : "download", (unsigned)maps_render_file_size, tile);
+        lv_label_set_text(maps_info, md_text_buf);
     }
-    lv_img_set_src(maps_img, tile);
-    lv_obj_set_size(maps_img, 512, 512);
-    lv_obj_align(maps_img, LV_ALIGN_TOP_MID, 0, 130);
-    int sx = lv_obj_get_x(maps_img) + (px * 512) / 256;
-    int sy = lv_obj_get_y(maps_img) + (py * 512) / 256;
-    lv_obj_set_pos(maps_marker, sx - 16, sy - 16);
-    lv_snprintf(md_text_buf, sizeof(md_text_buf), "lat=%.6f lon=%.6f\nzoom=%d tile=%d/%d/%d\nsource=%s\n© OpenStreetMap contributors", lat, lon, maps_zoom_try, maps_zoom_try, x, y, cache_hit?"cache":"download");
-    lv_label_set_text(maps_info, md_text_buf);
-    Serial.println("[MAP] render complete");
-    return true;
+    return false;
 }
 
 static void maps_timer_cb(lv_timer_t *t)
@@ -4054,18 +4166,37 @@ static void maps_timer_cb(lv_timer_t *t)
     if(!maps_coord_valid(lat,lon)){ maps_set_status("Waiting for GPS fix..."); return; }
     if(maps_try_render(lat,lon)){ lv_timer_del(maps_timer); maps_timer=NULL; return; }
 }
-
 static void maps_back(lv_event_t *e){ if(e->code==LV_EVENT_CLICKED) scr_mgr_pop(false);}
 static void create13(lv_obj_t *p){
     scr_back_btn_create(p, "Maps", maps_back);
     maps_status=lv_label_create(p); lv_obj_align(maps_status, LV_ALIGN_TOP_LEFT, 20, 80); lv_obj_set_width(maps_status, lv_pct(95));
-    maps_img=lv_img_create(p);
+    maps_canvas=lv_canvas_create(p);
+    lv_obj_set_size(maps_canvas, 256, 256);
+    lv_obj_set_style_bg_color(maps_canvas, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(maps_canvas, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(maps_canvas, 2, 0);
+    lv_obj_set_style_border_color(maps_canvas, lv_color_black(), 0);
+    lv_obj_align(maps_canvas, LV_ALIGN_TOP_MID, 0, 130);
+    if (!maps_canvas_buf) maps_canvas_buf = (lv_color_t *)ps_malloc(256 * 256 * sizeof(lv_color_t));
+    if (!maps_png_line_buf) maps_png_line_buf = (uint16_t *)ps_malloc(256 * sizeof(uint16_t));
+    if (maps_canvas_buf) {
+        lv_canvas_set_buffer(maps_canvas, maps_canvas_buf, 256, 256, LV_IMG_CF_TRUE_COLOR);
+        lv_canvas_fill_bg(maps_canvas, lv_color_white(), LV_OPA_COVER);
+        lv_draw_line_dsc_t line; lv_draw_line_dsc_init(&line); line.color = lv_color_black(); line.width = 2;
+        lv_point_t d1[2] = {{0,0},{255,255}}; lv_point_t d2[2] = {{255,0},{0,255}};
+        lv_canvas_draw_line(maps_canvas, d1, 2, &line);
+        lv_canvas_draw_line(maps_canvas, d2, 2, &line);
+        lv_draw_rect_dsc_t rect; lv_draw_rect_dsc_init(&rect); rect.border_color=lv_color_black(); rect.border_width=2; rect.bg_opa=LV_OPA_TRANSP;
+        lv_canvas_draw_rect(maps_canvas, 0, 0, 256, 256, &rect);
+        lv_draw_label_dsc_t lab; lv_draw_label_dsc_init(&lab); lab.color=lv_color_black();
+        lv_canvas_draw_text(maps_canvas, 10, 8, 236, &lab, "MAP RENDER TEST");
+    }
     maps_marker=lv_obj_create(p); lv_obj_set_size(maps_marker, 32, 32); lv_obj_set_style_radius(maps_marker, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_opa(maps_marker, LV_OPA_TRANSP, 0); lv_obj_set_style_border_width(maps_marker, 3, 0);
     maps_info=lv_label_create(p); lv_obj_align(maps_info, LV_ALIGN_BOTTOM_LEFT, 20, -30); lv_obj_set_width(maps_info, lv_pct(95));
 }
-static void entry13(void){ Serial.println("[MAP] entry"); ui_gps_task_resume(); maps_zoom_try=18; maps_waiting_wifi=false; maps_set_status("Waiting for GPS fix..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 2500, NULL); lv_timer_ready(maps_timer);}
+static void entry13(void){ Serial.println("[MAP] entry"); ui_gps_task_resume(); maps_waiting_wifi=false; maps_set_status("Waiting for GPS fix..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 2500, NULL); lv_timer_ready(maps_timer);}
 static void exit13(void){ if(maps_timer){ lv_timer_del(maps_timer); maps_timer=NULL; } maps_waiting_wifi=false; }
-static void destroy13(void){}
+static void destroy13(void){ if(maps_canvas_buf){ free(maps_canvas_buf); maps_canvas_buf=NULL; } if(maps_png_line_buf){ free(maps_png_line_buf); maps_png_line_buf=NULL; } if(maps_png_raw){ free(maps_png_raw); maps_png_raw=NULL; maps_png_raw_size=0; } }
 static scr_lifecycle_t screen13 = {.create=create13,.entry=entry13,.exit=exit13,.destroy=destroy13};
 #endif
 
