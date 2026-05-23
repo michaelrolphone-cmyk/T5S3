@@ -105,6 +105,10 @@ bool gps_init(void)
 
 void gps_service_loop(void)
 {
+    if (!gps_ready) {
+        return;
+    }
+
     if (GPS_BRIDGE_SERIAL_INPUT) {
         while (Serial.available()) {
             SerialGPS.write(Serial.read());
@@ -219,6 +223,15 @@ void gps_task_create(void)
     size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     Serial.printf("[GPS TASK] create parser pre free_internal=%u largest_internal=%u free_psram=%u\n",
                   (unsigned)free_internal, (unsigned)largest_internal, (unsigned)free_psram);
+
+    static const size_t GPS_PARSER_MIN_LARGEST_INTERNAL = 3072;
+    if (largest_internal < GPS_PARSER_MIN_LARGEST_INTERNAL) {
+        Serial.println("[GPS TASK WARN] insufficient internal heap for parser task; using polling parser");
+        Serial.println("[GPS TASK WARN] parser task create failed; using polling parser");
+        Serial.println("[GPS] hardware init ok; parser mode=polling");
+        gps_logger_ready = false;
+        return;
+    }
 
     BaseType_t parser_rc = xTaskCreate(gps_task, "gps_task", 1024 * 3, NULL, GPS_PRIORITY, &gps_handle);
     Serial.printf("[GPS TASK] parser create rc=%d handle=%p\n", (int)parser_rc, gps_handle);
