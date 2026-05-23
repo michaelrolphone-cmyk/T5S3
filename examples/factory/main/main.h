@@ -84,6 +84,9 @@ void disp_full_clean(void);
 void dips_clean(void);
 void disp_refresh_screen(void);
 void disp_request_full_clear(void);
+void sd_guard_init();
+bool sd_guard_lock(uint32_t timeout_ms);
+void sd_guard_unlock();
 
 void indev_touch_en();
 void indev_touch_dis();
