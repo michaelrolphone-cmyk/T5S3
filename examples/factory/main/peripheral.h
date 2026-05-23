@@ -33,6 +33,7 @@ void lora_param_set(void);
 // gps u-blox m10q
 bool gps_init(void);
 void gps_task_create(void);
+void gps_service_loop(void);
 uint32_t gps_get_charsProcessed(void);
 void gps_task_suspend(void);
 void gps_task_resume(void);
