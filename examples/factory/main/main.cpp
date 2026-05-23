@@ -237,14 +237,19 @@ void btn_task(void *param)
         last_gpio_raw = gpio_raw;
         last_pca_raw = pca_raw;
 
-        bool any_pressed = gpio_pressed || pca_pressed;
+        bool any_pressed = false;
         ButtonSource active_source = BUTTON_SRC_NONE;
+#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
+        any_pressed = gpio_pressed;
         if (gpio_pressed) {
             active_source = BUTTON_SRC_GPIO48;
         }
-        else if (pca_pressed) {
+#else
+        any_pressed = pca_pressed;
+        if (pca_pressed) {
             active_source = BUTTON_SRC_PCA9535;
         }
+#endif
 
         if (any_pressed != candidate_pressed) {
             candidate_pressed = any_pressed;
