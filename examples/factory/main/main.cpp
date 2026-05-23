@@ -80,6 +80,7 @@ static lv_indev_t *touch_indev = NULL;
 bool disp_refr_is_busy = false;
 static volatile bool disp_flush_pending = false;
 static volatile bool framebuffer_dirty = false;
+static volatile bool disp_force_clear_next_flush = false;
 static TaskHandle_t disp_flush_handle = NULL;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 
@@ -313,6 +314,22 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
         int32_t h = lv_area_get_height(area);
         int32_t screen_w = epd_rotated_display_width();
         int32_t screen_h = epd_rotated_display_height();
+
+        bool full_area =
+            area->x1 == 0 &&
+            area->y1 == 0 &&
+            area->x2 == screen_w - 1 &&
+            area->y2 == screen_h - 1;
+
+        bool force_clear_this_flush = disp_force_clear_next_flush;
+
+        if (force_clear_this_flush || full_area) {
+            memset(decodebuffer, 0x00, EPD_IMAGE_BUF_SIZE);
+            disp_force_clear_next_flush = false;
+            Serial.printf("[LVGL flush] logical framebuffer cleared full=%d force=%d\n",
+                          full_area, force_clear_this_flush);
+        }
+
         for(int32_t y = 0; y < h; y++) {
             int32_t dst_y = area->y1 + y;
             if(dst_y < 0 || dst_y >= screen_h) continue;
@@ -350,7 +367,7 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
 
 void disp_request_full_clear(void)
 {
-    // No-op. Display pipeline restored to known-good full-refresh behavior.
+    disp_force_clear_next_flush = true;
 }
 
 static void touch_cancel_current_press(const char *reason)
