@@ -122,9 +122,9 @@ struct DisplayCmd {
     lv_area_t dirty_union;
 };
 
-static constexpr uint8_t DISPLAY_SNAPSHOT_COUNT = 1;
+static constexpr uint8_t DISPLAY_SNAPSHOT_COUNT = 3;
 static uint8_t *display_snapshot_pool[DISPLAY_SNAPSHOT_COUNT] = {NULL};
-static volatile int8_t display_snapshot_owner[DISPLAY_SNAPSHOT_COUNT] = {-1}; // -1 free, 0 producer, 1 worker
+static volatile int8_t display_snapshot_owner[DISPLAY_SNAPSHOT_COUNT] = {-1, -1, -1}; // -1 free, 0 producer, 1 worker
 static QueueHandle_t display_q = NULL;
 static SemaphoreHandle_t display_snapshot_mutex = NULL;
 static volatile uint32_t display_seq_counter = 0;
@@ -752,7 +752,7 @@ static void lv_port_disp_init(void)
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     framebuffer_mutex = xSemaphoreCreateMutex();
-    display_q = xQueueCreate(1, sizeof(DisplayCmd));
+    display_q = xQueueCreate(8, sizeof(DisplayCmd));
     display_snapshot_mutex = xSemaphoreCreateMutex();
     bool snapshot_pool_ok = true;
     for (uint8_t i = 0; i < DISPLAY_SNAPSHOT_COUNT; ++i) {
@@ -1325,9 +1325,9 @@ static bool publish_snapshot(DisplayUpdateKind kind, bool has_dirty_union, const
     }
     display_snapshot_owner[(uint8_t)slot] = 1;
     xSemaphoreGive(display_snapshot_mutex);
-    if (xQueueOverwrite(display_q, &cmd) != pdTRUE) {
+    if (xQueueSend(display_q, &cmd, 0) != pdTRUE) {
         release_snapshot(cmd.seq, cmd.snapshot);
-        Serial.println("[DISPLAY LIFECYCLE] display queue overwrite failed; command dropped");
+        Serial.println("[DISPLAY LIFECYCLE] display queue full; command dropped");
         return false;
     }
     Serial.printf("[DISPLAY QUEUE] publish seq=%lu kind=%d\n", (unsigned long)cmd.seq, (int)cmd.kind);
@@ -1390,14 +1390,21 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         Serial.println("[DISPLAY LIFECYCLE] FAST/DU disabled; using GL16 safe mode");
     }
 
-    bool do_hard_clean = (kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_SCREEN_REPLACE);
+    bool do_hard_clean = (kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_BOOT_REPLACE);
     if (kind == DISPLAY_UPDATE_RECOVERY_CLEAN && !display_safe_for_recovery_clean()) {
         Serial.println("[EPD POWER] recovery clean downgraded to single GL16 replacement");
         do_hard_clean = false;
     }
-    if (kind == DISPLAY_UPDATE_SCREEN_REPLACE && !display_safe_for_hard_clean()) {
+    if (kind == DISPLAY_UPDATE_SCREEN_REPLACE && !display_safe_for_recovery_clean()) {
         Serial.println("[EPD POWER] screen replace hard clean downgraded to single GL16 replacement");
         do_hard_clean = false;
+    }
+    if (kind == DISPLAY_UPDATE_BOOT_REPLACE && !display_safe_for_recovery_clean()) {
+        Serial.println("[EPD POWER] boot replace hard clean downgraded to single GL16 replacement");
+        do_hard_clean = false;
+    }
+    if (kind == DISPLAY_UPDATE_BOOT_REPLACE) {
+        do_hard_clean = do_hard_clean || display_safe_for_recovery_clean();
     }
 
     if (do_hard_clean) {
@@ -1429,6 +1436,11 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         vTaskDelay(pdMS_TO_TICKS(20));
         epd_poweroff();
         Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame complete (post-clean)");
+        if (home_waiting_for_redraw_commit &&
+            (kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_BOOT_REPLACE)) {
+            home_waiting_for_redraw_commit = false;
+            Serial.println("[HOME REDRAW] guard released after physical commit (post-clean)");
+        }
         return;
     }
     if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE) {
@@ -1450,7 +1462,7 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame complete");
         if (home_waiting_for_redraw_commit && (kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN)) {
             home_waiting_for_redraw_commit = false;
-            Serial.println("[HOME REDRAW] replacement frame committed; touch may resume after guard");
+            Serial.println("[HOME REDRAW] guard released after physical commit");
         }
         return;
     }
