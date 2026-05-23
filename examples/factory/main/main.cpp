@@ -720,6 +720,9 @@ static bool screen_init(void)
     );
 
     epd_hl_set_all_white(&hl);
+    epd_poweron();
+    epd_clear();
+    epd_poweroff();
 
     // The display bus settings for V7 may be conservative, you can manually
     // override the bus speed to tune for speed, i.e., if you set the PSRAM speed
@@ -1018,7 +1021,7 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
     if (ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) {
         Serial.println("[DISPLAY LIFECYCLE] FAST/DU disabled; using GL16 safe mode");
     }
-    if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN) {
+    if (kind == DISPLAY_UPDATE_RECOVERY_CLEAN) {
         disp_replace_commit_count++;
         Serial.println("[DISPLAY LIFECYCLE] physical white erase begin");
         epd_hl_set_all_white(&hl);
@@ -1026,11 +1029,26 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
         epd_poweroff();
         Serial.println("[DISPLAY LIFECYCLE] physical white erase complete");
+        Serial.println("[DISPLAY LIFECYCLE] recovery replacement GL16 frame begin");
+        epd_hl_set_all_white(&hl);
+        epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
+        epd_poweron();
+        vTaskDelay(pdMS_TO_TICKS(50));
+        checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+        vTaskDelay(pdMS_TO_TICKS(20));
+        epd_poweroff();
+        Serial.println("[DISPLAY LIFECYCLE] recovery replacement GL16 frame complete");
+        return;
+    }
+    if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE) {
+        disp_replace_commit_count++;
         Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame begin");
         epd_hl_set_all_white(&hl);
         epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
         epd_poweron();
+        vTaskDelay(pdMS_TO_TICKS(50));
         checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+        vTaskDelay(pdMS_TO_TICKS(20));
         epd_poweroff();
         Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame complete");
         return;
@@ -1038,7 +1056,9 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
     epd_hl_set_all_white(&hl);
     epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
     epd_poweron();
+    vTaskDelay(pdMS_TO_TICKS(50));
     checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+    vTaskDelay(pdMS_TO_TICKS(20));
     epd_poweroff();
     Serial.println("[DISPLAY LIFECYCLE] normal full GL16 frame complete");
 }
