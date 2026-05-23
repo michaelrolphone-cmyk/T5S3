@@ -96,6 +96,7 @@ void indev_touch_dis();
 void touch_begin_home_transition_guard(uint32_t min_block_ms);
 bool touch_home_transition_guard_active(void);
 bool touch_reject_stale_home_event(void);
+bool ui_is_ui_thread(void);
 
 // Touch
 extern TouchDrvGT911 touch;
