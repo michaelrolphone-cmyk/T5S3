@@ -94,6 +94,7 @@ void ui_set_rotation(lv_disp_rot_t rot)
     // LV_DISP_ROT_180,
     // LV_DISP_ROT_270
     lv_disp_set_rotation(lv_disp_get_default(), rot);
+    disp_request_screen_replace();
 }
 
 //************************************[ screen 1 ]****************************************** clock
