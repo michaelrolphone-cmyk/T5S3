@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Web Apps Launcher</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --fg: #102a43;
+      --card: #ffffff;
+      --muted: #486581;
+      --accent: #334e68;
+    }
+    body { margin: 0; background: var(--bg); color: var(--fg); font-family: Arial, sans-serif; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+    h1 { margin: 0 0 8px; }
+    p { color: var(--muted); margin: 0 0 16px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 12px;
+    }
+    .app-card {
+      display: block;
+      text-decoration: none;
+      color: inherit;
+      background: var(--card);
+      border-radius: 8px;
+      border: 1px solid #d9e2ec;
+      padding: 14px;
+      box-shadow: 0 1px 4px rgba(16,42,67,0.12);
+      transition: transform 0.12s ease, box-shadow 0.12s ease;
+    }
+    .app-card:hover, .app-card:focus {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 10px rgba(16,42,67,0.16);
+      outline: none;
+    }
+    .app-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 6px; color: var(--accent); }
+    .app-desc { font-size: 0.92rem; color: var(--muted); }
+    .pill {
+      display: inline-block;
+      margin-top: 10px;
+      font-size: 0.76rem;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: #d9e2ec;
+      color: #243b53;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Web Apps Launcher</h1>
+    <p>Select a tool to open. Add new cards over time as more static apps are included in this webroot.</p>
+
+    <div class="grid" id="appsGrid"></div>
+  </div>
+
+  <script>
+    const apps = [
+      {
+        name: 'GPS Day Route Replay',
+        href: './RouteReplay.html',
+        description: 'Upload GPS CSV logs, choose a day, replay the route, or view the total path on a map.',
+        status: 'Available'
+      }
+    ];
+
+    const grid = document.getElementById('appsGrid');
+    apps.forEach((app) => {
+      const card = document.createElement('a');
+      card.className = 'app-card';
+      card.href = app.href;
+      card.innerHTML = `
+        <div class="app-title">${app.name}</div>
+        <div class="app-desc">${app.description}</div>
+        <span class="pill">${app.status}</span>
+      `;
+      grid.appendChild(card);
+    });
+  </script>
+</body>
+</html>
