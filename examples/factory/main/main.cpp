@@ -1906,7 +1906,24 @@ static bool display_safe_for_recovery_clean()
 
 static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp)
 {
-    bool ok = false;
+    struct PhysicalDisplayCommitGuard {
+        bool locked = false;
+        explicit PhysicalDisplayCommitGuard(SemaphoreHandle_t mtx)
+        {
+            if (mtx && xSemaphoreTake(mtx, pdMS_TO_TICKS(30000)) == pdTRUE) {
+                locked = true;
+                display_physical_commit_active = true;
+            }
+        }
+        ~PhysicalDisplayCommitGuard()
+        {
+            if (locked) {
+                display_physical_commit_active = false;
+                xSemaphoreGive(physical_display_mutex);
+            }
+        }
+    };
+
     if (kind == DISPLAY_UPDATE_NONE) {
         Serial.println("[DISPLAY LIFECYCLE] no pending update; skipping physical commit");
         return false;
@@ -1923,11 +1940,12 @@ static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         Serial.println("[DISPLAY LOCK] physical display mutex unavailable");
         return false;
     }
-    if (xSemaphoreTake(physical_display_mutex, pdMS_TO_TICKS(30000)) != pdTRUE) {
+
+    PhysicalDisplayCommitGuard guard(physical_display_mutex);
+    if (!guard.locked) {
         Serial.println("[DISPLAY LOCK] physical display lock timeout");
         return false;
     }
-    display_physical_commit_active = true;
     Serial.printf("[DISPLAY LOCK] acquired kind=%d\n", (int)kind);
     EpdRect full_area = {.x = 0, .y = 0, .width = epd_rotated_display_width(), .height = epd_rotated_display_height()};
     disp_physical_commit_count++;
@@ -2005,8 +2023,9 @@ static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
             home_waiting_for_redraw_commit = false;
             Serial.println("[HOME REDRAW] guard released after physical commit (post-clean)");
         }
-        ok = (gc16_err == EPD_DRAW_SUCCESS && gl16_err == EPD_DRAW_SUCCESS);
-        goto done;
+        bool ok = (gc16_err == EPD_DRAW_SUCCESS && gl16_err == EPD_DRAW_SUCCESS);
+        Serial.printf("[DISPLAY LOCK] released kind=%d ok=%d\n", (int)kind, ok ? 1 : 0);
+        return ok;
     }
     if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_SHUTDOWN_IMAGE) {
         disp_replace_commit_count++;
@@ -2031,8 +2050,9 @@ static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
             home_waiting_for_redraw_commit = false;
             Serial.println("[HOME REDRAW] guard released after physical commit");
         }
-        ok = (gl16_err == EPD_DRAW_SUCCESS);
-        goto done;
+        bool ok = (gl16_err == EPD_DRAW_SUCCESS);
+        Serial.printf("[DISPLAY LOCK] released kind=%d ok=%d\n", (int)kind, ok ? 1 : 0);
+        return ok;
     }
     epd_hl_set_all_white(&hl);
     epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
@@ -2049,10 +2069,7 @@ static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
     vTaskDelay(pdMS_TO_TICKS(20));
     epd_poweroff();
     Serial.println("[DISPLAY LIFECYCLE] normal full GL16 frame complete");
-    ok = (gl16_err == EPD_DRAW_SUCCESS);
-done:
-    display_physical_commit_active = false;
-    xSemaphoreGive(physical_display_mutex);
+    bool ok = (gl16_err == EPD_DRAW_SUCCESS);
     Serial.printf("[DISPLAY LOCK] released kind=%d ok=%d\n", (int)kind, ok ? 1 : 0);
     return ok;
 }
