@@ -4650,7 +4650,8 @@ static bool maps_worker_ready = false;
 static bool maps_download_inflight = false;
 static uint32_t maps_request_id_next = 1;
 static uint32_t maps_request_id_inflight = 0;
-static const uint32_t MAPS_WORKER_STACK_BYTES = 4096;
+static const uint32_t MAPS_WORKER_STACK_BYTES = 3072;
+static const uint32_t MAPS_WORKER_STACK_SAFETY_BYTES = 1024;
 static void maps_tile_worker_task(void *param);
 
 static void maps_render_reset(void)
@@ -4672,7 +4673,11 @@ void ui_maps_worker_init_early(void)
 
     BaseType_t rc = pdPASS;
     if (!maps_tile_worker_handle) {
-        if (maps_tile_request_q && maps_tile_result_q) {
+        if (largest_internal < (MAPS_WORKER_STACK_BYTES + MAPS_WORKER_STACK_SAFETY_BYTES)) {
+            rc = pdFAIL;
+            Serial.printf("[MAP ERROR] worker skipped low internal heap free=%u largest=%u\n",
+                          (unsigned)free_internal, (unsigned)largest_internal);
+        } else if (maps_tile_request_q && maps_tile_result_q) {
             rc = xTaskCreate(maps_tile_worker_task, "maps_tile_worker", MAPS_WORKER_STACK_BYTES, NULL, 1, &maps_tile_worker_handle);
         } else {
             rc = pdFAIL;

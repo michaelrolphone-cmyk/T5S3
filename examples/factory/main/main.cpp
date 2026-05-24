@@ -138,7 +138,7 @@ static uint32_t disp_lvgl_flush_count = 0;
 static uint32_t disp_physical_commit_count = 0;
 static uint32_t disp_replace_commit_count = 0;
 static TaskHandle_t disp_flush_handle = NULL;
-static constexpr uint32_t DISP_FLUSH_STACK_BYTES = 8 * 1024;
+static constexpr uint32_t DISP_FLUSH_STACK_BYTES = 4 * 1024;
 static StackType_t disp_flush_stack[DISP_FLUSH_STACK_BYTES / sizeof(StackType_t)];
 static StaticTask_t disp_flush_task_tcb;
 static volatile bool disp_flush_task_started = false;
@@ -754,7 +754,7 @@ static void disp_flush_task(void *param)
             Serial.printf("[DISPLAY QUEUE] commit reliable seq=%lu kind=%d\n",
                           (unsigned long)pending_reliable.seq, (int)pending_reliable.kind);
             UBaseType_t hwm_before = uxTaskGetStackHighWaterMark(NULL);
-            if (hwm_before < 256) {
+            if (hwm_before < 768) {
                 Serial.printf("[DISPLAY TASK WARN] low stack high water mark=%lu\n", (unsigned long)hwm_before);
             }
             Serial.printf("[DISPLAY TASK] before_commit stack_hwm=%lu\n", (unsigned long)hwm_before);
@@ -776,7 +776,7 @@ static void disp_flush_task(void *param)
             Serial.printf("[DISPLAY QUEUE] commit normal seq=%lu kind=%d\n",
                           (unsigned long)pending_normal.seq, (int)pending_normal.kind);
             UBaseType_t hwm_before = uxTaskGetStackHighWaterMark(NULL);
-            if (hwm_before < 256) {
+            if (hwm_before < 768) {
                 Serial.printf("[DISPLAY TASK WARN] low stack high water mark=%lu\n", (unsigned long)hwm_before);
             }
             Serial.printf("[DISPLAY TASK] before_commit stack_hwm=%lu\n", (unsigned long)hwm_before);
@@ -1510,8 +1510,6 @@ void idf_setup()
     boot_heap_checkpoint("before_screen_init");
     screen_init();
     boot_heap_checkpoint("after_screen_init");
-    ui_maps_worker_init_early();
-    boot_heap_checkpoint("after_maps_worker_early");
     io_extend_lora_gps_power_on(true);
 
     int cursor_x = 100;
@@ -1566,7 +1564,15 @@ void idf_setup()
     cursor_y = epd_rotated_display_height() / 2 - 100 + 250;
     disp_init_status("SD Card Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_SD_CARD]);
 
+    xTaskCreate(btn_task, "lora_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
+    boot_heap_checkpoint("after_lora_task");
+
+    boot_heap_checkpoint("before_maps_worker");
+    ui_maps_worker_init_early();
+    boot_heap_checkpoint("after_maps_worker");
+
     printf("LVGL Init\n");
+    boot_heap_checkpoint("before_lvgl");
     lv_port_disp_init();
     Serial.println("[BOOT] after lv_port_disp_init()");
     boot_heap_checkpoint("after_lv_port_disp_init");
@@ -1584,8 +1590,6 @@ void idf_setup()
     cursor_y = epd_rotated_display_height() / 2 - 100 +300;
     disp_init_status("GPS Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_GPS]);
 
-    // task
-    xTaskCreate(btn_task, "lora_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
 }
 
 bool ui_is_ui_thread()
