@@ -12,6 +12,7 @@
 #include <DNSServer.h>
 #include <HTTPClient.h>
 #include <PNGdec.h>
+#include <ArduinoJson.h>
 
 /* clang-format off */
 
@@ -352,6 +353,10 @@ void ui_list_btn_create(lv_obj_t *parent, lv_event_cb_t event_cb)
 #if 1
 static const int SPRINGBOARD_ICON_W = 150;
 static const int SPRINGBOARD_ICON_H = 150;
+static const int SPRINGBOARD_MAX_ICONS = 32;
+static const int SPRINGBOARD_MAX_ICON_ALIASES = 4;
+static const int SPRINGBOARD_MAX_PATH_LEN = 128;
+static const char *SPRINGBOARD_LAYOUT_PATH = "/system/springboard/layout.json";
 static const size_t SPRINGBOARD_ICON_MAX_PNG_SIZE = 512 * 1024;
 static const int SPRINGBOARD_ICON_MAX_SRC_DIM = 512;
 static int springboard_icon_bw_threshold = 180;
@@ -360,44 +365,32 @@ struct springboard_runtime_icon {
     lv_color_t *buf;
     lv_obj_t *canvas;
     bool loaded_png;
-    char source_path[96];
+    char source_path[SPRINGBOARD_MAX_PATH_LEN];
 };
 
-/* Expected SD icon files (150x150 PNG):
- * /icons/apps/clock.png        150x150
- * /icons/apps/lora.png         150x150
- * /icons/apps/sd_card.png      150x150
- * /icons/apps/gps.png          150x150
- * /icons/apps/reader.png       150x150
- * /icons/apps/wifi.png         150x150
- * /icons/apps/battery.png      150x150
- * /icons/apps/settings.png     150x150
- * /icons/apps/power.png        150x150
- * /icons/apps/sleep.png        150x150
- * /icons/apps/test.png         150x150
- * /icons/apps/browser.png      150x150
- * /icons/apps/maps.png         150x150
- */
-const struct menu_icon icon_buf[] = {
-    {&img_clock,    "clock"   , 25,   40,  "/icons/apps/clock.png",   NULL},
-    {&img_lora,     "lora"    , 195,  40,  "/icons/apps/lora.png",    NULL},
-    {&img_sd_card,  "sd card" , 365,  40,  "/icons/apps/sd_card.png", "/icons/apps/sd.png"},
-    {&img_gps,      "gps"     , 25,   240, "/icons/apps/gps.png",     NULL},
-    {&img_test,     "Reader"  , 195,  240, "/icons/apps/reader.png",  "/icons/apps/markdown_reader.png"},
-    {&img_wifi,     "wifi"    , 365,  240, "/icons/apps/wifi.png",    NULL},
-    {&img_battery,  "battery" , 25,   440, "/icons/apps/battery.png", NULL},
+struct springboard_app_registry_entry {
+    const char *app_id; const char *default_label; int screen_id; const void *fallback_src; int default_page; lv_coord_t default_x; lv_coord_t default_y; const char *default_icon_path; const char *default_aliases[SPRINGBOARD_MAX_ICON_ALIASES];
 };
-
-const struct menu_icon icon_buf2[] = {
-    {&img_setting,  "setting" , 25,   40,  "/icons/apps/settings.png", "/icons/apps/setting.png"},
-    {&img_shutdown, "shutdown", 195,  40,  "/icons/apps/power.png",    "/icons/apps/shutdown.png"},
-    {&img_sleep,    "sleep"   , 365,  40,  "/icons/apps/sleep.png",    NULL},
-    {&img_test,     "test"    , 25,   240, "/icons/apps/test.png",     NULL},
-    {&img_wifi,     "browser" , 195,  240, "/icons/apps/browser.png",  NULL},
-    {&img_gps,      "maps"    , 365,  240, "/icons/apps/maps.png",     NULL},
+struct springboard_layout_icon { const springboard_app_registry_entry *app; int page; lv_coord_t x; lv_coord_t y; const char *label; char icon_path[SPRINGBOARD_MAX_PATH_LEN]; const char *aliases[SPRINGBOARD_MAX_ICON_ALIASES]; };
+static const springboard_app_registry_entry springboard_apps[] = {
+    {"clock","clock",SCREEN1_ID,&img_clock,0,25,40,"/icons/apps/clock.png",{NULL}},
+    {"lora","lora",SCREEN2_ID,&img_lora,0,195,40,"/icons/apps/lora.png",{NULL}},
+    {"sd_card","sd card",SCREEN3_ID,&img_sd_card,0,365,40,"/icons/apps/sd_card.png",{"/icons/apps/sd.png",NULL}},
+    {"gps","gps",SCREEN10_ID,&img_gps,0,25,240,"/icons/apps/gps.png",{NULL}},
+    {"reader","Reader",SCREEN11_ID,&img_test,0,195,240,"/icons/apps/reader.png",{"/icons/apps/markdown_reader.png",NULL}},
+    {"wifi","wifi",SCREEN6_ID,&img_wifi,0,365,240,"/icons/apps/wifi.png",{NULL}},
+    {"battery","battery",SCREEN7_ID,&img_battery,0,25,440,"/icons/apps/battery.png",{NULL}},
+    {"setting","setting",SCREEN4_ID,&img_setting,1,25,40,"/icons/apps/settings.png",{"/icons/apps/setting.png",NULL}},
+    {"shutdown","shutdown",SCREEN8_ID,&img_shutdown,1,195,40,"/icons/apps/power.png",{"/icons/apps/shutdown.png",NULL}},
+    {"sleep","sleep",SCREEN9_ID,&img_sleep,1,365,40,"/icons/apps/sleep.png",{NULL}},
+    {"test","test",SCREEN5_ID,&img_test,1,25,240,"/icons/apps/test.png",{NULL}},
+    {"browser","browser",SCREEN12_ID,&img_wifi,1,195,240,"/icons/apps/browser.png",{NULL}},
+    {"maps","maps",SCREEN13_ID,&img_gps,1,365,240,"/icons/apps/maps.png",{NULL}},
 };
-static springboard_runtime_icon springboard_icons_page1[ARRAY_LEN(icon_buf)];
-static springboard_runtime_icon springboard_icons_page2[ARRAY_LEN(icon_buf2)];
+static const size_t SPRINGBOARD_LAYOUT_CAPACITY = ARRAY_LEN(springboard_apps);
+static springboard_layout_icon springboard_layout_icons[ARRAY_LEN(springboard_apps)];
+static springboard_runtime_icon springboard_runtime_icons[ARRAY_LEN(springboard_apps)];
+static size_t springboard_layout_count = 0;
 static PNG springboard_png_decoder;
 static lv_color_t *springboard_decode_buf = NULL;
 static uint16_t *springboard_decode_line = NULL;
@@ -468,6 +461,19 @@ static bool springboard_icon_png_exists(const char *path)
             f.close();
         }
     }
+    sd_guard_unlock();
+    return ok;
+}
+
+static bool springboard_path_exists(const char *path)
+{
+    if (!path || !path[0]) return false;
+    int sd_ok = 0;
+    ui_test_get_sd(&sd_ok);
+    if (sd_ok != 1) return false;
+    bool ok = false;
+    if (!sd_guard_lock(1000)) return false;
+    ok = SD.exists(path);
     sd_guard_unlock();
     return ok;
 }
@@ -599,51 +605,103 @@ static void menu_btn_event(lv_event_t *e)
         Serial.println("[MENU] ignored stale click after Home");
         return;
     }
-    int data = (int)e->user_data;
+    const springboard_layout_icon *entry = (const springboard_layout_icon *)e->user_data;
     printf("code=%d\n", lv_event_get_code(e));
-    if(e->code == LV_EVENT_CLICKED) {
+    if(e->code == LV_EVENT_CLICKED && entry && entry->app) {
+        printf("%s is clicked.\n", entry->app->app_id);
+        scr_mgr_push(entry->app->screen_id, false);
+    }
+}
 
-        // ui_full_refresh();
-        // ui_full_clean();
-        if(data < ARRAY_LEN(icon_buf))
-        {
-            printf("[%d] %s is clicked.\n", data, icon_buf[data].icon_str);
+static const springboard_app_registry_entry *springboard_find_app(const char *app_id)
+{
+    for (size_t i = 0; i < ARRAY_LEN(springboard_apps); ++i) if (strcmp(springboard_apps[i].app_id, app_id) == 0) return &springboard_apps[i];
+    return NULL;
+}
+
+static void springboard_build_default_layout(void)
+{
+    springboard_layout_count = 0;
+    for (size_t i = 0; i < ARRAY_LEN(springboard_apps) && springboard_layout_count < SPRINGBOARD_LAYOUT_CAPACITY; ++i) {
+        springboard_layout_icon *e = &springboard_layout_icons[springboard_layout_count++];
+        memset(e, 0, sizeof(*e));
+        e->app = &springboard_apps[i]; e->page = e->app->default_page; e->x = e->app->default_x; e->y = e->app->default_y; e->label = e->app->default_label;
+        lv_snprintf(e->icon_path, sizeof(e->icon_path), "%s", e->app->default_icon_path);
+        for (int a = 0; a < SPRINGBOARD_MAX_ICON_ALIASES; ++a) e->aliases[a] = e->app->default_aliases[a];
+    }
+}
+
+static void springboard_overlay_json_layout(void)
+{
+    int sd_ok = 0; ui_test_get_sd(&sd_ok); if (sd_ok != 1 || !springboard_path_exists(SPRINGBOARD_LAYOUT_PATH)) return;
+    if (!sd_guard_lock(1000)) return;
+    File f = SD.open(SPRINGBOARD_LAYOUT_PATH, FILE_READ);
+    if (!f) { sd_guard_unlock(); return; }
+    DynamicJsonDocument doc(8192);
+    if (doc.capacity() < 8192) {
+        Serial.println("[SPRINGBOARD] layout alloc failed");
+        f.close();
+        sd_guard_unlock();
+        return;
+    }
+    DeserializationError err = deserializeJson(doc, f);
+    f.close(); sd_guard_unlock();
+    if (err) { Serial.printf("[SPRINGBOARD] parse layout failed: %s\n", err.c_str()); return; }
+    JsonArray pages = doc["pages"].as<JsonArray>(); if (pages.isNull()) return;
+    bool seen[ARRAY_LEN(springboard_apps)] = {false};
+    springboard_layout_count = 0;
+    for (JsonObject p : pages) {
+        int page = p["index"] | -1; if (page < 0 || page > 1) { Serial.printf("[SPRINGBOARD] skip page=%d\n", page); continue; }
+        JsonArray icons = p["icons"].as<JsonArray>(); if (icons.isNull()) continue;
+        for (JsonObject ic : icons) {
+            const char *app_id = ic["app"] | ""; const springboard_app_registry_entry *app = springboard_find_app(app_id);
+            int x = ic["x"] | -1, y = ic["y"] | -1; const char *icon = ic["icon"] | "";
+            if (!app) { Serial.printf("[SPRINGBOARD] unknown app=%s\n", app_id); continue; }
+            if (x < 0 || y < 0 || !icon[0] || strlen(icon) >= SPRINGBOARD_MAX_PATH_LEN || springboard_layout_count >= SPRINGBOARD_LAYOUT_CAPACITY) { Serial.printf("[SPRINGBOARD] skip invalid icon for %s\n", app_id); continue; }
+            size_t idx = (size_t)(app - springboard_apps); if (seen[idx]) { Serial.printf("[SPRINGBOARD] duplicate app=%s\n", app_id); continue; }
+            springboard_layout_icon *e = &springboard_layout_icons[springboard_layout_count++]; memset(e, 0, sizeof(*e));
+            e->app = app; e->page = page; e->x = x; e->y = y; e->label = ic["label"] | app->default_label; lv_snprintf(e->icon_path, sizeof(e->icon_path), "%s", icon);
+            JsonArray aliases = ic["aliases"].as<JsonArray>();
+            if (!aliases.isNull()) { int ai = 0; for (JsonVariant v : aliases) { const char *a = v.as<const char *>(); if (a && a[0] && strlen(a) < SPRINGBOARD_MAX_PATH_LEN && ai < SPRINGBOARD_MAX_ICON_ALIASES) e->aliases[ai++] = a; } }
+            if (!e->aliases[0]) for (int a = 0; a < SPRINGBOARD_MAX_ICON_ALIASES; ++a) e->aliases[a] = app->default_aliases[a];
+            seen[idx] = true;
         }
-        else{
-            printf("[%d] %s is clicked.\n", data, icon_buf2[data - ARRAY_LEN(icon_buf)].icon_str);
+    }
+    for (size_t i = 0; i < ARRAY_LEN(springboard_apps) && springboard_layout_count < SPRINGBOARD_LAYOUT_CAPACITY; ++i) {
+        if (seen[i]) continue;
+        springboard_layout_icon *e = &springboard_layout_icons[springboard_layout_count++]; memset(e, 0, sizeof(*e));
+        e->app = &springboard_apps[i]; e->page = e->app->default_page; e->x = e->app->default_x; e->y = e->app->default_y; e->label = e->app->default_label;
+        lv_snprintf(e->icon_path, sizeof(e->icon_path), "%s", e->app->default_icon_path); for (int a = 0; a < SPRINGBOARD_MAX_ICON_ALIASES; ++a) e->aliases[a] = e->app->default_aliases[a];
+    }
+}
+
+static void springboard_create_icon(lv_obj_t *parent, springboard_layout_icon *entry, springboard_runtime_icon *runtime)
+{
+    const char *path_used = NULL;
+    bool alias_used = false;
+    if (springboard_icon_png_exists(entry->icon_path)) path_used = entry->icon_path;
+    else for (int i = 0; i < SPRINGBOARD_MAX_ICON_ALIASES; ++i) if (springboard_icon_png_exists(entry->aliases[i])) { path_used = entry->aliases[i]; alias_used = true; break; }
+    bool png_loaded = false;
+    if (path_used) {
+        runtime->buf = (lv_color_t *)ps_malloc(SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t));
+        if (runtime->buf) {
+            char reason[64] = {0};
+            png_loaded = springboard_decode_png_to_buf(path_used, runtime->buf, reason, sizeof(reason));
+            if (png_loaded) {
+                lv_obj_t *canvas = lv_canvas_create(parent);
+                lv_canvas_set_buffer(canvas, runtime->buf, SPRINGBOARD_ICON_W, SPRINGBOARD_ICON_H, LV_IMG_CF_TRUE_COLOR);
+                lv_obj_add_flag(canvas, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_style_bg_opa(canvas, LV_OPA_TRANSP, LV_PART_MAIN); lv_obj_set_style_border_width(canvas, 0, LV_PART_MAIN);
+                lv_obj_set_pos(canvas, entry->x, entry->y); lv_obj_add_event_cb(canvas, menu_btn_event, LV_EVENT_CLICKED, entry);
+                runtime->canvas = canvas; runtime->loaded_png = true; lv_snprintf(runtime->source_path, sizeof(runtime->source_path), "%s", path_used);
+                Serial.printf(alias_used ? "[ICON] alias loaded %s\n" : "[ICON] loaded %s\n", path_used);
+            } else { Serial.printf("[ICON] decode failed %s: %s; using fallback %s\n", path_used, reason, entry->app->app_id); free(runtime->buf); runtime->buf = NULL; }
         }
-        /************* page1 ************
-         * 0 --- SCREEN1_ID  --- clock
-         * 1 --- SCREEN2_ID  --- lora
-         * 2 --- SCREEN3_ID  --- sd card
-         * 3 --- SCREEN10_ID --- gps
-         * 4 --- SCREEN11_ID --- markdown
-         * 5 --- SCREEN6_ID  --- wifi
-         * 6 --- SCREEN7_ID  --- battery
-         ************ page2 ************
-         * 7 --- SCREEN4_ID  --- setting
-         * 8 --- SCREEN8_ID  --- shutdown
-         * 9 --- SCREEN9_ID  --- sleep
-         * 10 -- SCREEN5_ID  --- test
-         * 11 -- SCREEN12_ID --- browser
-         * 12 -- SCREEN13_ID --- maps
-        */
-        switch (data) {
-            case 0: scr_mgr_push(SCREEN1_ID, false); break;
-            case 1: scr_mgr_push(SCREEN2_ID, false); break;
-            case 2: scr_mgr_push(SCREEN3_ID, false); break;
-            case 3: scr_mgr_push(SCREEN10_ID, false); break;
-            case 4: scr_mgr_push(SCREEN11_ID, false); break;
-            case 5: scr_mgr_push(SCREEN6_ID, false); break;
-            case 6: scr_mgr_push(SCREEN7_ID, false); break;
-            case 7: scr_mgr_push(SCREEN4_ID, false); break;
-            case 8: scr_mgr_push(SCREEN8_ID, false); break;
-            case 9: scr_mgr_push(SCREEN9_ID, false); break;
-            case 10: scr_mgr_push(SCREEN5_ID, false); break;
-            case 11: scr_mgr_push(SCREEN12_ID, false); break;
-            case 12: scr_mgr_push(SCREEN13_ID, false); break;
-            default: break;
-        }
+    }
+    if (!png_loaded) {
+        lv_obj_t *img = lv_img_create(parent);
+        lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_style_bg_opa(img, LV_OPA_TRANSP, LV_PART_MAIN); lv_obj_set_style_border_width(img, 0, LV_PART_MAIN);
+        lv_obj_set_pos(img, entry->x, entry->y); lv_img_set_src(img, entry->app->fallback_src); lv_obj_add_event_cb(img, menu_btn_event, LV_EVENT_CLICKED, entry);
+        if (!path_used) Serial.printf("[ICON] missing %s; using fallback %s\n", entry->icon_path, entry->app->app_id);
     }
 }
 
@@ -736,109 +794,12 @@ static void create0(lv_obj_t *parent)
     lv_obj_align(menu_screen2, LV_ALIGN_BOTTOM_MID, 0, 0);
     // lv_obj_add_flag(menu_screen2, LV_OBJ_FLAG_HIDDEN);
 
-    int icon_buf_len = ARRAY_LEN(icon_buf);
-    int icon_buf2_len = ARRAY_LEN(icon_buf2);
-    memset(springboard_icons_page1, 0, sizeof(springboard_icons_page1));
-    memset(springboard_icons_page2, 0, sizeof(springboard_icons_page2));
-
-    for(int i = 0; i < icon_buf_len; i++) {
-        const char *path_used = NULL;
-        bool alias_used = false;
-        if (springboard_icon_png_exists(icon_buf[i].png_path)) path_used = icon_buf[i].png_path;
-        else if (springboard_icon_png_exists(icon_buf[i].png_alias_path)) { path_used = icon_buf[i].png_alias_path; alias_used = true; }
-        bool png_loaded = false;
-        if (path_used) {
-            springboard_icons_page1[i].buf = (lv_color_t *)ps_malloc(SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t));
-            if (springboard_icons_page1[i].buf) {
-                char reason[64] = {0};
-                png_loaded = springboard_decode_png_to_buf(path_used, springboard_icons_page1[i].buf, reason, sizeof(reason));
-                if (png_loaded) {
-                    lv_obj_t *canvas = lv_canvas_create(menu_screen1);
-                    lv_canvas_set_buffer(canvas, springboard_icons_page1[i].buf, SPRINGBOARD_ICON_W, SPRINGBOARD_ICON_H, LV_IMG_CF_TRUE_COLOR);
-                    lv_obj_add_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
-                    lv_obj_set_style_bg_opa(canvas, LV_OPA_TRANSP, LV_PART_MAIN);
-                    lv_obj_set_style_border_width(canvas, 0, LV_PART_MAIN);
-                    lv_obj_set_pos(canvas, icon_buf[i].offs_x, icon_buf[i].offs_y);
-                    lv_obj_add_event_cb(canvas, menu_btn_event, LV_EVENT_CLICKED, (void *)i);
-                    springboard_icons_page1[i].canvas = canvas;
-                    springboard_icons_page1[i].loaded_png = true;
-                    lv_snprintf(springboard_icons_page1[i].source_path, sizeof(springboard_icons_page1[i].source_path), "%s", path_used);
-                    Serial.printf(alias_used ? "[ICON] alias loaded %s src=%dx%d dst=%dx%d\n" : "[ICON] loaded %s src=%dx%d dst=%dx%d\n",
-                                  path_used, springboard_decode_last_src_w, springboard_decode_last_src_h,
-                                  springboard_decode_draw_w, springboard_decode_draw_h);
-                } else {
-                    Serial.printf("[ICON] decode failed %s: %s; using fallback img_test\n", path_used, reason);
-                    free(springboard_icons_page1[i].buf);
-                    springboard_icons_page1[i].buf = NULL;
-                }
-            } else Serial.printf("[ICON] decode failed %s: icon_buf_alloc_failed; using fallback img_test\n", path_used);
-        }
-        if (!png_loaded) {
-            lv_obj_t *img = lv_img_create(menu_screen1);
-            lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_set_style_bg_opa(img, LV_OPA_TRANSP, LV_PART_MAIN);
-            lv_obj_set_style_border_width(img, 0, LV_PART_MAIN);
-            lv_obj_set_pos(img, icon_buf[i].offs_x, icon_buf[i].offs_y);
-            lv_img_set_src(img, &img_test);
-            lv_obj_add_event_cb(img, menu_btn_event, LV_EVENT_CLICKED, (void *)i);
-            if (!path_used) Serial.printf("[ICON] missing %s; using fallback img_test\n", icon_buf[i].png_path);
-        }
-
-        // lv_obj_t *btn = lv_btn_create(menu_screen1);
-        // lv_obj_set_size(btn, 120, 120);
-        // lv_obj_set_x(btn, icon_buf[i].offs_x);
-        // lv_obj_set_y(btn, icon_buf[i].offs_y);
-        // lv_obj_add_event_cb(btn, menu_btn_event, LV_EVENT_CLICKED, (void *)i);
-    }
-
-    for(int i = 0; i < icon_buf2_len; i++) {
-        const char *path_used = NULL;
-        bool alias_used = false;
-        if (springboard_icon_png_exists(icon_buf2[i].png_path)) path_used = icon_buf2[i].png_path;
-        else if (springboard_icon_png_exists(icon_buf2[i].png_alias_path)) { path_used = icon_buf2[i].png_alias_path; alias_used = true; }
-        bool png_loaded = false;
-        if (path_used) {
-            springboard_icons_page2[i].buf = (lv_color_t *)ps_malloc(SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t));
-            if (springboard_icons_page2[i].buf) {
-                char reason[64] = {0};
-                png_loaded = springboard_decode_png_to_buf(path_used, springboard_icons_page2[i].buf, reason, sizeof(reason));
-                if (png_loaded) {
-                    lv_obj_t *canvas = lv_canvas_create(menu_screen2);
-                    lv_canvas_set_buffer(canvas, springboard_icons_page2[i].buf, SPRINGBOARD_ICON_W, SPRINGBOARD_ICON_H, LV_IMG_CF_TRUE_COLOR);
-                    lv_obj_add_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
-                    lv_obj_set_style_bg_opa(canvas, LV_OPA_TRANSP, LV_PART_MAIN);
-                    lv_obj_set_style_border_width(canvas, 0, LV_PART_MAIN);
-                    lv_obj_set_pos(canvas, icon_buf2[i].offs_x, icon_buf2[i].offs_y);
-                    lv_obj_add_event_cb(canvas, menu_btn_event, LV_EVENT_CLICKED, (void *)(icon_buf_len + i));
-                    springboard_icons_page2[i].canvas = canvas;
-                    springboard_icons_page2[i].loaded_png = true;
-                    lv_snprintf(springboard_icons_page2[i].source_path, sizeof(springboard_icons_page2[i].source_path), "%s", path_used);
-                    Serial.printf(alias_used ? "[ICON] alias loaded %s src=%dx%d dst=%dx%d\n" : "[ICON] loaded %s src=%dx%d dst=%dx%d\n",
-                                  path_used, springboard_decode_last_src_w, springboard_decode_last_src_h,
-                                  springboard_decode_draw_w, springboard_decode_draw_h);
-                } else {
-                    Serial.printf("[ICON] decode failed %s: %s; using fallback img_test\n", path_used, reason);
-                    free(springboard_icons_page2[i].buf);
-                    springboard_icons_page2[i].buf = NULL;
-                }
-            } else Serial.printf("[ICON] decode failed %s: icon_buf_alloc_failed; using fallback img_test\n", path_used);
-        }
-        if (!png_loaded) {
-            lv_obj_t *img = lv_img_create(menu_screen2);
-            lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_set_style_bg_opa(img, LV_OPA_TRANSP, LV_PART_MAIN);
-            lv_obj_set_style_border_width(img, 0, LV_PART_MAIN);
-            lv_obj_set_pos(img, icon_buf2[i].offs_x, icon_buf2[i].offs_y);
-            lv_img_set_src(img, &img_test);
-            lv_obj_add_event_cb(img, menu_btn_event, LV_EVENT_CLICKED, (void *)(icon_buf_len + i));
-            if (!path_used) Serial.printf("[ICON] missing %s; using fallback img_test\n", icon_buf2[i].png_path);
-        }
-
-        // lv_obj_t *btn = lv_btn_create(menu_screen2);
-        // lv_obj_set_size(btn, 120, 120);
-        // lv_obj_set_x(btn, icon_buf[i].offs_x);
-        // lv_obj_set_y(btn, icon_buf[i].offs_y);
-        // lv_obj_add_event_cb(btn, menu_btn_event, LV_EVENT_CLICKED, (void *)(icon_buf_len + i));
+    memset(springboard_runtime_icons, 0, sizeof(springboard_runtime_icons));
+    springboard_build_default_layout();
+    springboard_overlay_json_layout();
+    for (size_t i = 0; i < springboard_layout_count; ++i) {
+        lv_obj_t *target = (springboard_layout_icons[i].page == 0) ? menu_screen1 : menu_screen2;
+        springboard_create_icon(target, &springboard_layout_icons[i], &springboard_runtime_icons[i]);
     }
 
     ui_Panel4 = lv_obj_create(parent);
@@ -907,17 +868,11 @@ static void exit0(void) {
 }
 static void destroy0(void) 
 {
-    for (size_t i = 0; i < ARRAY_LEN(springboard_icons_page1); ++i) {
-        if (springboard_icons_page1[i].buf) { free(springboard_icons_page1[i].buf); springboard_icons_page1[i].buf = NULL; }
-        springboard_icons_page1[i].canvas = NULL;
-        springboard_icons_page1[i].loaded_png = false;
-        springboard_icons_page1[i].source_path[0] = '\0';
-    }
-    for (size_t i = 0; i < ARRAY_LEN(springboard_icons_page2); ++i) {
-        if (springboard_icons_page2[i].buf) { free(springboard_icons_page2[i].buf); springboard_icons_page2[i].buf = NULL; }
-        springboard_icons_page2[i].canvas = NULL;
-        springboard_icons_page2[i].loaded_png = false;
-        springboard_icons_page2[i].source_path[0] = '\0';
+    for (size_t i = 0; i < ARRAY_LEN(springboard_runtime_icons); ++i) {
+        if (springboard_runtime_icons[i].buf) { free(springboard_runtime_icons[i].buf); springboard_runtime_icons[i].buf = NULL; }
+        springboard_runtime_icons[i].canvas = NULL;
+        springboard_runtime_icons[i].loaded_png = false;
+        springboard_runtime_icons[i].source_path[0] = '\0';
     }
 }
 

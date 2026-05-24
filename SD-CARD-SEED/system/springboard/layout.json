@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "iconSize": { "width": 150, "height": 150 },
+  "pages": [
+    {
+      "index": 0,
+      "icons": [
+        { "app": "clock", "label": "clock", "x": 25, "y": 40, "icon": "/icons/apps/clock.png", "aliases": [] },
+        { "app": "lora", "label": "lora", "x": 195, "y": 40, "icon": "/icons/apps/lora.png", "aliases": [] },
+        { "app": "sd_card", "label": "sd card", "x": 365, "y": 40, "icon": "/icons/apps/sd_card.png", "aliases": ["/icons/apps/sd.png"] },
+        { "app": "gps", "label": "gps", "x": 25, "y": 240, "icon": "/icons/apps/gps.png", "aliases": [] },
+        { "app": "reader", "label": "Reader", "x": 195, "y": 240, "icon": "/icons/apps/reader.png", "aliases": ["/icons/apps/markdown_reader.png"] },
+        { "app": "wifi", "label": "wifi", "x": 365, "y": 240, "icon": "/icons/apps/wifi.png", "aliases": [] },
+        { "app": "battery", "label": "battery", "x": 25, "y": 440, "icon": "/icons/apps/battery.png", "aliases": [] }
+      ]
+    },
+    {
+      "index": 1,
+      "icons": [
+        { "app": "setting", "label": "setting", "x": 25, "y": 40, "icon": "/icons/apps/settings.png", "aliases": ["/icons/apps/setting.png"] },
+        { "app": "shutdown", "label": "shutdown", "x": 195, "y": 40, "icon": "/icons/apps/power.png", "aliases": ["/icons/apps/shutdown.png"] },
+        { "app": "sleep", "label": "sleep", "x": 365, "y": 40, "icon": "/icons/apps/sleep.png", "aliases": [] },
+        { "app": "test", "label": "test", "x": 25, "y": 240, "icon": "/icons/apps/test.png", "aliases": [] },
+        { "app": "browser", "label": "browser", "x": 195, "y": 240, "icon": "/icons/apps/browser.png", "aliases": [] },
+        { "app": "maps", "label": "maps", "x": 365, "y": 240, "icon": "/icons/apps/maps.png", "aliases": [] }
+      ]
+    }
+  ]
+}
