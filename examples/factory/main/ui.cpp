@@ -518,7 +518,7 @@ static bool springboard_decode_png_to_buf(const char *path, lv_color_t *dst, cha
     free(line);
     if (rc != PNG_SUCCESS) { lv_snprintf(reason, reason_len, "png_decode_failed:%d", rc); return false; }
     lv_snprintf(reason, reason_len, "ok");
-    return true;
+    return MAPS_RENDER_SUCCESS;
 }
 
 static lv_obj_t *ui_Panel4;
@@ -1775,7 +1775,7 @@ static bool path_has_ext_ci(const char *path, const char *ext)
         if (b >= 'A' && b <= 'Z') b = b - 'A' + 'a';
         if (a != b) return false;
     }
-    return true;
+    return MAPS_RENDER_SUCCESS;
 }
 
 static void read_img_btn_event(lv_event_t * e)
@@ -2705,7 +2705,7 @@ static bool wifi_connect_saved_sta(const char *reason)
                   wifi_sta_ssid.c_str());
 
     WiFi.begin(wifi_sta_ssid.c_str(), wifi_sta_pwd.c_str());
-    return true;
+    return MAPS_RENDER_SUCCESS;
 }
 
 static void wifi_send_cors_headers(void)
@@ -2914,7 +2914,7 @@ static bool wifi_serve_sd_path(String req_path)
     wifi_web_server.streamFile(f, wifi_guess_content_type(fs_path));
     f.close();
     sd_guard_unlock();
-    return true;
+    return MAPS_RENDER_SUCCESS;
 }
 
 static void wifi_start_web_services(void)
@@ -3688,7 +3688,7 @@ static bool md_is_unordered_list(const char *line, size_t line_len, size_t *cont
     if(line_len < 2) return false;
     if((line[0] == '-' || line[0] == '*' || line[0] == '+') && line[1] == ' ') {
         if(content_start) *content_start = 2;
-        return true;
+        return MAPS_RENDER_SUCCESS;
     }
     return false;
 }
@@ -3699,7 +3699,7 @@ static bool md_is_ordered_list(const char *line, size_t line_len, size_t *conten
     while(i < line_len && line[i] >= '0' && line[i] <= '9') i++;
     if(i > 0 && i + 1 < line_len && (line[i] == '.' || line[i] == ')') && line[i + 1] == ' ') {
         if(content_start) *content_start = i + 2;
-        return true;
+        return MAPS_RENDER_SUCCESS;
     }
     return false;
 }
@@ -4338,13 +4338,13 @@ static bool maps_build_tile_url(char *url, size_t url_len, MapsTileProvider prov
             } else {
                 lv_snprintf(url, url_len, "https://tiles.stadiamaps.com/tiles/stamen_toner/%d/%d/%d.png", z, x, y);
             }
-            return true;
+            return MAPS_RENDER_SUCCESS;
         case MAPS_PROVIDER_CARTO_LIGHT:
             lv_snprintf(url, url_len, "https://a.basemaps.cartocdn.com/light_all/%d/%d/%d.png", z, x, y);
-            return true;
+            return MAPS_RENDER_SUCCESS;
         case MAPS_PROVIDER_OSM_STANDARD:
             lv_snprintf(url, url_len, "https://tile.openstreetmap.org/%d/%d/%d.png", z, x, y);
-            return true;
+            return MAPS_RENDER_SUCCESS;
         default:
             return false;
     }
@@ -4416,7 +4416,7 @@ static bool maps_coord_valid(double lat, double lon)
     if (lat < -85.05112878 || lat > 85.05112878) return false;
     if (lon < -180.0 || lon > 180.0) return false;
     if (lat == 0.0 && lon == 0.0) return false;
-    return true;
+    return MAPS_RENDER_SUCCESS;
 }
 
 static void maps_set_status(const char *txt) { if (maps_status) lv_label_set_text(maps_status, txt); }
@@ -4475,7 +4475,7 @@ static bool maps_cache_dirs(const char *provider, int z,int x)
     char p1[96]; lv_snprintf(p1,sizeof(p1),"/cache/maps/%s/%d",provider,z); if(!SD.exists(p1)) SD.mkdir(p1);
     char p2[128]; lv_snprintf(p2,sizeof(p2),"/cache/maps/%s/%d/%d",provider,z,x); if(!SD.exists(p2)) SD.mkdir(p2);
     sd_guard_unlock();
-    return true;
+    return MAPS_RENDER_SUCCESS;
 }
 
 static bool maps_download_tile(const char *path, MapsTileProvider provider, int z,int x,int y, int *http_code, String &url_redacted)
@@ -4536,7 +4536,7 @@ static bool maps_check_png_file(const char *path, size_t *file_size, bool *magic
     Serial.printf("[MAP] cache_path=%s\n", path);
     Serial.printf("[MAP] cached_file_size=%u\n", (unsigned)*file_size);
     Serial.printf("[MAP] png_magic_ok=%d\n", *magic_ok ? 1 : 0);
-    return true;
+    return MAPS_RENDER_SUCCESS;
 }
 
 static bool maps_decode_png_to_tile(int row, int col, const char *path, String &decode_result)
@@ -4570,7 +4570,7 @@ static bool maps_decode_png_to_tile(int row, int col, const char *path, String &
     decode_result = "ok";
     maps_decode_tile_dst = NULL;
     Serial.printf("[MAP] nonwhite_pixels=%d\n", maps_nonwhite_pixels);
-    return true;
+    return MAPS_RENDER_SUCCESS;
 }
 
 static void maps_write_debug(const String &dbg_text)
@@ -4585,18 +4585,27 @@ static void maps_write_debug(const String &dbg_text)
     sd_guard_unlock();
 }
 
-static bool maps_try_render(double lat,double lon)
+typedef enum {
+    MAPS_RENDER_RETRY = 0,
+    MAPS_RENDER_SUCCESS,
+    MAPS_RENDER_UNAVAILABLE,
+    MAPS_RENDER_DECODE_FAILED
+} maps_render_result_t;
+
+static maps_render_result_t maps_try_render(double lat,double lon)
 {
     const int zooms[] = {18, 17, 16};
     const MapsTileProvider providers[] = {MAPS_PROVIDER_OSM_STANDARD, MAPS_PROVIDER_CARTO_LIGHT};
     bool has_sd = peri_buf[E_PERI_SD_CARD];
-    if (!has_sd) { maps_show_loading("SD unavailable"); return false; }
+    if (!has_sd) { maps_show_loading("Map unavailable"); return MAPS_RENDER_UNAVAILABLE; }
     maps_show_loading("Loading map...");
     Serial.printf("[MAP] render start lat=%.6f lon=%.6f\n", lat, lon);
     String dbg; dbg.reserve(4096); dbg += "lat=" + String(lat, 6) + "\nlon=" + String(lon, 6) + "\n";
     int accepted_z = -1, accepted_left_x = 0, accepted_top_y = 0, accepted_base_x = 0, accepted_base_y = 0, accepted_px = 0, accepted_py = 0;
     String accepted_provider = "";
     int accepted_decoded = 0;
+    bool saw_decode_failure = false;
+    bool saw_tile_source = false;
     for (size_t zi = 0; zi < ARRAY_LEN(zooms); ++zi) {
         int z = zooms[zi];
         int base_x, base_y, px, py; maps_tile_for(lat, lon, z, &base_x, &base_y, &px, &py);
@@ -4614,16 +4623,18 @@ static bool maps_try_render(double lat,double lon)
                 if (tile_y < 0 || tile_y >= n) continue;
                 char tile[160]; lv_snprintf(tile, sizeof(tile), "/cache/maps/%s/%d/%d/%d.png", provider_name, z, tile_x, tile_y);
                 bool cache_hit = maps_file_exists_guarded(tile);
+                if (cache_hit) saw_tile_source = true;
                 if (!cache_hit) {
                     if (WiFi.status() != WL_CONNECTED) {
                         wifi_load_saved_settings();
-                        if (wifi_sta_ssid.length() == 0) { maps_show_loading("Map unavailable"); maps_write_debug(dbg); return false; }
+                        if (wifi_sta_ssid.length() == 0) { maps_show_loading("Map unavailable"); maps_write_debug(dbg); return MAPS_RENDER_UNAVAILABLE; }
                         if (!maps_waiting_wifi) { maps_wifi_start_ms = millis(); maps_waiting_wifi = true; maps_show_loading("Connecting WiFi..."); wifi_connect_saved_sta("maps tile download"); }
-                        return false;
+                        return MAPS_RENDER_RETRY;
                     }
                     maps_cache_dirs(provider_name, z, tile_x);
                     int http_code = -1; String url_redacted;
                     if (!maps_download_tile(tile, provider, z, tile_x, tile_y, &http_code, url_redacted)) continue;
+                    saw_tile_source = true;
                 }
                 size_t file_size = 0; bool png_magic_ok = false;
                 if (!maps_check_png_file(tile, &file_size, &png_magic_ok) || file_size <= 100 || !png_magic_ok) continue;
@@ -4631,6 +4642,7 @@ static bool maps_try_render(double lat,double lon)
                 Serial.printf("[MAP] tile row=%d col=%d z=%d x=%d y=%d cache=%d decode=%s\n", row, col, z, tile_x, tile_y, cache_hit ? 1 : 0, ok ? "ok" : decode_result.c_str());
                 dbg += "tile[" + String(row) + "," + String(col) + "] path=" + String(tile) + " status=" + (ok ? String("ok") : decode_result) + "\n";
                 if (ok) decoded_count++;
+                else saw_decode_failure = true;
                 maps_show_loading((String("Loading map ") + String((row*MAPS_GRID_COLS+col+1)) + "/6").c_str());
                 delay(1);
             }
@@ -4644,7 +4656,16 @@ static bool maps_try_render(double lat,double lon)
         }
     }
 render_done:
-    if (accepted_z < 0) { maps_show_loading("Map unavailable"); if (maps_marker) lv_obj_add_flag(maps_marker, LV_OBJ_FLAG_HIDDEN); maps_write_debug(dbg); return false; }
+    if (accepted_z < 0) {
+        if (maps_marker) lv_obj_add_flag(maps_marker, LV_OBJ_FLAG_HIDDEN);
+        maps_write_debug(dbg);
+        if (saw_decode_failure && saw_tile_source) {
+            maps_show_loading("Tile decode failed");
+            return MAPS_RENDER_DECODE_FAILED;
+        }
+        maps_show_loading("Map unavailable");
+        return MAPS_RENDER_UNAVAILABLE;
+    }
     int marker_canvas_x = (accepted_base_x - accepted_left_x) * MAPS_TILE_SIZE + accepted_px;
     int marker_canvas_y = (accepted_base_y - accepted_top_y) * MAPS_TILE_SIZE + accepted_py;
     if (maps_marker) { lv_obj_set_pos(maps_marker, marker_canvas_x - 16, marker_canvas_y - 16); lv_obj_clear_flag(maps_marker, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(maps_marker); }
@@ -4656,7 +4677,7 @@ render_done:
     if (maps_info) lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN);
     if (maps_view) lv_obj_invalidate(maps_view);
     Serial.println("[MAP] render complete");
-    return true;
+    return MAPS_RENDER_SUCCESS;
 }
 
 static void maps_timer_cb(lv_timer_t *t)
@@ -4680,7 +4701,12 @@ static void maps_timer_cb(lv_timer_t *t)
     if (!gps.has_fix) {
         if (MAPS_DEBUG_LOCATION_ENABLE && maps_debug_location_valid) {
             Serial.printf("[MAP] using debug location lat=%.6f lon=%.6f\n", maps_debug_lat, maps_debug_lon);
-            if (maps_try_render(maps_debug_lat, maps_debug_lon)) { lv_timer_del(maps_timer); maps_timer=NULL; return; }
+            maps_show_loading("Loading map...");
+            lv_refr_now(NULL);
+            Serial.println("[MAP] gps valid; loading tiles");
+            maps_render_result_t debug_result = maps_try_render(maps_debug_lat, maps_debug_lon);
+            if (debug_result == MAPS_RENDER_SUCCESS) { lv_timer_del(maps_timer); maps_timer=NULL; return; }
+            if (debug_result == MAPS_RENDER_UNAVAILABLE || debug_result == MAPS_RENDER_DECODE_FAILED) { return; }
         }
         maps_show_loading("Waiting for GPS fix...");
         return;
@@ -4688,7 +4714,12 @@ static void maps_timer_cb(lv_timer_t *t)
     if (!maps_coord_valid(gps.lat, gps.lon)) { maps_show_loading("GPS fix invalid"); return; }
     double lat = gps.lat;
     double lon = gps.lon;
-    if(maps_try_render(lat,lon)){ lv_timer_del(maps_timer); maps_timer=NULL; return; }
+    maps_show_loading("Loading map...");
+    lv_refr_now(NULL);
+    Serial.println("[MAP] gps valid; loading tiles");
+    maps_render_result_t render_result = maps_try_render(lat,lon);
+    if(render_result == MAPS_RENDER_SUCCESS){ lv_timer_del(maps_timer); maps_timer=NULL; return; }
+    if (render_result == MAPS_RENDER_UNAVAILABLE || render_result == MAPS_RENDER_DECODE_FAILED) { return; }
 }
 static void maps_back(lv_event_t *e){ if(e->code==LV_EVENT_CLICKED) scr_mgr_pop(false);}
 static void create13(lv_obj_t *p){
@@ -4765,7 +4796,7 @@ static bool png_read_file_to_psram(const char *path, uint8_t **out_data, size_t 
     *out_size = sz;
     Serial.printf("[IMAGE] open path=%s\n", path);
     Serial.printf("[IMAGE] png size=%u\n", (unsigned)sz);
-    return true;
+    return MAPS_RENDER_SUCCESS;
 }
 
 static bool png_decode_scaled_to_canvas(const char *path, lv_color_t *canvas_buf, int canvas_w, int canvas_h, int *out_img_w, int *out_img_h, String &err)
@@ -4840,7 +4871,7 @@ static bool png_decode_scaled_to_canvas(const char *path, lv_color_t *canvas_buf
     if (out_img_w) *out_img_w = scaled_w;
     if (out_img_h) *out_img_h = scaled_h;
     Serial.printf("[IMAGE] decode result=ok\n");
-    return true;
+    return MAPS_RENDER_SUCCESS;
 }
 
 static void screen14_back(lv_event_t *e){ if(e->code == LV_EVENT_CLICKED) scr_mgr_pop(false); }
@@ -5012,7 +5043,7 @@ static bool system_sleep_load_png_to_canvas(const char *path, String &reason)
     system_sleep_png_decoder.close();
     if (rc != PNG_SUCCESS) { reason = "png_decode_failed"; return false; }
     system_sleep_canvas_dsc.data = (const uint8_t *)system_sleep_canvas_buf;
-    return true;
+    return MAPS_RENDER_SUCCESS;
 }
 
 static void create8(lv_obj_t *parent)
