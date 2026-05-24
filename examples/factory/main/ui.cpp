@@ -531,6 +531,7 @@ static lv_obj_t *menu_taskbar_charge = NULL;
 static lv_obj_t *menu_taskbar_battery = NULL;
 static lv_obj_t *menu_taskbar_battery_percent = NULL;
 static lv_obj_t *menu_taskbar_wifi = NULL;
+static lv_obj_t *menu_taskbar_gps = NULL;
 static lv_obj_t *menu_taskbar_sd = NULL;
 
 static int page_num = 1;
@@ -687,6 +688,14 @@ static void create0(lv_obj_t *parent)
         lv_obj_clear_flag(menu_taskbar_wifi, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(menu_taskbar_wifi, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    menu_taskbar_gps = lv_label_create(status_parent);
+    lv_label_set_text_fmt(menu_taskbar_gps, "%s", LV_SYMBOL_GPS);
+    if(taskbar_statue[TASKBAR_ID_GPS]) {
+        lv_obj_clear_flag(menu_taskbar_gps, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(menu_taskbar_gps, LV_OBJ_FLAG_HIDDEN);
     }
 
     menu_taskbar_sd = lv_label_create(status_parent);
@@ -5282,6 +5291,19 @@ void menu_taskbar_update_timer_cb(lv_timer_t *t)
             lv_obj_add_flag(menu_taskbar_wifi, LV_OBJ_FLAG_HIDDEN);
         }
         taskbar_statue[TASKBAR_ID_WIFI] = wifi;
+    }
+
+    gps_status_t gps_status = {0};
+    ui_gps_get_status(&gps_status);
+    bool gps_active = gps_status.ready && gps_status.has_serial_data;
+    if(taskbar_statue[TASKBAR_ID_GPS] != gps_active)
+    {
+        if(gps_active) {
+            lv_obj_clear_flag(menu_taskbar_gps, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(menu_taskbar_gps, LV_OBJ_FLAG_HIDDEN);
+        }
+        taskbar_statue[TASKBAR_ID_GPS] = gps_active;
     }
 }
 
