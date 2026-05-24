@@ -1492,6 +1492,7 @@ void idf_setup()
 
     Serial.println("[BOOT] before screen_init()");
     screen_init();
+    ui_maps_worker_init_early();
     io_extend_lora_gps_power_on(true);
 
     int cursor_x = 100;

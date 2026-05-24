@@ -12,6 +12,7 @@
 #include <DNSServer.h>
 #include <HTTPClient.h>
 #include <PNGdec.h>
+#include "esp_heap_caps.h"
 
 /* clang-format off */
 
@@ -4649,10 +4650,45 @@ static bool maps_worker_ready = false;
 static bool maps_download_inflight = false;
 static uint32_t maps_request_id_next = 1;
 static uint32_t maps_request_id_inflight = 0;
+static const uint32_t MAPS_WORKER_STACK_BYTES = 4096;
 
 static void maps_render_reset(void)
 {
     memset(&maps_render_ctx, 0, sizeof(maps_render_ctx));
+}
+
+void ui_maps_worker_init_early(void)
+{
+    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    Serial.printf("[MAP] worker early pre free_internal=%u largest_internal=%u free_psram=%u\n",
+                  (unsigned)free_internal, (unsigned)largest_internal, (unsigned)free_psram);
+
+    if (!maps_tile_request_q) maps_tile_request_q = xQueueCreate(1, sizeof(maps_tile_request_t));
+    if (!maps_tile_result_q) maps_tile_result_q = xQueueCreate(1, sizeof(maps_tile_result_t));
+    Serial.printf("[MAP] worker queue create request=%p result=%p\n", maps_tile_request_q, maps_tile_result_q);
+
+    BaseType_t rc = pdPASS;
+    if (!maps_tile_worker_handle) {
+        if (maps_tile_request_q && maps_tile_result_q) {
+            rc = xTaskCreate(maps_tile_worker_task, "maps_tile_worker", MAPS_WORKER_STACK_BYTES, NULL, 1, &maps_tile_worker_handle);
+        } else {
+            rc = pdFAIL;
+        }
+        Serial.printf("[MAP] worker create rc=%d handle=%p stack=%u\n", (int)rc, maps_tile_worker_handle, (unsigned)MAPS_WORKER_STACK_BYTES);
+    }
+    maps_worker_ready = (maps_tile_worker_handle != NULL && maps_tile_request_q && maps_tile_result_q);
+    if (!maps_worker_ready) {
+        free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        Serial.printf("[MAP ERROR] worker create failed rc=%d free_internal=%u largest_internal=%u\n",
+                      (int)rc, (unsigned)free_internal, (unsigned)largest_internal);
+    }
+    free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    Serial.printf("[MAP] worker early post free_internal=%u largest_internal=%u\n",
+                  (unsigned)free_internal, (unsigned)largest_internal);
 }
 
 static void maps_render_start(double lat, double lon)
@@ -4697,6 +4733,8 @@ static void maps_tile_worker_task(void *param)
             continue;
         }
         Serial.printf("[MAP] worker done request_id=%u ok=%d http=%d bytes=%u\n", (unsigned)res.request_id, res.ok ? 1 : 0, res.http_code, (unsigned)res.bytes);
+        UBaseType_t worker_hwm = uxTaskGetStackHighWaterMark(NULL);
+        Serial.printf("[MAP] worker stack_hwm=%u\n", (unsigned)worker_hwm);
         xQueueOverwrite(maps_tile_result_q, &res);
     }
 }
@@ -4915,18 +4953,7 @@ static void create13(lv_obj_t *p){
     maps_info=lv_label_create(p); lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN);
     maps_loading = lv_label_create(maps_view); lv_label_set_text(maps_loading, "Loading map..."); lv_obj_center(maps_loading); lv_obj_add_flag(maps_loading, LV_OBJ_FLAG_HIDDEN);
 }
-static void entry13(void){ Serial.println("[MAP] entry"); maps_load_stadia_key(); maps_load_debug_location(); ui_gps_task_resume(); maps_waiting_wifi=false; maps_terminal_failure=false; maps_cancel_requested=false; maps_render_reset(); if(!maps_tile_worker_handle){
-    if(!maps_tile_request_q) maps_tile_request_q = xQueueCreate(1, sizeof(maps_tile_request_t));
-    if(!maps_tile_result_q) maps_tile_result_q = xQueueCreate(1, sizeof(maps_tile_result_t));
-    BaseType_t rc = pdFAIL;
-    if (maps_tile_request_q && maps_tile_result_q) rc = xTaskCreate(maps_tile_worker_task, "maps_tile_worker", 6144, NULL, 1, &maps_tile_worker_handle);
-    Serial.printf("[MAP] worker create rc=%d handle=%p\n", (int)rc, maps_tile_worker_handle);
-    maps_worker_ready = (rc == pdPASS && maps_tile_worker_handle != NULL);
-}
-if(!maps_worker_ready){ maps_show_loading("Map worker failed"); maps_terminal_failure = true; }
-maps_download_inflight = false;
-maps_request_id_inflight = 0;
-if (maps_tile_result_q) xQueueReset(maps_tile_result_q); if (maps_status) lv_obj_add_flag(maps_status, LV_OBJ_FLAG_HIDDEN); if (maps_info) lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN); maps_show_loading("Waiting for GPS..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 1000, NULL);}
+static void entry13(void){ Serial.println("[MAP] entry"); maps_load_stadia_key(); maps_load_debug_location(); ui_gps_task_resume(); maps_waiting_wifi=false; maps_terminal_failure=false; maps_cancel_requested=false; maps_render_reset(); maps_download_inflight = false; maps_request_id_inflight = 0; if (maps_tile_result_q) xQueueReset(maps_tile_result_q); if(!maps_worker_ready){ size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL); size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL); Serial.printf("[MAP] worker unavailable at entry free_internal=%u largest_internal=%u\n", (unsigned)free_internal, (unsigned)largest_internal); maps_show_loading("Map worker failed"); maps_terminal_failure = true; } if (maps_status) lv_obj_add_flag(maps_status, LV_OBJ_FLAG_HIDDEN); if (maps_info) lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN); if (!maps_terminal_failure) maps_show_loading("Waiting for GPS..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 1000, NULL);}
 static void exit13(void){ maps_cancel_requested=true; maps_render_ctx.cancelled=true; maps_render_ctx.active=false; maps_download_inflight=false; maps_request_id_inflight=0; if (maps_tile_result_q) xQueueReset(maps_tile_result_q); if(maps_timer){ lv_timer_del(maps_timer); maps_timer=NULL; } maps_waiting_wifi=false; maps_terminal_failure=false; maps_render_reset(); }
 static void destroy13(void){ for (int row = 0; row < MAPS_GRID_ROWS; ++row) for (int col = 0; col < MAPS_GRID_COLS; ++col) { if(maps_tile_buf[row][col]){ free(maps_tile_buf[row][col]); maps_tile_buf[row][col]=NULL; } } if(maps_png_line_buf){ free(maps_png_line_buf); maps_png_line_buf=NULL; } if(maps_png_raw){ free(maps_png_raw); maps_png_raw=NULL; maps_png_raw_size=0; } }
 static scr_lifecycle_t screen13 = {.create=create13,.entry=entry13,.exit=exit13,.destroy=destroy13};
