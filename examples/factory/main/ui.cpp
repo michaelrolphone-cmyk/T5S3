@@ -4257,6 +4257,7 @@ static lv_obj_t *maps_marker = NULL;
 static lv_timer_t *maps_timer = NULL;
 static uint32_t maps_wifi_start_ms = 0;
 static bool maps_waiting_wifi = false;
+static bool maps_terminal_failure = false;
 static const uint32_t MAPS_WIFI_TIMEOUT_MS = 20000;
 static uint16_t *maps_png_line_buf = NULL;
 static uint8_t *maps_png_raw = NULL;
@@ -4595,7 +4596,7 @@ typedef enum {
 static maps_render_result_t maps_try_render(double lat,double lon)
 {
     const int zooms[] = {18, 17, 16};
-    const MapsTileProvider providers[] = {MAPS_PROVIDER_OSM_STANDARD, MAPS_PROVIDER_CARTO_LIGHT};
+    const MapsTileProvider providers[] = {MAPS_PROVIDER_STADIA_STAMEN_TONER, MAPS_PROVIDER_CARTO_LIGHT, MAPS_PROVIDER_OSM_STANDARD};
     bool has_sd = peri_buf[E_PERI_SD_CARD];
     if (!has_sd) { maps_show_loading("Map unavailable"); return MAPS_RENDER_UNAVAILABLE; }
     maps_show_loading("Loading map...");
@@ -4614,6 +4615,10 @@ static maps_render_result_t maps_try_render(double lat,double lon)
         int n = 1 << z;
         for (size_t pi = 0; pi < ARRAY_LEN(providers); ++pi) {
             MapsTileProvider provider = providers[pi];
+            if (provider == MAPS_PROVIDER_STADIA_STAMEN_TONER && maps_stadia_api_key.length() == 0) {
+                Serial.println("[MAP] skip provider=stamen_toner reason=missing_stadia_api_key");
+                continue;
+            }
             const char *provider_name = maps_provider_name(provider);
             Serial.printf("[MAP] try z=%d provider=%s\n", z, provider_name);
             maps_clear_tiles();
@@ -4691,6 +4696,9 @@ static void maps_timer_cb(lv_timer_t *t)
         return;
     }
     maps_waiting_wifi=false;
+    if (maps_terminal_failure) {
+        return;
+    }
     gps_status_t gps = {0};
     ui_gps_get_status(&gps);
     Serial.printf("[MAP] gps ready=%u chars=%u fix=%u age=%u sats=%u lat=%.6f lon=%.6f\n",
@@ -4706,7 +4714,7 @@ static void maps_timer_cb(lv_timer_t *t)
             Serial.println("[MAP] gps valid; loading tiles");
             maps_render_result_t debug_result = maps_try_render(maps_debug_lat, maps_debug_lon);
             if (debug_result == MAPS_RENDER_SUCCESS) { lv_timer_del(maps_timer); maps_timer=NULL; return; }
-            if (debug_result == MAPS_RENDER_UNAVAILABLE || debug_result == MAPS_RENDER_DECODE_FAILED) { return; }
+            if (debug_result == MAPS_RENDER_UNAVAILABLE || debug_result == MAPS_RENDER_DECODE_FAILED) { maps_terminal_failure = true; return; }
         }
         maps_show_loading("Waiting for GPS fix...");
         return;
@@ -4719,7 +4727,7 @@ static void maps_timer_cb(lv_timer_t *t)
     Serial.println("[MAP] gps valid; loading tiles");
     maps_render_result_t render_result = maps_try_render(lat,lon);
     if(render_result == MAPS_RENDER_SUCCESS){ lv_timer_del(maps_timer); maps_timer=NULL; return; }
-    if (render_result == MAPS_RENDER_UNAVAILABLE || render_result == MAPS_RENDER_DECODE_FAILED) { return; }
+    if (render_result == MAPS_RENDER_UNAVAILABLE || render_result == MAPS_RENDER_DECODE_FAILED) { maps_terminal_failure = true; return; }
 }
 static void maps_back(lv_event_t *e){ if(e->code==LV_EVENT_CLICKED) scr_mgr_pop(false);}
 static void create13(lv_obj_t *p){
@@ -4753,8 +4761,8 @@ static void create13(lv_obj_t *p){
     maps_info=lv_label_create(p); lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN);
     maps_loading = lv_label_create(maps_view); lv_label_set_text(maps_loading, "Loading map..."); lv_obj_center(maps_loading); lv_obj_add_flag(maps_loading, LV_OBJ_FLAG_HIDDEN);
 }
-static void entry13(void){ Serial.println("[MAP] entry"); maps_load_stadia_key(); maps_load_debug_location(); ui_gps_task_resume(); maps_waiting_wifi=false; if (maps_status) lv_obj_add_flag(maps_status, LV_OBJ_FLAG_HIDDEN); if (maps_info) lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN); maps_show_loading("Waiting for GPS..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 1000, NULL);}
-static void exit13(void){ if(maps_timer){ lv_timer_del(maps_timer); maps_timer=NULL; } maps_waiting_wifi=false; }
+static void entry13(void){ Serial.println("[MAP] entry"); maps_load_stadia_key(); maps_load_debug_location(); ui_gps_task_resume(); maps_waiting_wifi=false; maps_terminal_failure=false; if (maps_status) lv_obj_add_flag(maps_status, LV_OBJ_FLAG_HIDDEN); if (maps_info) lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN); maps_show_loading("Waiting for GPS..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 1000, NULL);}
+static void exit13(void){ if(maps_timer){ lv_timer_del(maps_timer); maps_timer=NULL; } maps_waiting_wifi=false; maps_terminal_failure=false; }
 static void destroy13(void){ for (int row = 0; row < MAPS_GRID_ROWS; ++row) for (int col = 0; col < MAPS_GRID_COLS; ++col) { if(maps_tile_buf[row][col]){ free(maps_tile_buf[row][col]); maps_tile_buf[row][col]=NULL; } } if(maps_png_line_buf){ free(maps_png_line_buf); maps_png_line_buf=NULL; } if(maps_png_raw){ free(maps_png_raw); maps_png_raw=NULL; maps_png_raw_size=0; } }
 static scr_lifecycle_t screen13 = {.create=create13,.entry=entry13,.exit=exit13,.destroy=destroy13};
 #endif
