@@ -3047,13 +3047,16 @@ static void wifi_start_web_services(void)
 static void wifi_enable_apsta(void)
 {
     WiFi.mode(WIFI_AP_STA);
-    if (WiFi.softAPIP().toString() == "0.0.0.0") {
-        if (!WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str())) {
-            Serial.println("[wifi] softAP start failed");
-        } else {
-            Serial.printf("[wifi] AP started: %s IP=%s\n", wifi_ap_ssid.c_str(), WiFi.softAPIP().toString().c_str());
-        }
+
+    bool ap_ok = WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str());
+    if (!ap_ok) {
+        Serial.printf("[wifi] softAP start failed ssid='%s' pwd_len=%u\n",
+                      wifi_ap_ssid.c_str(),
+                      (unsigned)wifi_ap_pwd.length());
+        return;
     }
+
+    Serial.printf("[wifi] AP started: %s IP=%s\n", wifi_ap_ssid.c_str(), WiFi.softAPIP().toString().c_str());
     wifi_start_web_services();
 }
 
