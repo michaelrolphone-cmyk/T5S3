@@ -113,7 +113,8 @@ enum DisplayUpdateKind {
     DISPLAY_UPDATE_NORMAL_FRAME,
     DISPLAY_UPDATE_SCREEN_REPLACE,
     DISPLAY_UPDATE_BOOT_REPLACE,
-    DISPLAY_UPDATE_RECOVERY_CLEAN
+    DISPLAY_UPDATE_RECOVERY_CLEAN,
+    DISPLAY_UPDATE_SHUTDOWN_IMAGE
 };
 
 struct DisplayCmd {
@@ -225,6 +226,10 @@ void sd_guard_unlock()
 bool disp_show_sleep_png_from_sd(const char *preferred_path)
 {
     if (!peri_buf[E_PERI_SD_CARD] || !decodebuffer || !framebuffer_mutex) {
+        Serial.printf("[SLEEP IMG] unavailable sd=%d decode=%d fb_mutex=%d\n",
+                      peri_buf[E_PERI_SD_CARD] ? 1 : 0,
+                      decodebuffer ? 1 : 0,
+                      framebuffer_mutex ? 1 : 0);
         return false;
     }
 
@@ -243,9 +248,11 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
 
     File f;
     const char *path = NULL;
+    Serial.printf("[SLEEP IMG] resolve preferred=%s\n", preferred);
     for (const char *candidate : candidates) {
         if (!candidate || !candidate[0]) continue;
         if (path && strcmp(path, candidate) == 0) continue;
+        Serial.printf("[SLEEP IMG] try path=%s\n", candidate);
         File try_f = SD.open(candidate, FILE_READ);
         if (try_f && !try_f.isDirectory()) {
             f = try_f;
@@ -257,9 +264,11 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
 
     if (!f || f.isDirectory() || !path) {
         sd_guard_unlock();
-        Serial.printf("[SLEEP IMG] open failed preferred=%s\n", preferred);
+        Serial.printf("[SLEEP IMG] open failed preferred=%s canonical=%s legacy=%s fallback=%s\n",
+                      preferred, SYSTEM_SLEEP_IMAGE_PATH, LEGACY_SLEEP_IMAGE_PATH, FALLBACK_SLEEP_ICON_PATH);
         return false;
     }
+    Serial.printf("[SLEEP IMG] selected path=%s\n", path);
 
     const size_t png_size = (size_t)f.size();
     if (png_size < 8 || png_size > (8 * 1024 * 1024)) {
@@ -336,6 +345,7 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
     if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
         free(line_buf);
         free(png_raw);
+        Serial.println("[SLEEP IMG] framebuffer lock timeout");
         return false;
     }
     memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
@@ -364,10 +374,20 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
         return false;
     }
 
-    display_commit_frame(DISPLAY_UPDATE_SCREEN_REPLACE, decodebuffer);
     sleep_png_decoder_ctx = NULL;
     sleep_png_line_buf_ctx = NULL;
+    static uint8_t *shutdown_commit_buf = NULL;
+    if (!shutdown_commit_buf) {
+        shutdown_commit_buf = (uint8_t *)ps_malloc(EPD_IMAGE_BUF_SIZE);
+    }
+    if (!shutdown_commit_buf) {
+        xSemaphoreGive(framebuffer_mutex);
+        Serial.println("[SLEEP IMG] commit buffer alloc failed");
+        return false;
+    }
+    memcpy(shutdown_commit_buf, decodebuffer, EPD_IMAGE_BUF_SIZE);
     xSemaphoreGive(framebuffer_mutex);
+    display_commit_frame(DISPLAY_UPDATE_SHUTDOWN_IMAGE, shutdown_commit_buf);
     Serial.printf("[SLEEP IMG] rendered: %s\n", path);
     return true;
 }
@@ -614,12 +634,14 @@ static bool display_cmd_is_reliable(DisplayUpdateKind kind)
 {
     return kind == DISPLAY_UPDATE_SCREEN_REPLACE ||
            kind == DISPLAY_UPDATE_BOOT_REPLACE ||
-           kind == DISPLAY_UPDATE_RECOVERY_CLEAN;
+           kind == DISPLAY_UPDATE_RECOVERY_CLEAN ||
+           kind == DISPLAY_UPDATE_SHUTDOWN_IMAGE;
 }
 
 static inline int display_update_kind_priority(DisplayUpdateKind kind)
 {
     switch (kind) {
+        case DISPLAY_UPDATE_SHUTDOWN_IMAGE: return 5;
         case DISPLAY_UPDATE_RECOVERY_CLEAN: return 4;
         case DISPLAY_UPDATE_BOOT_REPLACE: return 3;
         case DISPLAY_UPDATE_SCREEN_REPLACE: return 2;
@@ -1821,6 +1843,10 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
             Serial.println("[EPD POWER] boot replace hard clean downgraded to single GL16 replacement");
         }
     }
+    if (kind == DISPLAY_UPDATE_SHUTDOWN_IMAGE) {
+        do_hard_clean = false;
+        Serial.println("[EPD POWER] shutdown image forcing single GL16 replacement (no hard clean)");
+    }
 
     if (do_hard_clean) {
         disp_replace_commit_count++;
@@ -1852,13 +1878,13 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         epd_poweroff();
         Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame complete (post-clean)");
         if (home_waiting_for_redraw_commit &&
-            (kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_BOOT_REPLACE)) {
+            (kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SHUTDOWN_IMAGE)) {
             home_waiting_for_redraw_commit = false;
             Serial.println("[HOME REDRAW] guard released after physical commit (post-clean)");
         }
         return;
     }
-    if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN) {
+    if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_SHUTDOWN_IMAGE) {
         disp_replace_commit_count++;
         Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame begin");
         epd_hl_set_all_white(&hl);
@@ -1876,7 +1902,7 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         epd_poweroff();
         Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame complete");
         if (home_waiting_for_redraw_commit &&
-            (kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_BOOT_REPLACE)) {
+            (kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SHUTDOWN_IMAGE)) {
             home_waiting_for_redraw_commit = false;
             Serial.println("[HOME REDRAW] guard released after physical commit");
         }

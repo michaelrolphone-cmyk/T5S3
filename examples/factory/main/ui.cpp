@@ -5019,8 +5019,6 @@ static void create8(lv_obj_t *parent)
     if(battery_25896_is_vbus_in()) 
     {
         Serial.println("[POWER_OFF] shutdown blocked by VBUS; PMIC shutdown path not executed");
-        bool preview_ok = disp_show_sleep_png_from_sd(SYSTEM_SLEEP_IMAGE_PATH);
-        Serial.printf("[SLEEP IMG] VBUS display-only pre-shutdown test %s\n", preview_ok ? "ok" : "failed");
 
         lv_obj_t * label = lv_label_create(parent);
         lv_obj_set_width(label, lv_pct(98));
