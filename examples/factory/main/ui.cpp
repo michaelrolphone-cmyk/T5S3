@@ -2694,10 +2694,11 @@ static bool wifi_connect_saved_sta(const char *reason)
     WiFi.persistent(false);
     WiFi.setAutoReconnect(true);
 
-    if (WiFi.getMode() == WIFI_OFF) {
-        WiFi.mode(WIFI_STA);
-    } else if (WiFi.getMode() == WIFI_AP) {
-        WiFi.mode(WIFI_AP_STA);
+    WiFi.mode(WIFI_AP_STA);
+    if (WiFi.softAPIP().toString() == "0.0.0.0") {
+        if (!WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str())) {
+            Serial.println("[wifi] softAP start failed");
+        }
     }
 
     Serial.printf("[wifi] connecting saved STA for %s ssid='%s'\n",
