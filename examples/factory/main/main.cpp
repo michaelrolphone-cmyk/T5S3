@@ -154,7 +154,7 @@ void disp_request_normal_frame(void);
 void disp_request_screen_replace(void);
 void disp_request_boot_replace(void);
 void disp_request_recovery_clean(void);
-static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp);
+static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp);
 static bool display_internal_heap_ok_for_hard_clean();
 static bool display_internal_heap_critical();
 
@@ -248,10 +248,23 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
 
     File f;
     const char *path = NULL;
+    bool seen[4] = {false, false, false, false};
     Serial.printf("[SLEEP IMG] resolve preferred=%s\n", preferred);
-    for (const char *candidate : candidates) {
+    for (size_t i = 0; i < 4; ++i) {
+        const char *candidate = candidates[i];
         if (!candidate || !candidate[0]) continue;
-        if (path && strcmp(path, candidate) == 0) continue;
+        bool duplicate = false;
+        for (size_t j = 0; j < i; ++j) {
+            if (seen[j] && strcmp(candidates[j], candidate) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            Serial.printf("[SLEEP IMG] skip duplicate path=%s\n", candidate);
+            continue;
+        }
+        seen[i] = true;
         Serial.printf("[SLEEP IMG] try path=%s\n", candidate);
         File try_f = SD.open(candidate, FILE_READ);
         if (try_f && !try_f.isDirectory()) {
@@ -303,6 +316,11 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
 
     const int screen_w = epd_rotated_display_width();
     const int screen_h = epd_rotated_display_height();
+    Serial.printf("[SLEEP IMG] heap before free_internal=%u largest_internal=%u free_psram=%u largest_psram=%u\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
     uint16_t *line_buf = (uint16_t *)ps_malloc(4096 * sizeof(uint16_t));
     if (!line_buf) {
         free(png_raw);
@@ -341,6 +359,8 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
     if (scaled_h < 1) scaled_h = 1;
     const int offset_x = (screen_w - scaled_w) / 2;
     const int offset_y = (screen_h - scaled_h) / 2;
+    Serial.printf("[SLEEP IMG] png src=%dx%d display=%dx%d draw=%dx%d offset=%d,%d\n",
+                  src_w, src_h, screen_w, screen_h, scaled_w, scaled_h, offset_x, offset_y);
 
     if (xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
         free(line_buf);
@@ -387,7 +407,18 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
     }
     memcpy(shutdown_commit_buf, decodebuffer, EPD_IMAGE_BUF_SIZE);
     xSemaphoreGive(framebuffer_mutex);
-    display_commit_frame(DISPLAY_UPDATE_SHUTDOWN_IMAGE, shutdown_commit_buf);
+    Serial.println("[SLEEP IMG] commit begin");
+    bool commit_ok = display_commit_frame(DISPLAY_UPDATE_SHUTDOWN_IMAGE, shutdown_commit_buf);
+    Serial.printf("[SLEEP IMG] commit end %s\n", commit_ok ? "ok" : "failed");
+    if (!commit_ok) {
+        Serial.printf("[SLEEP IMG] physical commit failed path=%s\n", path);
+        return false;
+    }
+    Serial.printf("[SLEEP IMG] heap after free_internal=%u largest_internal=%u free_psram=%u largest_psram=%u\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
     Serial.printf("[SLEEP IMG] rendered: %s\n", path);
     return true;
 }
@@ -516,7 +547,8 @@ static void epd_low_level_self_test()
     (void)full_area;
 
     epd_poweron();
-    checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+    EpdDrawError gl16_err = epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature());
+        checkError(gl16_err);
     epd_poweroff();
 
     Serial.println("[EPD SELFTEST] complete");
@@ -536,7 +568,8 @@ void disp_full_refresh(void)
 {
     epd_hl_set_all_white(&hl);
     epd_poweron();
-    checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+    EpdDrawError gl16_err = epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature());
+        checkError(gl16_err);
     epd_poweroff();
 }
 
@@ -572,7 +605,8 @@ void dips_clean(void)
     disp_full_clean();
     epd_hl_set_all_white(&hl);
     epd_poweron();
-    checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+    EpdDrawError gc16_err = epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature());
+        checkError(gc16_err);
     epd_poweroff();
 
     epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
@@ -593,7 +627,8 @@ void disp_refresh_screen(void)
     disp_full_clean();
     epd_hl_set_all_white(&hl);
     epd_poweron();
-    checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+    EpdDrawError gc16_err = epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature());
+        checkError(gc16_err);
     epd_poweroff();
 
     epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
@@ -663,7 +698,7 @@ static void display_set_next_snapshot_kind(DisplayUpdateKind kind)
 static void display_mark_reliable_pending(DisplayUpdateKind kind)
 {
     if (!display_cmd_is_reliable(kind)) {
-        return;
+        return false;
     }
     DisplayUpdateKind old_kind = display_reliable_pending_kind;
     if (display_update_kind_priority(kind) > display_update_kind_priority(old_kind)) {
@@ -675,11 +710,11 @@ static void display_mark_reliable_pending(DisplayUpdateKind kind)
 static void release_snapshot(uint32_t seq, uint8_t *snapshot)
 {
     if (!display_snapshot_mutex) {
-        return;
+        return gc16_err == EPD_DRAW_SUCCESS && gl16_err == EPD_DRAW_SUCCESS;
     }
     if (xSemaphoreTake(display_snapshot_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
         Serial.printf("[DISPLAY QUEUE ERROR] release lock timeout seq=%lu\n", (unsigned long)seq);
-        return;
+        return gl16_err == EPD_DRAW_SUCCESS;
     }
     for (uint8_t i = 0; i < DISPLAY_SNAPSHOT_COUNT; ++i) {
         if (display_snapshot_pool[i] == snapshot) {
@@ -1801,11 +1836,15 @@ static bool display_safe_for_recovery_clean()
     return true;
 }
 
-static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp)
+static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp)
 {
     if (kind == DISPLAY_UPDATE_NONE) {
         Serial.println("[DISPLAY LIFECYCLE] no pending update; skipping physical commit");
-        return;
+        return false;
+    }
+    if (!framebuffer4bpp) {
+        Serial.println("[DISPLAY LIFECYCLE] null framebuffer; skipping physical commit");
+        return false;
     }
     EpdRect full_area = {.x = 0, .y = 0, .width = epd_rotated_display_width(), .height = epd_rotated_display_height()};
     disp_physical_commit_count++;
@@ -1818,7 +1857,13 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
     bool is_replacement_commit = (kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_BOOT_REPLACE);
     bool do_hard_clean = is_replacement_commit;
     bool safe_for_hard_clean = true;
-    if (is_replacement_commit) {
+    if (do_hard_clean && !display_internal_heap_ok_for_hard_clean()) {
+        Serial.printf("[EPD POWER] hard clean skipped low internal heap free=%u largest=%u\n",
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        do_hard_clean = false;
+    }
+    if (do_hard_clean && is_replacement_commit) {
         safe_for_hard_clean = display_safe_for_recovery_clean();
     }
     if (kind == DISPLAY_UPDATE_RECOVERY_CLEAN && !safe_for_hard_clean) {
@@ -1829,13 +1874,6 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         Serial.println("[EPD POWER] screen replace hard clean downgraded to single GL16 replacement");
         do_hard_clean = false;
     }
-    if (do_hard_clean && !display_internal_heap_ok_for_hard_clean()) {
-        Serial.printf("[EPD POWER] hard clean skipped low internal heap free=%u largest=%u\n",
-                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-        do_hard_clean = false;
-    }
-
     if (kind == DISPLAY_UPDATE_BOOT_REPLACE) {
         do_hard_clean = do_hard_clean && safe_for_hard_clean;
         Serial.printf("[EPD POWER] boot replace hard clean decision safe=%d\n", safe_for_hard_clean ? 1 : 0);
@@ -1855,7 +1893,8 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         epd_poweron();
         display_log_power("before_update", kind);
         uint32_t t0_gc16 = millis();
-        checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+        EpdDrawError gc16_err = epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature());
+        checkError(gc16_err);
         uint32_t dt_gc16 = millis() - t0_gc16;
         Serial.printf("[EPD POWER] update complete kind=%d mode=GC16 duration_ms=%lu\n",
                       (int)kind, (unsigned long)dt_gc16);
@@ -1869,7 +1908,8 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         vTaskDelay(pdMS_TO_TICKS(50));
         display_log_power("before_update", kind);
         uint32_t t0_gl16 = millis();
-        checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+        EpdDrawError gl16_err = epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature());
+        checkError(gl16_err);
         uint32_t dt_gl16 = millis() - t0_gl16;
         Serial.printf("[EPD POWER] update complete kind=%d mode=GL16 duration_ms=%lu\n",
                       (int)kind, (unsigned long)dt_gl16);
@@ -1882,31 +1922,32 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
             home_waiting_for_redraw_commit = false;
             Serial.println("[HOME REDRAW] guard released after physical commit (post-clean)");
         }
-        return;
+        return gc16_err == EPD_DRAW_SUCCESS && gl16_err == EPD_DRAW_SUCCESS;
     }
     if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_SHUTDOWN_IMAGE) {
         disp_replace_commit_count++;
-        Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame begin");
+        Serial.println(kind == DISPLAY_UPDATE_SHUTDOWN_IMAGE ? "[DISPLAY LIFECYCLE] shutdown image GL16 frame begin" : "[DISPLAY LIFECYCLE] replacement GL16 frame begin");
         epd_hl_set_all_white(&hl);
         epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
         epd_poweron();
         vTaskDelay(pdMS_TO_TICKS(50));
         display_log_power("before_update", kind);
         uint32_t t0 = millis();
-        checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+        EpdDrawError gl16_err = epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature());
+        checkError(gl16_err);
         uint32_t dt = millis() - t0;
         Serial.printf("[EPD POWER] update complete kind=%d mode=GL16 duration_ms=%lu\n",
                       (int)kind, (unsigned long)dt);
         display_log_power("after_update", kind);
         vTaskDelay(pdMS_TO_TICKS(20));
         epd_poweroff();
-        Serial.println("[DISPLAY LIFECYCLE] replacement GL16 frame complete");
+        Serial.println(kind == DISPLAY_UPDATE_SHUTDOWN_IMAGE ? "[DISPLAY LIFECYCLE] shutdown image GL16 frame complete" : "[DISPLAY LIFECYCLE] replacement GL16 frame complete");
         if (home_waiting_for_redraw_commit &&
             (kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SHUTDOWN_IMAGE)) {
             home_waiting_for_redraw_commit = false;
             Serial.println("[HOME REDRAW] guard released after physical commit");
         }
-        return;
+        return gl16_err == EPD_DRAW_SUCCESS;
     }
     epd_hl_set_all_white(&hl);
     epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
@@ -1914,7 +1955,8 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
     vTaskDelay(pdMS_TO_TICKS(50));
     display_log_power("before_update", kind);
     uint32_t t0 = millis();
-    checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+    EpdDrawError gl16_err = epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature());
+    checkError(gl16_err);
     uint32_t dt = millis() - t0;
     Serial.printf("[EPD POWER] update complete kind=%d mode=GL16 duration_ms=%lu\n",
                   (int)kind, (unsigned long)dt);
@@ -1922,4 +1964,5 @@ static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
     vTaskDelay(pdMS_TO_TICKS(20));
     epd_poweroff();
     Serial.println("[DISPLAY LIFECYCLE] normal full GL16 frame complete");
+    return gl16_err == EPD_DRAW_SUCCESS;
 }
