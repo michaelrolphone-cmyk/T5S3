@@ -4046,7 +4046,7 @@ static void web_fetch_worker(void *param)
         goto done;
     }
     http_started = true;
-    http.setTimeout(2000);
+    http.setTimeout(10000);
     code = http.GET();
     if(code <= 0) {
         web_fetch_result = String("HTTP GET failed: ") + String(code);
@@ -4617,6 +4617,24 @@ typedef struct {
 static maps_render_ctx_t maps_render_ctx = {0};
 static volatile bool maps_cancel_requested = false;
 
+typedef struct {
+    bool busy;
+    bool pending;
+    bool done;
+    int row;
+    int col;
+    int z;
+    int x;
+    int y;
+    MapsTileProvider provider;
+    char path[160];
+    int http_code;
+    size_t bytes;
+    bool ok;
+} maps_tile_job_t;
+static maps_tile_job_t maps_tile_job = {0};
+static TaskHandle_t maps_tile_worker_handle = NULL;
+
 static void maps_render_reset(void)
 {
     memset(&maps_render_ctx, 0, sizeof(maps_render_ctx));
@@ -4633,8 +4651,37 @@ static void maps_render_start(double lat, double lon)
     maps_show_loading("Loading map...");
     lv_refr_now(NULL);
     Serial.println("[MAP] gps valid; loading tiles");
-    Serial.printf("[MAP] render start lat=%.6f lon=%.6f
-", lat, lon);
+    Serial.printf("[MAP] render start lat=%.6f lon=%.6f\n", lat, lon);
+}
+
+static void maps_tile_worker_task(void *param)
+{
+    (void)param;
+    while (1) {
+        if (maps_cancel_requested) {
+            if (maps_tile_job.pending || maps_tile_job.busy) Serial.println("[MAP] cancel observed");
+            maps_tile_job.pending = false;
+            maps_tile_job.busy = false;
+            maps_tile_job.done = false;
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        if (!maps_tile_job.pending || maps_tile_job.busy) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        maps_tile_job.busy = true;
+        maps_tile_job.done = false;
+        Serial.println("[MAP] worker start");
+        String url_redacted;
+        maps_tile_job.ok = maps_download_tile(maps_tile_job.path, maps_tile_job.provider, maps_tile_job.z, maps_tile_job.x, maps_tile_job.y, &maps_tile_job.http_code, url_redacted);
+        size_t file_size = 0; bool png_magic_ok = false;
+        if (maps_tile_job.ok && maps_check_png_file(maps_tile_job.path, &file_size, &png_magic_ok)) maps_tile_job.bytes = file_size;
+        else maps_tile_job.bytes = 0;
+        maps_tile_job.pending = false;
+        maps_tile_job.busy = false;
+        maps_tile_job.done = true;
+    }
 }
 
 static maps_render_result_t maps_try_render_step(void)
@@ -4659,10 +4706,8 @@ static maps_render_result_t maps_try_render_step(void)
                 maps_tile_for(maps_render_ctx.lat, maps_render_ctx.lon, z, &maps_render_ctx.base_x, &maps_render_ctx.base_y, &maps_render_ctx.px, &maps_render_ctx.py);
                 maps_render_ctx.left_x = (maps_render_ctx.px < MAPS_TILE_SIZE / 2) ? maps_render_ctx.base_x - 1 : maps_render_ctx.base_x;
                 maps_render_ctx.top_y = maps_render_ctx.base_y - 1;
-                Serial.printf("[MAP] grid start z=%d provider=%s left_x=%d top_y=%d
-", z, provider_name, maps_render_ctx.left_x, maps_render_ctx.top_y);
-                Serial.printf("[MAP] try z=%d provider=%s
-", z, provider_name);
+                Serial.printf("[MAP] grid start z=%d provider=%s left_x=%d top_y=%d\n", z, provider_name, maps_render_ctx.left_x, maps_render_ctx.top_y);
+                Serial.printf("[MAP] try z=%d provider=%s\n", z, provider_name);
             }
 
             int row = maps_render_ctx.row;
@@ -4672,16 +4717,13 @@ static maps_render_result_t maps_try_render_step(void)
             int tile_y = maps_render_ctx.top_y + row;
             int tile_x = (tile_x_raw % n + n) % n;
             maps_show_loading((String("Checking tile ") + String(tile_idx) + "/6...").c_str());
-            Serial.printf("[MAP] tile begin row=%d col=%d z=%d x=%d y=%d
-", row, col, z, tile_x, tile_y);
+            Serial.printf("[MAP] tile begin row=%d col=%d z=%d x=%d y=%d\n", row, col, z, tile_x, tile_y);
 
             if (tile_y >= 0 && tile_y < n) {
                 char tile[160]; lv_snprintf(tile, sizeof(tile), "/cache/maps/%s/%d/%d/%d.png", provider_name, z, tile_x, tile_y);
-                Serial.printf("[MAP] tile cache path=%s
-", tile);
+                Serial.printf("[MAP] tile cache path=%s\n", tile);
                 bool cache_hit = maps_file_exists_guarded(tile);
-                Serial.printf("[MAP] tile cache hit=%d
-", cache_hit ? 1 : 0);
+                Serial.printf("[MAP] tile cache hit=%d\n", cache_hit ? 1 : 0);
                 if (cache_hit) maps_render_ctx.saw_tile_source = true;
                 if (!cache_hit) {
                     if (WiFi.status() != WL_CONNECTED) {
@@ -4696,37 +4738,40 @@ static maps_render_result_t maps_try_render_step(void)
                         return MAPS_RENDER_RETRY;
                     }
                     maps_cache_dirs(provider_name, z, tile_x);
-                    int http_code = -1; String url_redacted;
                     maps_show_loading((String("Downloading tile ") + String(tile_idx) + "/6...").c_str());
-                    Serial.println("[MAP] tile download begin...");
-                    bool dl_ok = maps_download_tile(tile, provider, z, tile_x, tile_y, &http_code, url_redacted);
-                    size_t file_size = 0; bool png_magic_ok = false;
-                    if (dl_ok && maps_check_png_file(tile, &file_size, &png_magic_ok)) {
-                        Serial.printf("[MAP] tile download end http=%d bytes=%u
-", http_code, (unsigned)file_size);
-                    } else {
-                        Serial.printf("[MAP] tile download end http=%d bytes=0
-", http_code);
+                    if (!maps_tile_job.pending && !maps_tile_job.busy && !maps_tile_job.done) {
+                        lv_snprintf(maps_tile_job.path, sizeof(maps_tile_job.path), "%s", tile);
+                        maps_tile_job.row=row; maps_tile_job.col=col; maps_tile_job.z=z; maps_tile_job.x=tile_x; maps_tile_job.y=tile_y; maps_tile_job.provider=provider;
+                        maps_tile_job.http_code=-1; maps_tile_job.bytes=0; maps_tile_job.ok=false;
+                        maps_tile_job.pending = true;
+                        Serial.printf("[MAP] schedule download row=%d col=%d\n", row, col);
+                        Serial.println("[MAP] tile download begin...");
+                        return MAPS_RENDER_RETRY;
                     }
-                    if (!dl_ok) {
-                        goto tile_done;
+                    if (maps_tile_job.busy || maps_tile_job.pending) {
+                        Serial.println("[MAP] waiting for tile worker...");
+                        return MAPS_RENDER_RETRY;
                     }
-                    maps_render_ctx.saw_tile_source = true;
+                    if (maps_tile_job.done) {
+                        maps_tile_job.done = false;
+                        Serial.printf("[MAP] worker done row=%d col=%d ok=%d http=%d bytes=%u\n", maps_tile_job.row, maps_tile_job.col, maps_tile_job.ok ? 1 : 0, maps_tile_job.http_code, (unsigned)maps_tile_job.bytes);
+                        Serial.printf("[MAP] tile download end http=%d bytes=%u\n", maps_tile_job.http_code, (unsigned)maps_tile_job.bytes);
+                        if (!maps_tile_job.ok) goto tile_done;
+                        maps_render_ctx.saw_tile_source = true;
+                    }
                 }
                 size_t file_size = 0; bool png_magic_ok = false;
                 if (!maps_check_png_file(tile, &file_size, &png_magic_ok) || file_size <= 100 || !png_magic_ok) goto tile_done;
                 maps_show_loading((String("Decoding tile ") + String(tile_idx) + "/6...").c_str());
                 Serial.println("[MAP] tile decode begin...");
                 { String decode_result; bool ok = maps_decode_png_to_tile(row, col, tile, decode_result);
-                  Serial.printf("[MAP] tile decode end result=%s
-", ok ? "ok" : decode_result.c_str());
+                  Serial.printf("[MAP] tile decode end result=%s\n", ok ? "ok" : decode_result.c_str());
                   if (ok) maps_render_ctx.decoded_count++; else maps_render_ctx.saw_decode_failure = true; }
             }
 
 tile_done:
             maps_show_loading((String("Loading map ") + String(tile_idx) + "/6...").c_str());
-            Serial.printf("[MAP] tile complete row=%d col=%d
-", row, col);
+            Serial.printf("[MAP] tile complete row=%d col=%d\n", row, col);
             maps_render_ctx.col++;
             if (maps_render_ctx.col >= MAPS_GRID_COLS) { maps_render_ctx.col = 0; maps_render_ctx.row++; }
             if (maps_render_ctx.row >= MAPS_GRID_ROWS) {
@@ -4776,8 +4821,7 @@ static void maps_timer_cb(lv_timer_t *t)
 
     gps_status_t gps = {0};
     ui_gps_get_status(&gps);
-    Serial.printf("[MAP] gps ready=%u chars=%u fix=%u age=%u sats=%u lat=%.6f lon=%.6f
-",
+    Serial.printf("[MAP] gps ready=%u chars=%u fix=%u age=%u sats=%u lat=%.6f lon=%.6f\n",
                   gps.ready ? 1U : 0U, (unsigned)gps.chars_processed, gps.has_fix ? 1U : 0U,
                   (unsigned)gps.fix_age_ms, (unsigned)gps.satellites, gps.lat, gps.lon);
 
@@ -4786,8 +4830,7 @@ static void maps_timer_cb(lv_timer_t *t)
         if (!gps.has_serial_data || gps.chars_processed == 0) { maps_show_loading("No GPS serial data"); return; }
         if (!gps.has_fix) {
             if (MAPS_DEBUG_LOCATION_ENABLE && maps_debug_location_valid) {
-                Serial.printf("[MAP] using debug location lat=%.6f lon=%.6f
-", maps_debug_lat, maps_debug_lon);
+                Serial.printf("[MAP] using debug location lat=%.6f lon=%.6f\n", maps_debug_lat, maps_debug_lon);
                 maps_render_start(maps_debug_lat, maps_debug_lon);
                 return;
             }
@@ -4811,7 +4854,7 @@ static void maps_timer_cb(lv_timer_t *t)
     }
 }
 
-static void maps_back(lv_event_t *e){ if(e->code==LV_EVENT_CLICKED){ maps_cancel_requested = true; maps_render_ctx.cancelled = true; maps_render_ctx.active = false; if(maps_timer){ lv_timer_del(maps_timer); maps_timer=NULL; } scr_mgr_pop(false);} }
+static void maps_back(lv_event_t *e){ if(e->code==LV_EVENT_CLICKED){ Serial.println("[MAP] cancel requested"); maps_cancel_requested = true; maps_render_ctx.cancelled = true; maps_render_ctx.active = false; if(maps_timer){ lv_timer_del(maps_timer); maps_timer=NULL; } scr_mgr_pop(false);} }
 static void create13(lv_obj_t *p){
     scr_back_btn_create(p, "", maps_back);
     maps_status=lv_label_create(p); lv_obj_add_flag(maps_status, LV_OBJ_FLAG_HIDDEN);
@@ -4843,7 +4886,7 @@ static void create13(lv_obj_t *p){
     maps_info=lv_label_create(p); lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN);
     maps_loading = lv_label_create(maps_view); lv_label_set_text(maps_loading, "Loading map..."); lv_obj_center(maps_loading); lv_obj_add_flag(maps_loading, LV_OBJ_FLAG_HIDDEN);
 }
-static void entry13(void){ Serial.println("[MAP] entry"); maps_load_stadia_key(); maps_load_debug_location(); ui_gps_task_resume(); maps_waiting_wifi=false; maps_terminal_failure=false; maps_cancel_requested=false; maps_render_reset(); if (maps_status) lv_obj_add_flag(maps_status, LV_OBJ_FLAG_HIDDEN); if (maps_info) lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN); maps_show_loading("Waiting for GPS..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 1000, NULL);}
+static void entry13(void){ Serial.println("[MAP] entry"); maps_load_stadia_key(); maps_load_debug_location(); ui_gps_task_resume(); maps_waiting_wifi=false; maps_terminal_failure=false; maps_cancel_requested=false; maps_render_reset(); if(!maps_tile_worker_handle){ xTaskCreate(maps_tile_worker_task, "maps_tile_worker", 6144, NULL, 1, &maps_tile_worker_handle); } if (maps_status) lv_obj_add_flag(maps_status, LV_OBJ_FLAG_HIDDEN); if (maps_info) lv_obj_add_flag(maps_info, LV_OBJ_FLAG_HIDDEN); maps_show_loading("Waiting for GPS..."); if(maps_timer) lv_timer_del(maps_timer); maps_timer=lv_timer_create(maps_timer_cb, 1000, NULL);}
 static void exit13(void){ maps_cancel_requested=true; maps_render_ctx.cancelled=true; maps_render_ctx.active=false; if(maps_timer){ lv_timer_del(maps_timer); maps_timer=NULL; } maps_waiting_wifi=false; maps_terminal_failure=false; maps_render_reset(); }
 static void destroy13(void){ for (int row = 0; row < MAPS_GRID_ROWS; ++row) for (int col = 0; col < MAPS_GRID_COLS; ++col) { if(maps_tile_buf[row][col]){ free(maps_tile_buf[row][col]); maps_tile_buf[row][col]=NULL; } } if(maps_png_line_buf){ free(maps_png_line_buf); maps_png_line_buf=NULL; } if(maps_png_raw){ free(maps_png_raw); maps_png_raw=NULL; maps_png_raw_size=0; } }
 static scr_lifecycle_t screen13 = {.create=create13,.entry=entry13,.exit=exit13,.destroy=destroy13};
