@@ -28,6 +28,10 @@
 #define GLOBAL_BUF_LEN 48
 extern char global_buf[GLOBAL_BUF_LEN];
 
+#define SYSTEM_SLEEP_IMAGE_PATH "/system/display/sleep.png"
+#define LEGACY_SLEEP_IMAGE_PATH "/sleep.png"
+#define FALLBACK_SLEEP_ICON_PATH "/icons/apps/sleep.png"
+
 // io_extend
 extern "C" {
     void io_extend_lora_gps_power_on(bool en);

@@ -4901,7 +4901,6 @@ static void scr8_shutdown_timer_event(lv_timer_t *t)
     ui_shutdown();
 }
 
-static const char *SYSTEM_POWER_OFF_IMAGE_PATH = "/system/display/sleep.png";
 static const size_t SYSTEM_POWER_OFF_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 static lv_color_t *system_sleep_canvas_buf = NULL;
 static uint8_t *system_sleep_png_raw = NULL;
@@ -5019,6 +5018,10 @@ static void create8(lv_obj_t *parent)
 {
     if(battery_25896_is_vbus_in()) 
     {
+        Serial.println("[POWER_OFF] shutdown blocked by VBUS; PMIC shutdown path not executed");
+        bool preview_ok = disp_show_sleep_png_from_sd(SYSTEM_SLEEP_IMAGE_PATH);
+        Serial.printf("[SLEEP IMG] VBUS display-only pre-shutdown test %s\n", preview_ok ? "ok" : "failed");
+
         lv_obj_t * label = lv_label_create(parent);
         lv_obj_set_width(label, lv_pct(98));
         lv_obj_set_style_text_font(label, &Font_Mono_Bold_25, LV_PART_MAIN);
@@ -5037,11 +5040,11 @@ static void create8(lv_obj_t *parent)
 
         lv_obj_t * img = lv_img_create(parent);
         String reason = "";
-        if (system_sleep_load_png_to_canvas(SYSTEM_POWER_OFF_IMAGE_PATH, reason)) {
+        if (system_sleep_load_png_to_canvas(SYSTEM_SLEEP_IMAGE_PATH, reason)) {
             lv_img_set_src(img, &system_sleep_canvas_dsc);
         } else {
             lv_img_set_src(img, &img_start);
-            Serial.printf("[POWER_OFF] fallback path=%s reason=%s\n", SYSTEM_POWER_OFF_IMAGE_PATH, reason.c_str());
+            Serial.printf("[POWER_OFF] fallback path=%s reason=%s\n", SYSTEM_SLEEP_IMAGE_PATH, reason.c_str());
         }
         lv_obj_center(img);
 

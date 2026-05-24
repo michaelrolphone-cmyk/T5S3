@@ -570,14 +570,14 @@ void ui_shutdown_vcom(int v)
 
 void ui_shutdown(void)
 {
-    bool ok = disp_show_sleep_png_from_sd("/system/display/sleep.png");
+    bool ok = disp_show_sleep_png_from_sd(SYSTEM_SLEEP_IMAGE_PATH);
     Serial.printf("[SLEEP IMG] pre-shutdown display %s\n", ok ? "ok" : "failed");
     PPM.shutdown();
 }
 
 void ui_sleep(void)
 {
-    bool ok = disp_show_sleep_png_from_sd("/system/display/sleep.png");
+    bool ok = disp_show_sleep_png_from_sd(SYSTEM_SLEEP_IMAGE_PATH);
     Serial.printf("[SLEEP IMG] pre-sleep display %s\n", ok ? "ok" : "failed");
 
     touch.sleep();

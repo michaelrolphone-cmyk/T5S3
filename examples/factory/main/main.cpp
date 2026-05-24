@@ -228,12 +228,12 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
         return false;
     }
 
-    const char *preferred = (preferred_path && preferred_path[0]) ? preferred_path : "/system/display/sleep.png";
+    const char *preferred = (preferred_path && preferred_path[0]) ? preferred_path : SYSTEM_SLEEP_IMAGE_PATH;
     const char *candidates[] = {
         preferred,
-        "/system/display/sleep.png",
-        "/sleep.png",
-        "/icons/apps/sleep.png",
+        SYSTEM_SLEEP_IMAGE_PATH,
+        LEGACY_SLEEP_IMAGE_PATH,
+        FALLBACK_SLEEP_ICON_PATH,
     };
 
     if (!sd_guard_lock(3000)) {
