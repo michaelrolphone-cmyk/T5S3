@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPS Day Route Replay</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #f5f7fb; color: #102a43; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 12px; }
+    .panel { background: #fff; border-radius: 8px; padding: 12px; box-shadow: 0 1px 4px rgba(16,42,67,0.15); margin-bottom: 12px; }
+    .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; align-items: end; }
+    label { display: block; font-size: 0.9rem; margin-bottom: 4px; }
+    input, select, button { width: 100%; box-sizing: border-box; padding: 8px; font-size: 0.95rem; }
+    button { cursor: pointer; border: 1px solid #486581; background: #334e68; color: #fff; border-radius: 4px; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    #map { height: 62vh; min-height: 420px; border-radius: 8px; overflow: hidden; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+    .stat { background: #f0f4f8; padding: 8px; border-radius: 6px; font-size: 0.92rem; }
+    .hint { font-size: 0.9rem; color: #486581; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>GPS Day Route Replay</h1>
+    <div class="panel controls">
+      <div>
+        <label for="csvInput">Upload GPS CSV log(s)</label>
+        <input id="csvInput" type="file" accept=".csv,text/csv" multiple />
+      </div>
+      <div>
+        <label for="daySelect">Select day</label>
+        <select id="daySelect" disabled><option value="">Upload logs first</option></select>
+      </div>
+      <div>
+        <label for="speedRange">Replay speed (points/sec)</label>
+        <input id="speedRange" type="range" min="1" max="30" value="8" />
+      </div>
+      <div>
+        <button id="replayBtn" disabled>Start Replay</button>
+      </div>
+      <div>
+        <button id="showRouteBtn" disabled>Show Full Route</button>
+      </div>
+      <div>
+        <button id="clearBtn">Clear</button>
+      </div>
+    </div>
+
+    <div class="panel stats" id="stats">
+      <div class="stat">Points: <strong id="sPoints">0</strong></div>
+      <div class="stat">Distance: <strong id="sDistance">0.00 km</strong></div>
+      <div class="stat">Start: <strong id="sStart">-</strong></div>
+      <div class="stat">End: <strong id="sEnd">-</strong></div>
+      <div class="stat">Replay: <strong id="sReplay">Stopped</strong></div>
+    </div>
+
+    <div id="map" class="panel"></div>
+    <p class="hint">Expected CSV columns: timestamp, latitude, longitude. Supports multiple files (e.g. /gps/YYYY-MM-DD.csv).</p>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+    const csvInput = document.getElementById('csvInput');
+    const daySelect = document.getElementById('daySelect');
+    const replayBtn = document.getElementById('replayBtn');
+    const showRouteBtn = document.getElementById('showRouteBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const speedRange = document.getElementById('speedRange');
+
+    const sPoints = document.getElementById('sPoints');
+    const sDistance = document.getElementById('sDistance');
+    const sStart = document.getElementById('sStart');
+    const sEnd = document.getElementById('sEnd');
+    const sReplay = document.getElementById('sReplay');
+
+    const map = L.map('map').setView([20, 0], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let logsByDay = new Map();
+    let fullRouteLine = null;
+    let replayLine = null;
+    let replayMarker = null;
+    let replayTimer = null;
+
+    function parseCsvText(text) {
+      const lines = text.split(/\r?\n/).filter(Boolean);
+      if (lines.length < 2) return [];
+      const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+      const idxTs = headers.indexOf('timestamp');
+      const idxLat = headers.indexOf('latitude');
+      const idxLon = headers.indexOf('longitude');
+      if (idxTs === -1 || idxLat === -1 || idxLon === -1) return [];
+
+      const rows = [];
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(',');
+        if (cols.length <= Math.max(idxTs, idxLat, idxLon)) continue;
+        const timestamp = cols[idxTs].trim();
+        const lat = Number(cols[idxLat]);
+        const lon = Number(cols[idxLon]);
+        const t = new Date(timestamp);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon) || Number.isNaN(t.getTime())) continue;
+        rows.push({ timestamp, date: timestamp.slice(0, 10), lat, lon, timeMs: t.getTime() });
+      }
+      return rows;
+    }
+
+    function distanceKm(points) {
+      const R = 6371;
+      const toRad = d => d * Math.PI / 180;
+      let sum = 0;
+      for (let i = 1; i < points.length; i++) {
+        const a = points[i - 1], b = points[i];
+        const dLat = toRad(b.lat - a.lat);
+        const dLon = toRad(b.lon - a.lon);
+        const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+        const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+        sum += 2 * R * Math.asin(Math.sqrt(h));
+      }
+      return sum;
+    }
+
+    function clearLayers() {
+      if (fullRouteLine) map.removeLayer(fullRouteLine), fullRouteLine = null;
+      if (replayLine) map.removeLayer(replayLine), replayLine = null;
+      if (replayMarker) map.removeLayer(replayMarker), replayMarker = null;
+      if (replayTimer) clearInterval(replayTimer), replayTimer = null;
+      sReplay.textContent = 'Stopped';
+    }
+
+    function showStats(points) {
+      sPoints.textContent = String(points.length);
+      sDistance.textContent = `${distanceKm(points).toFixed(2)} km`;
+      sStart.textContent = points[0]?.timestamp || '-';
+      sEnd.textContent = points[points.length - 1]?.timestamp || '-';
+    }
+
+    function currentDayPoints() {
+      const key = daySelect.value;
+      return logsByDay.get(key) || [];
+    }
+
+    showRouteBtn.addEventListener('click', () => {
+      clearLayers();
+      const points = currentDayPoints();
+      if (points.length < 2) return;
+      fullRouteLine = L.polyline(points.map(p => [p.lat, p.lon]), { color: '#1f77b4', weight: 4 }).addTo(map);
+      replayMarker = L.circleMarker([points[0].lat, points[0].lon], { radius: 6, color: '#d62728' }).addTo(map);
+      map.fitBounds(fullRouteLine.getBounds(), { padding: [20, 20] });
+      sReplay.textContent = 'Full route shown';
+    });
+
+    replayBtn.addEventListener('click', () => {
+      clearLayers();
+      const points = currentDayPoints();
+      if (points.length < 2) return;
+
+      let i = 0;
+      const drawn = [];
+      replayLine = L.polyline([], { color: '#2ca02c', weight: 4 }).addTo(map);
+      replayMarker = L.circleMarker([points[0].lat, points[0].lon], { radius: 6, color: '#d62728' }).addTo(map);
+      map.fitBounds(L.polyline(points.map(p => [p.lat, p.lon])).getBounds(), { padding: [20, 20] });
+
+      const pps = Number(speedRange.value);
+      const intervalMs = Math.max(33, Math.floor(1000 / pps));
+      sReplay.textContent = `Running (${pps} pts/s)`;
+
+      replayTimer = setInterval(() => {
+        if (i >= points.length) {
+          clearInterval(replayTimer);
+          replayTimer = null;
+          sReplay.textContent = 'Completed';
+          return;
+        }
+        const p = points[i++];
+        drawn.push([p.lat, p.lon]);
+        replayLine.setLatLngs(drawn);
+        replayMarker.setLatLng([p.lat, p.lon]);
+      }, intervalMs);
+    });
+
+    daySelect.addEventListener('change', () => {
+      clearLayers();
+      const points = currentDayPoints();
+      showStats(points);
+      replayBtn.disabled = points.length < 2;
+      showRouteBtn.disabled = points.length < 2;
+    });
+
+    clearBtn.addEventListener('click', () => {
+      logsByDay = new Map();
+      daySelect.innerHTML = '<option value="">Upload logs first</option>';
+      daySelect.disabled = true;
+      replayBtn.disabled = true;
+      showRouteBtn.disabled = true;
+      clearLayers();
+      showStats([]);
+      map.setView([20, 0], 2);
+    });
+
+    csvInput.addEventListener('change', async () => {
+      clearLayers();
+      logsByDay = new Map();
+      const files = Array.from(csvInput.files || []);
+      for (const file of files) {
+        const rows = parseCsvText(await file.text());
+        for (const row of rows) {
+          if (!logsByDay.has(row.date)) logsByDay.set(row.date, []);
+          logsByDay.get(row.date).push(row);
+        }
+      }
+
+      for (const [d, rows] of logsByDay) {
+        rows.sort((a, b) => a.timeMs - b.timeMs);
+      }
+
+      const days = [...logsByDay.keys()].sort();
+      daySelect.innerHTML = days.length
+        ? days.map(d => `<option value="${d}">${d}</option>`).join('')
+        : '<option value="">No valid rows found</option>';
+      daySelect.disabled = days.length === 0;
+
+      if (days.length) {
+        daySelect.value = days[0];
+        const points = currentDayPoints();
+        showStats(points);
+        replayBtn.disabled = points.length < 2;
+        showRouteBtn.disabled = points.length < 2;
+      } else {
+        showStats([]);
+        replayBtn.disabled = true;
+        showRouteBtn.disabled = true;
+      }
+    });
+  </script>
+</body>
+</html>
