@@ -2881,6 +2881,99 @@ static void wifi_handle_settings_post(void)
     wifi_handle_settings_get();
 }
 
+static bool wifi_is_valid_iso_date(const String &date)
+{
+    if (date.length() != 10) return false;
+    for (int i = 0; i < 10; ++i) {
+        if (i == 4 || i == 7) {
+            if (date[i] != '-') return false;
+        } else if (!isDigit(date[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void wifi_handle_gps_logs_get(void)
+{
+    wifi_send_cors_headers();
+    if (!peri_buf[E_PERI_SD_CARD]) {
+        wifi_web_server.send(503, "application/json", "{\"error\":\"sd_unavailable\"}");
+        return;
+    }
+    if (!sd_guard_lock(3000)) {
+        wifi_web_server.send(503, "application/json", "{\"error\":\"sd_busy\"}");
+        return;
+    }
+
+    const String date = wifi_web_server.arg("date");
+    if (date.length() == 0) {
+        File gps_dir = SD.open("/gps");
+        if (!gps_dir || !gps_dir.isDirectory()) {
+            if (gps_dir) gps_dir.close();
+            sd_guard_unlock();
+            wifi_web_server.send(200, "application/json", "{\"days\":[]}");
+            return;
+        }
+
+        String body = "{\"days\":[";
+        bool first = true;
+        File entry = gps_dir.openNextFile();
+        while (entry) {
+            if (!entry.isDirectory()) {
+                String name = entry.name();
+                int slash = name.lastIndexOf('/');
+                if (slash >= 0) name = name.substring(slash + 1);
+                if (name.length() == 14 && name.endsWith(".csv") && name != "undated.csv" && name != "gps_status.csv") {
+                    String day = name.substring(0, 10);
+                    if (wifi_is_valid_iso_date(day)) {
+                        if (!first) body += ",";
+                        body += "\"" + day + "\"";
+                        first = false;
+                    }
+                }
+            }
+            entry.close();
+            entry = gps_dir.openNextFile();
+        }
+        gps_dir.close();
+        sd_guard_unlock();
+        body += "]}";
+        wifi_web_server.send(200, "application/json", body);
+        return;
+    }
+
+    if (!wifi_is_valid_iso_date(date)) {
+        sd_guard_unlock();
+        wifi_web_server.send(400, "application/json", "{\"error\":\"invalid_date\",\"expect\":\"YYYY-MM-DD\"}");
+        return;
+    }
+
+    const String path = String("/gps/") + date + ".csv";
+    File f = SD.open(path.c_str(), FILE_READ);
+    if (!f || f.isDirectory()) {
+        if (f) f.close();
+        sd_guard_unlock();
+        wifi_web_server.send(404, "application/json", "{\"error\":\"not_found\"}");
+        return;
+    }
+
+    String body = "{\"date\":\"" + date + "\",\"logs\":[";
+    bool first = true;
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0 || line.startsWith("timestamp,")) continue;
+        if (!first) body += ",";
+        body += "\"" + line + "\"";
+        first = false;
+    }
+    body += "]}";
+    f.close();
+    sd_guard_unlock();
+    wifi_web_server.send(200, "application/json", body);
+}
+
 static String wifi_guess_content_type(const String &path)
 {
     if (path.endsWith(".html") || path.endsWith(".htm")) return "text/html";
@@ -2926,6 +3019,7 @@ static void wifi_start_web_services(void)
     wifi_web_server.on("/settings", HTTP_OPTIONS, wifi_handle_settings_options);
     wifi_web_server.on("/settings", HTTP_GET, wifi_handle_settings_get);
     wifi_web_server.on("/settings", HTTP_POST, wifi_handle_settings_post);
+    wifi_web_server.on("/gps/logs", HTTP_GET, wifi_handle_gps_logs_get);
     wifi_web_server.onNotFound([]() {
         String host = wifi_web_server.hostHeader();
         if (host.equalsIgnoreCase("paper.api") || host.equalsIgnoreCase("paper.api:80")) {
