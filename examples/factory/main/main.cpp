@@ -853,6 +853,22 @@ static void disp_flush_task(void *param)
             }
         }
 
+        if (shutdown_in_progress && has_pending_reliable &&
+            pending_reliable.kind != DISPLAY_UPDATE_SHUTDOWN_IMAGE) {
+            Serial.printf("[SHUTDOWN] drop worker reliable seq=%lu kind=%d\n",
+                          (unsigned long)pending_reliable.seq,
+                          (int)pending_reliable.kind);
+            release_snapshot(pending_reliable.seq, pending_reliable.snapshot);
+            has_pending_reliable = false;
+        }
+        if (shutdown_in_progress && has_pending_normal) {
+            Serial.printf("[SHUTDOWN] drop worker normal seq=%lu kind=%d\n",
+                          (unsigned long)pending_normal.seq,
+                          (int)pending_normal.kind);
+            release_snapshot(pending_normal.seq, pending_normal.snapshot);
+            has_pending_normal = false;
+        }
+
         if (has_pending_reliable) {
             Serial.printf("[DISPLAY QUEUE] commit reliable seq=%lu kind=%d\n",
                           (unsigned long)pending_reliable.seq, (int)pending_reliable.kind);
@@ -1897,6 +1913,10 @@ static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
     }
     if (!framebuffer4bpp) {
         Serial.println("[DISPLAY LIFECYCLE] null framebuffer; skipping physical commit");
+        return false;
+    }
+    if (shutdown_in_progress && kind != DISPLAY_UPDATE_SHUTDOWN_IMAGE) {
+        Serial.printf("[DISPLAY LIFECYCLE] suppress physical commit during shutdown kind=%d\n", (int)kind);
         return false;
     }
     if (!physical_display_mutex) {
