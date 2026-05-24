@@ -698,7 +698,7 @@ static void display_set_next_snapshot_kind(DisplayUpdateKind kind)
 static void display_mark_reliable_pending(DisplayUpdateKind kind)
 {
     if (!display_cmd_is_reliable(kind)) {
-        return false;
+        return;
     }
     DisplayUpdateKind old_kind = display_reliable_pending_kind;
     if (display_update_kind_priority(kind) > display_update_kind_priority(old_kind)) {
@@ -710,11 +710,11 @@ static void display_mark_reliable_pending(DisplayUpdateKind kind)
 static void release_snapshot(uint32_t seq, uint8_t *snapshot)
 {
     if (!display_snapshot_mutex) {
-        return gc16_err == EPD_DRAW_SUCCESS && gl16_err == EPD_DRAW_SUCCESS;
+        return;
     }
     if (xSemaphoreTake(display_snapshot_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
         Serial.printf("[DISPLAY QUEUE ERROR] release lock timeout seq=%lu\n", (unsigned long)seq);
-        return gl16_err == EPD_DRAW_SUCCESS;
+        return;
     }
     for (uint8_t i = 0; i < DISPLAY_SNAPSHOT_COUNT; ++i) {
         if (display_snapshot_pool[i] == snapshot) {
