@@ -5034,17 +5034,11 @@ static void create8(lv_obj_t *parent)
     } 
     else 
     {
-        ui_shutdown_vcom(5000);
-
-        lv_obj_t * img = lv_img_create(parent);
-        String reason = "";
-        if (system_sleep_load_png_to_canvas(SYSTEM_SLEEP_IMAGE_PATH, reason)) {
-            lv_img_set_src(img, &system_sleep_canvas_dsc);
-        } else {
-            lv_img_set_src(img, &img_start);
-            Serial.printf("[POWER_OFF] fallback path=%s reason=%s\n", SYSTEM_SLEEP_IMAGE_PATH, reason.c_str());
-        }
-        lv_obj_center(img);
+        lv_obj_t *label = lv_label_create(parent);
+        lv_obj_set_style_text_font(label, &Font_Mono_Bold_30, LV_PART_MAIN);
+        lv_obj_set_style_text_color(label, lv_color_hex(EPD_COLOR_TEXT), LV_PART_MAIN);
+        lv_label_set_text(label, "Powering off...");
+        lv_obj_center(label);
 
         if (scr8_shutdown_timer) {
             lv_timer_del(scr8_shutdown_timer);

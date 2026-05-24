@@ -146,6 +146,9 @@ static volatile bool disp_flush_task_started = false;
 static volatile bool disp_flush_task_create_failed = false;
 static SemaphoreHandle_t framebuffer_mutex = NULL;
 static SemaphoreHandle_t sd_mutex = NULL;
+static SemaphoreHandle_t physical_display_mutex = NULL;
+static volatile bool display_physical_commit_active = false;
+static volatile bool shutdown_in_progress = false;
 static bool display_have_vbus(void);
 static bool display_safe_for_hard_clean(void);
 static bool display_have_vbus_provisional(void);
@@ -165,6 +168,9 @@ static inline int display_update_kind_priority(DisplayUpdateKind kind);
 static void display_set_next_snapshot_kind(DisplayUpdateKind kind);
 static void ensure_display_flush_task_started(void);
 bool disp_show_sleep_png_from_sd(const char *preferred_path);
+bool display_begin_shutdown_sequence(uint32_t timeout_ms);
+void display_cancel_pending_updates_for_shutdown(void);
+bool display_show_shutdown_image_from_sd(const char *path);
 static inline void epd_image_set_pixel_4bpp(uint8_t *buf, int32_t width, int32_t x, int32_t y, uint8_t gray4);
 
 static inline uint8_t rgb565_to_gray4(uint16_t rgb565)
@@ -771,6 +777,47 @@ static void absorb_cmd(DisplayCmd &pending_normal, bool &has_pending_normal,
     queue_or_replace(pending_normal, has_pending_normal, in, "coalesce normal");
 }
 
+void display_cancel_pending_updates_for_shutdown(void)
+{
+    if (!display_q) return;
+    DisplayCmd cmd = {};
+    uint32_t dropped = 0;
+    while (xQueueReceive(display_q, &cmd, 0) == pdTRUE) {
+        release_snapshot(cmd.seq, cmd.snapshot);
+        dropped++;
+    }
+    Serial.printf("[SHUTDOWN] display queue drained dropped=%lu\n", (unsigned long)dropped);
+}
+
+bool display_begin_shutdown_sequence(uint32_t timeout_ms)
+{
+    shutdown_in_progress = true;
+    disp_flush_enabled = false;
+    indev_touch_enabled = false;
+    display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
+    display_reliable_pending_kind = DISPLAY_UPDATE_NONE;
+    disp_force_clear_next_flush = false;
+
+    display_cancel_pending_updates_for_shutdown();
+
+    uint32_t start = millis();
+    while (display_physical_commit_active && (millis() - start) < timeout_ms) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    bool idle = !display_physical_commit_active;
+    Serial.printf("[SHUTDOWN] display quiesce %s active=%d\n", idle ? "ok" : "timeout", idle ? 0 : 1);
+    return idle;
+}
+
+bool display_show_shutdown_image_from_sd(const char *path)
+{
+    if (!display_begin_shutdown_sequence(30000)) {
+        Serial.println("[SHUTDOWN] display quiesce failed; refusing unsafe final EPD commit");
+        return false;
+    }
+    return disp_show_sleep_png_from_sd(path);
+}
+
 static void disp_flush_task(void *param)
 {
     (void)param;
@@ -1152,6 +1199,7 @@ static void lv_port_disp_init(void)
     decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);
     framebuffer_mutex = xSemaphoreCreateMutex();
+    physical_display_mutex = xSemaphoreCreateMutex();
     display_q = xQueueCreate(8, sizeof(DisplayCmd));
     display_snapshot_mutex = xSemaphoreCreateMutex();
     bool snapshot_pool_ok = true;
@@ -1161,7 +1209,7 @@ static void lv_port_disp_init(void)
             snapshot_pool_ok = false;
         }
     }
-    if (!lv_disp_buf_1 || !lv_disp_buf_2 || !decodebuffer || !displaybuffer || !framebuffer_mutex) {
+    if (!lv_disp_buf_1 || !lv_disp_buf_2 || !decodebuffer || !displaybuffer || !framebuffer_mutex || !physical_display_mutex) {
         Serial.println("[DISPLAY LIFECYCLE] FATAL: display buffers/mutex allocation failed; LVGL display not registered");
         return;
     }
@@ -1708,6 +1756,10 @@ void idf_loop()
 }
 static bool publish_snapshot(DisplayUpdateKind kind, bool has_dirty_union, const lv_area_t *dirty_union)
 {
+    if (shutdown_in_progress) {
+        Serial.printf("[DISPLAY QUEUE] suppress publish during shutdown kind=%d\n", (int)kind);
+        return false;
+    }
     if (!(framebuffer_mutex && decodebuffer && display_q && display_snapshot_mutex)) {
         return false;
     }
@@ -1838,6 +1890,7 @@ static bool display_safe_for_recovery_clean()
 
 static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp)
 {
+    bool ok = false;
     if (kind == DISPLAY_UPDATE_NONE) {
         Serial.println("[DISPLAY LIFECYCLE] no pending update; skipping physical commit");
         return false;
@@ -1846,6 +1899,16 @@ static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
         Serial.println("[DISPLAY LIFECYCLE] null framebuffer; skipping physical commit");
         return false;
     }
+    if (!physical_display_mutex) {
+        Serial.println("[DISPLAY LOCK] physical display mutex unavailable");
+        return false;
+    }
+    if (xSemaphoreTake(physical_display_mutex, pdMS_TO_TICKS(30000)) != pdTRUE) {
+        Serial.println("[DISPLAY LOCK] physical display lock timeout");
+        return false;
+    }
+    display_physical_commit_active = true;
+    Serial.printf("[DISPLAY LOCK] acquired kind=%d\n", (int)kind);
     EpdRect full_area = {.x = 0, .y = 0, .width = epd_rotated_display_width(), .height = epd_rotated_display_height()};
     disp_physical_commit_count++;
     Serial.printf("[DISPLAY LIFECYCLE] commit=%lu kind=%d lvgl_flushes=%lu\n",
@@ -1922,7 +1985,8 @@ static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
             home_waiting_for_redraw_commit = false;
             Serial.println("[HOME REDRAW] guard released after physical commit (post-clean)");
         }
-        return gc16_err == EPD_DRAW_SUCCESS && gl16_err == EPD_DRAW_SUCCESS;
+        ok = (gc16_err == EPD_DRAW_SUCCESS && gl16_err == EPD_DRAW_SUCCESS);
+        goto done;
     }
     if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_SHUTDOWN_IMAGE) {
         disp_replace_commit_count++;
@@ -1947,7 +2011,8 @@ static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
             home_waiting_for_redraw_commit = false;
             Serial.println("[HOME REDRAW] guard released after physical commit");
         }
-        return gl16_err == EPD_DRAW_SUCCESS;
+        ok = (gl16_err == EPD_DRAW_SUCCESS);
+        goto done;
     }
     epd_hl_set_all_white(&hl);
     epd_draw_rotated_image(full_area, framebuffer4bpp, epd_hl_get_framebuffer(&hl));
@@ -1964,5 +2029,10 @@ static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
     vTaskDelay(pdMS_TO_TICKS(20));
     epd_poweroff();
     Serial.println("[DISPLAY LIFECYCLE] normal full GL16 frame complete");
-    return gl16_err == EPD_DRAW_SUCCESS;
+    ok = (gl16_err == EPD_DRAW_SUCCESS);
+done:
+    display_physical_commit_active = false;
+    xSemaphoreGive(physical_display_mutex);
+    Serial.printf("[DISPLAY LOCK] released kind=%d ok=%d\n", (int)kind, ok ? 1 : 0);
+    return ok;
 }

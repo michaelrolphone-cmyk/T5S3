@@ -570,14 +570,32 @@ void ui_shutdown_vcom(int v)
 
 void ui_shutdown(void)
 {
-    bool ok = disp_show_sleep_png_from_sd(SYSTEM_SLEEP_IMAGE_PATH);
+    Serial.println("[SHUTDOWN] begin");
+    indev_touch_dis();
+    analogWrite(BOARD_BL_EN, 0);
+    lora_sleep();
+    bool ok = display_show_shutdown_image_from_sd(SYSTEM_SLEEP_IMAGE_PATH);
     Serial.printf("[SLEEP IMG] pre-shutdown display %s\n", ok ? "ok" : "failed");
+    touch.sleep();
+    digitalWrite(BOARD_TOUCH_RST, LOW);
+    digitalWrite(BOARD_LORA_RST, LOW);
+    io_extend_lora_gps_power_on(false);
+    epd_poweroff();
+    Serial.println("[SHUTDOWN] PMIC shutdown request begin");
     PPM.shutdown();
+    Serial.println("[SHUTDOWN] PMIC shutdown request returned");
+    Serial.println("[SHUTDOWN] PMIC shutdown returned; entering deep sleep fallback");
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)BOARD_BOOT_BTN, 0);
+    esp_deep_sleep_start();
 }
 
 void ui_sleep(void)
 {
-    bool ok = disp_show_sleep_png_from_sd(SYSTEM_SLEEP_IMAGE_PATH);
+    Serial.println("[SLEEP] begin");
+    indev_touch_dis();
+    analogWrite(BOARD_BL_EN, 0);
+    lora_sleep();
+    bool ok = display_show_shutdown_image_from_sd(SYSTEM_SLEEP_IMAGE_PATH);
     Serial.printf("[SLEEP IMG] pre-sleep display %s\n", ok ? "ok" : "failed");
 
     touch.sleep();
