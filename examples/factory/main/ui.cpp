@@ -4651,6 +4651,7 @@ static bool maps_download_inflight = false;
 static uint32_t maps_request_id_next = 1;
 static uint32_t maps_request_id_inflight = 0;
 static const uint32_t MAPS_WORKER_STACK_BYTES = 4096;
+static void maps_tile_worker_task(void *param);
 
 static void maps_render_reset(void)
 {
