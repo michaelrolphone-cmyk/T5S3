@@ -554,7 +554,7 @@ static void epd_low_level_self_test()
 
     epd_poweron();
     EpdDrawError gl16_err = epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature());
-        checkError(gl16_err);
+    checkError(gl16_err);
     epd_poweroff();
 
     Serial.println("[EPD SELFTEST] complete");
@@ -575,7 +575,7 @@ void disp_full_refresh(void)
     epd_hl_set_all_white(&hl);
     epd_poweron();
     EpdDrawError gl16_err = epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature());
-        checkError(gl16_err);
+    checkError(gl16_err);
     epd_poweroff();
 }
 
@@ -612,7 +612,7 @@ void dips_clean(void)
     epd_hl_set_all_white(&hl);
     epd_poweron();
     EpdDrawError gc16_err = epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature());
-        checkError(gc16_err);
+    checkError(gc16_err);
     epd_poweroff();
 
     epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
@@ -634,7 +634,7 @@ void disp_refresh_screen(void)
     epd_hl_set_all_white(&hl);
     epd_poweron();
     EpdDrawError gc16_err = epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature());
-        checkError(gc16_err);
+    checkError(gc16_err);
     epd_poweroff();
 
     epd_draw_rotated_image(rener_area, decodebuffer, epd_hl_get_framebuffer(&hl));
@@ -2024,7 +2024,7 @@ static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
             Serial.println("[HOME REDRAW] guard released after physical commit (post-clean)");
         }
         bool ok = (gc16_err == EPD_DRAW_SUCCESS && gl16_err == EPD_DRAW_SUCCESS);
-        Serial.printf("[DISPLAY LOCK] released kind=%d ok=%d\n", (int)kind, ok ? 1 : 0);
+        Serial.printf("[DISPLAY LOCK] releasing kind=%d ok=%d\n", (int)kind, ok ? 1 : 0);
         return ok;
     }
     if (kind == DISPLAY_UPDATE_BOOT_REPLACE || kind == DISPLAY_UPDATE_SCREEN_REPLACE || kind == DISPLAY_UPDATE_RECOVERY_CLEAN || kind == DISPLAY_UPDATE_SHUTDOWN_IMAGE) {
@@ -2051,7 +2051,7 @@ static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
             Serial.println("[HOME REDRAW] guard released after physical commit");
         }
         bool ok = (gl16_err == EPD_DRAW_SUCCESS);
-        Serial.printf("[DISPLAY LOCK] released kind=%d ok=%d\n", (int)kind, ok ? 1 : 0);
+        Serial.printf("[DISPLAY LOCK] releasing kind=%d ok=%d\n", (int)kind, ok ? 1 : 0);
         return ok;
     }
     epd_hl_set_all_white(&hl);
@@ -2070,6 +2070,6 @@ static bool display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuf
     epd_poweroff();
     Serial.println("[DISPLAY LIFECYCLE] normal full GL16 frame complete");
     bool ok = (gl16_err == EPD_DRAW_SUCCESS);
-    Serial.printf("[DISPLAY LOCK] released kind=%d ok=%d\n", (int)kind, ok ? 1 : 0);
+    Serial.printf("[DISPLAY LOCK] releasing kind=%d ok=%d\n", (int)kind, ok ? 1 : 0);
     return ok;
 }
