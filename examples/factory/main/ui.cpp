@@ -2671,6 +2671,7 @@ static String wifi_ap_pwd  = "12345678";
 static WebServer wifi_web_server(80);
 static DNSServer wifi_dns_server;
 static bool wifi_web_started = false;
+static bool wifi_boot_init_pending = false;
 
 static void wifi_load_saved_settings(void)
 {
@@ -3358,6 +3359,13 @@ static void destroy6(void)
 
 void ui_wifi_service_loop(void)
 {
+    if (wifi_boot_init_pending) {
+        wifi_boot_init_pending = false;
+        wifi_load_saved_settings();
+        wifi_enable_apsta();
+        wifi_connect_saved_sta("startup");
+    }
+
     if (!wifi_web_started) return;
     wifi_dns_server.processNextRequest();
     wifi_web_server.handleClient();
@@ -5339,10 +5347,8 @@ void ui_entry(void)
     scr_mgr_register(SCREEN13_ID,  &screen13);  // maps
     scr_mgr_register(SCREEN14_ID,  &screen14);  // image preview
 
-    // Bring up Wi-Fi services at boot: keep AP available and try saved STA credentials.
-    wifi_load_saved_settings();
-    wifi_enable_apsta();
-    wifi_connect_saved_sta("startup");
+    // Defer Wi-Fi bring-up until service loop is running to avoid boot-time stalls.
+    wifi_boot_init_pending = true;
 
     scr_mgr_switch(SCREEN0_ID, false); // set root screen
     disp_request_boot_replace();
