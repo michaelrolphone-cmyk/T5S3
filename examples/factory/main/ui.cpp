@@ -5339,6 +5339,11 @@ void ui_entry(void)
     scr_mgr_register(SCREEN13_ID,  &screen13);  // maps
     scr_mgr_register(SCREEN14_ID,  &screen14);  // image preview
 
+    // Bring up Wi-Fi services at boot: keep AP available and try saved STA credentials.
+    wifi_load_saved_settings();
+    wifi_enable_apsta();
+    wifi_connect_saved_sta("startup");
+
     scr_mgr_switch(SCREEN0_ID, false); // set root screen
     disp_request_boot_replace();
     scr_mgr_set_anim(LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE);
