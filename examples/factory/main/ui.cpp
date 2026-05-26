@@ -3054,7 +3054,7 @@ static void wifi_start_web_services(void)
     wifi_web_started = true;
 }
 
-static void wifi_enable_apsta(void)
+static void wifi_enable_apsta(bool start_services = true)
 {
     WiFi.mode(WIFI_AP_STA);
 
@@ -3067,7 +3067,9 @@ static void wifi_enable_apsta(void)
     }
 
     Serial.printf("[wifi] AP started: %s IP=%s\n", wifi_ap_ssid.c_str(), WiFi.softAPIP().toString().c_str());
-    wifi_start_web_services();
+    if (start_services) {
+        wifi_start_web_services();
+    }
 }
 
 static void wifi_info_label_create(lv_obj_t *parent)
@@ -3129,7 +3131,7 @@ static void wifi_config_event_handler(lv_event_t *e)
         smartConfigStart = false;
         return;
     }
-    wifi_enable_apsta();
+    wifi_enable_apsta(true);
     WiFi.disconnect();
     smartConfigStart = true;
     WiFi.beginSmartConfig();
@@ -3258,7 +3260,7 @@ static void create6(lv_obj_t *parent)
     lv_obj_align(wifi_st_lab, LV_ALIGN_BOTTOM_RIGHT, -0, -190);
 
     wifi_load_saved_settings();
-    wifi_enable_apsta();
+    wifi_enable_apsta(true);
 
     if(ui_wifi_get_status()) {
         wifi_info_label_create(parent);
@@ -3362,7 +3364,7 @@ void ui_wifi_service_loop(void)
     if (wifi_boot_init_pending) {
         wifi_boot_init_pending = false;
         wifi_load_saved_settings();
-        wifi_enable_apsta();
+        wifi_enable_apsta(false);
         wifi_connect_saved_sta("startup");
     }
 
