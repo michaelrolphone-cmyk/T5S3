@@ -877,6 +877,18 @@ static void springboard_load_page_icons(int page)
     springboard_runtime_icon *runtime = (page == 0) ? springboard_icons_page1 : springboard_icons_page2;
     int count = (page == 0) ? (int)ARRAY_LEN(icon_buf) : (int)ARRAY_LEN(icon_buf2);
     for (int i = 0; i < count; ++i) {
+        if (runtime[i].img_or_canvas) {
+            lv_obj_del(runtime[i].img_or_canvas);
+            runtime[i].img_or_canvas = NULL;
+        }
+        if (runtime[i].visible_buf) {
+            free(runtime[i].visible_buf);
+            runtime[i].visible_buf = NULL;
+        }
+        runtime[i].loaded_cache = false;
+        runtime[i].source_path[0] = '\0';
+        runtime[i].cache_path[0] = '\0';
+
         const char *path_used = NULL;
         bool alias_used = false;
         if (springboard_icon_png_exists(src_icons[i].png_path)) path_used = src_icons[i].png_path;
