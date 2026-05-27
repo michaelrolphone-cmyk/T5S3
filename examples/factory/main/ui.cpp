@@ -377,6 +377,8 @@ struct springboard_runtime_icon {
     lv_obj_t *img_or_canvas;
     lv_color_t *visible_buf;
     bool loaded_cache;
+    int16_t pos_x;
+    int16_t pos_y;
     char source_path[96];
     char cache_path[128];
 };
@@ -837,17 +839,11 @@ static void springboard_create_page_icons(lv_obj_t *page, const menu_icon *icons
 {
     for (int i = 0; i < icon_count; ++i) {
         runtime[i] = {};
-        lv_obj_t *slot = lv_obj_create(page);
-        runtime[i].slot = slot;
-        lv_obj_set_size(slot, SPRINGBOARD_ICON_W, SPRINGBOARD_ICON_H);
-        lv_obj_set_style_bg_opa(slot, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_border_width(slot, 0, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(slot, 0, LV_PART_MAIN);
-        lv_obj_clear_flag(slot, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(slot, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_pos(slot, icons[i].offs_x, icons[i].offs_y);
-        lv_obj_add_event_cb(slot, menu_btn_event, LV_EVENT_CLICKED, (void *)(global_index_base + i));
+        runtime[i].slot = page;
+        runtime[i].pos_x = icons[i].offs_x;
+        runtime[i].pos_y = icons[i].offs_y;
     }
+    (void)global_index_base;
 }
 
 static void springboard_unload_page_icons(int page)
@@ -916,6 +912,8 @@ static void springboard_load_page_icons(int page)
                 lv_canvas_set_buffer(canvas, runtime[i].visible_buf, SPRINGBOARD_ICON_W, SPRINGBOARD_ICON_H, LV_IMG_CF_TRUE_COLOR);
                 lv_obj_set_style_bg_opa(canvas, LV_OPA_TRANSP, LV_PART_MAIN);
                 lv_obj_set_style_border_width(canvas, 0, LV_PART_MAIN);
+                lv_obj_add_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
+                lv_obj_add_event_cb(canvas, menu_btn_event, LV_EVENT_CLICKED, (void *)((page == 0 ? 0 : ARRAY_LEN(icon_buf)) + i));
                 child = canvas;
                 runtime[i].loaded_cache = true;
                 if (alias_used) Serial.printf("[ICON] alias loaded from cache %s\n", path_used);
@@ -930,9 +928,11 @@ static void springboard_load_page_icons(int page)
             Serial.printf("[ICON] using fallback img_test %s\n", src_icons[i].png_path);
             lv_obj_t *img = lv_img_create(runtime[i].slot);
             lv_img_set_src(img, &img_test);
+            lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(img, menu_btn_event, LV_EVENT_CLICKED, (void *)((page == 0 ? 0 : ARRAY_LEN(icon_buf)) + i));
             child = img;
         }
-        lv_obj_set_pos(child, 0, 0);
+        lv_obj_set_pos(child, runtime[i].pos_x, runtime[i].pos_y);
         runtime[i].img_or_canvas = child;
     }
     springboard_log_heap("after_load_page");
