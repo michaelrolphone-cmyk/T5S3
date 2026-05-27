@@ -2879,6 +2879,7 @@ static String wifi_ap_pwd  = "12345678";
 static WebServer wifi_web_server(80);
 static DNSServer wifi_dns_server;
 static bool wifi_web_started = false;
+static void wifi_start_web_services(void);
 
 static void wifi_load_saved_settings(void)
 {
@@ -2912,10 +2913,10 @@ static bool wifi_connect_saved_sta(const char *reason)
     WiFi.setAutoReconnect(true);
 
     WiFi.mode(WIFI_AP_STA);
-    if (WiFi.softAPIP().toString() == "0.0.0.0") {
-        if (!WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str())) {
-            Serial.println("[wifi] softAP start failed");
-        }
+    if (!WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str())) {
+        Serial.println("[wifi] softAP start failed");
+    } else {
+        wifi_start_web_services();
     }
 
     Serial.printf("[wifi] connecting saved STA for %s ssid='%s'\n",
@@ -5490,6 +5491,7 @@ void menu_taskbar_update_timer_cb(lv_timer_t *t)
         taskbar_statue[TASKBAR_ID_CHARGE] = charge;
     }
 
+    ui_wifi_set_status(WiFi.status() == WL_CONNECTED);
     wifi = ui_wifi_get_status();
     if(taskbar_statue[TASKBAR_ID_WIFI] != wifi)
     {
@@ -5550,4 +5552,7 @@ void ui_entry(void)
     scr_mgr_switch(SCREEN0_ID, false); // set root screen
     disp_request_boot_replace();
     scr_mgr_set_anim(LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE, LV_SCR_LOAD_ANIM_NONE);
+
+    // Auto-connect to previously saved STA credentials during boot.
+    wifi_connect_saved_sta("boot");
 }
