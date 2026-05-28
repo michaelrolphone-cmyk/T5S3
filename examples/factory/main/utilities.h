@@ -55,7 +55,7 @@
 
 static inline BaseType_t t5s3_create_task_checked(TaskFunction_t task_fn,
                                                   const char *task_name,
-                                                  const uint32_t stack_depth_words,
+                                                  const uint32_t stack_depth_bytes,
                                                   void *task_arg,
                                                   UBaseType_t priority,
                                                   TaskHandle_t *task_handle)
@@ -69,7 +69,7 @@ static inline BaseType_t t5s3_create_task_checked(TaskFunction_t task_fn,
         static StackType_t button_task_stack[3072 / sizeof(StackType_t)];
         TaskHandle_t handle = xTaskCreateStatic(task_fn,
                                                 task_name,
-                                                sizeof(button_task_stack) / sizeof(button_task_stack[0]),
+                                                sizeof(button_task_stack),
                                                 task_arg,
                                                 priority,
                                                 button_task_stack,
@@ -77,8 +77,9 @@ static inline BaseType_t t5s3_create_task_checked(TaskFunction_t task_fn,
         if (task_handle) {
             *task_handle = handle;
         }
-        Serial.printf("[BUTTON TASK] create_static name=%s handle=%p free_heap=%u\n",
+        Serial.printf("[BUTTON TASK] create_static name=%s stack_bytes=%u handle=%p free_heap=%u\n",
                       task_name,
+                      (unsigned)sizeof(button_task_stack),
                       (void *)handle,
                       ESP.getFreeHeap());
         return handle ? pdPASS : errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
@@ -86,7 +87,7 @@ static inline BaseType_t t5s3_create_task_checked(TaskFunction_t task_fn,
 
     BaseType_t rc = xTaskCreatePinnedToCore(task_fn,
                                             task_name,
-                                            stack_depth_words,
+                                            stack_depth_bytes,
                                             task_arg,
                                             priority,
                                             task_handle,
@@ -99,6 +100,6 @@ static inline BaseType_t t5s3_create_task_checked(TaskFunction_t task_fn,
     return rc;
 }
 
-#define xTaskCreate(task_fn, task_name, stack_depth_words, task_arg, priority, task_handle) \
-    t5s3_create_task_checked((task_fn), (task_name), (stack_depth_words), (task_arg), (priority), (task_handle))
+#define xTaskCreate(task_fn, task_name, stack_depth_bytes, task_arg, priority, task_handle) \
+    t5s3_create_task_checked((task_fn), (task_name), (stack_depth_bytes), (task_arg), (priority), (task_handle))
 #endif
