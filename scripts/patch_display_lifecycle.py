@@ -109,5 +109,12 @@ s = s.replace('''void disp_request_normal_frame(void)
 }
 ''')
 
+old_lut = 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_64K);'
+new_lut = 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_1K); // 1K LUT keeps renderer lookup table internal and avoids the 64K heap cliff'
+if old_lut in s:
+    s = s.replace(old_lut, new_lut, 1)
+else:
+    raise RuntimeError("Could not locate EPD_LUT_64K init call")
+
 p.write_text(s, encoding="utf-8")
-print("[PATCH] main.cpp display lifecycle patched: direct synchronous flush active")
+print("[PATCH] main.cpp display lifecycle patched: direct synchronous flush + internal 1K LUT active")
