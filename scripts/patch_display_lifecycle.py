@@ -4,9 +4,59 @@ Import("env")
 p = Path(env["PROJECT_DIR"]) / "examples" / "factory" / "main" / "main.cpp"
 s = p.read_text(encoding="utf-8")
 
+# Add a real 1-bit framebuffer for the 1K black/white display path.
+if "uint8_t *bwbuffer = NULL;" not in s:
+    s = s.replace(
+        "uint8_t *decodebuffer = NULL;\nuint8_t *displaybuffer = NULL;\n",
+        "uint8_t *decodebuffer = NULL;\nuint8_t *displaybuffer = NULL;\nuint8_t *bwbuffer = NULL;\n"
+    )
+
+if "#define EPD_BW_BUF_SIZE" not in s:
+    s = s.replace(
+        "#define EPD_IMAGE_BUF_SIZE (((epd_rotated_display_width() + 1) / 2) * epd_rotated_display_height())\n",
+        "#define EPD_IMAGE_BUF_SIZE (((epd_rotated_display_width() + 1) / 2) * epd_rotated_display_height())\n#define EPD_BW_BUF_SIZE (((epd_rotated_display_width() + 7) / 8) * epd_rotated_display_height())\n"
+    )
+
+if "static constexpr uint8_t EPD_BW_THRESHOLD" not in s:
+    s = s.replace(
+        "static constexpr uint8_t EPD_LOGICAL_WHITE_BYTE = 0xFF;\n",
+        "static constexpr uint8_t EPD_LOGICAL_WHITE_BYTE = 0xFF;\nstatic constexpr uint8_t EPD_BW_THRESHOLD = 160;\n"
+    )
+
+if "static inline void epd_bw_set_pixel" not in s:
+    marker = "static bool display_cmd_is_reliable(DisplayUpdateKind kind)"
+    helper = '''static inline bool lv_color_to_epd_bw_white(lv_color_t color)
+{
+    lv_color32_t c32;
+    c32.full = lv_color_to32(color);
+    uint16_t gray = (uint16_t)c32.ch.red * 76U +
+                    (uint16_t)c32.ch.green * 150U +
+                    (uint16_t)c32.ch.blue * 30U;
+    uint8_t gray8 = gray >> 8;
+    return gray8 >= EPD_BW_THRESHOLD;
+}
+
+static inline void epd_bw_set_pixel(uint8_t *buf, int32_t width, int32_t x, int32_t y, bool white)
+{
+    const int32_t pitch = (width + 7) / 8;
+    uint8_t *dst = &buf[y * pitch + (x >> 3)];
+    uint8_t mask = (uint8_t)(0x80 >> (x & 7));
+    if (white) {
+        *dst |= mask;
+    } else {
+        *dst &= (uint8_t)~mask;
+    }
+}
+
+'''
+    pos = s.find(marker)
+    if pos < 0:
+        raise RuntimeError("Could not locate display_cmd_is_reliable marker")
+    s = s[:pos] + helper + s[pos:]
+
 new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
 {
-    if (decodebuffer == NULL) {
+    if (bwbuffer == NULL) {
         lv_disp_flush_ready(disp);
         return;
     }
@@ -17,7 +67,7 @@ new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area
     }
 
     if (framebuffer_mutex && xSemaphoreTake(framebuffer_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        Serial.println("[DISPLAY DIRECT] flush lock timeout");
+        Serial.println("[DISPLAY BW] flush lock timeout");
         lv_disp_flush_ready(disp);
         return;
     }
@@ -33,8 +83,8 @@ new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area
         for (int32_t x = 0; x < w; x++) {
             int32_t dst_x = area->x1 + x;
             if (dst_x < 0 || dst_x >= screen_w) continue;
-            uint8_t gray4 = lv_color_to_epd_gray4(color_p[y * w + x]);
-            epd_image_set_pixel_4bpp(decodebuffer, screen_w, dst_x, dst_y, gray4);
+            bool white = lv_color_to_epd_bw_white(color_p[y * w + x]);
+            epd_bw_set_pixel(bwbuffer, screen_w, dst_x, dst_y, white);
         }
     }
 
@@ -53,18 +103,18 @@ new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area
         .height = epd_rotated_display_height(),
     };
 
-    epd_hl_set_all_white(&hl);
-    epd_draw_rotated_image(render_area, decodebuffer, epd_hl_get_framebuffer(&hl));
     if (framebuffer_mutex) xSemaphoreGive(framebuffer_mutex);
 
     epd_poweron();
-    if (ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) {
-        checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), render_area));
-    } else if (ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT) {
-        checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
-    } else {
-        checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
-    }
+    checkError(epd_draw_base(
+        render_area,
+        bwbuffer,
+        (EpdRect){.x = 0, .y = 0, .width = 0, .height = 0},
+        (EpdDrawMode)(MODE_DU | MODE_EPDIY_MONOCHROME | MODE_PACKING_8PPB | PREVIOUSLY_WHITE),
+        epd_ambient_temperature(),
+        NULL,
+        NULL,
+        WAVEFORM));
     epd_poweroff();
 
     display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
@@ -98,17 +148,33 @@ queue_check = '''    if (!display_q || !display_snapshot_mutex || !snapshot_pool
     }
     ensure_display_flush_task_started();
 '''
-s = s.replace(queue_check, '    Serial.println("[DISPLAY DIRECT] async display queue disabled; using synchronous LVGL flush path");\n')
+s = s.replace(queue_check, '    Serial.println("[DISPLAY BW] async display queue disabled; using synchronous 1-bit LVGL flush path");\n')
 
-if "disp_drv.render_start_cb = [](lv_disp_drv_t *drv)" not in s:
+alloc_old = "    decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);\n    displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);\n"
+alloc_new = "    decodebuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);\n    displaybuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_IMAGE_BUF_SIZE);\n    bwbuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), EPD_BW_BUF_SIZE);\n"
+if alloc_old in s and "bwbuffer = (uint8_t *)ps_calloc" not in s:
+    s = s.replace(alloc_old, alloc_new, 1)
+
+check_old = "if (!lv_disp_buf_1 || !lv_disp_buf_2 || !decodebuffer || !displaybuffer || !framebuffer_mutex)"
+s = s.replace(check_old, "if (!lv_disp_buf_1 || !lv_disp_buf_2 || !decodebuffer || !displaybuffer || !bwbuffer || !framebuffer_mutex)")
+
+if "if (bwbuffer) {" not in s:
+    s = s.replace(
+        "    if (displaybuffer) {\n        memset(displaybuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);\n    }\n",
+        "    if (displaybuffer) {\n        memset(displaybuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);\n    }\n    if (bwbuffer) {\n        memset(bwbuffer, 0xFF, EPD_BW_BUF_SIZE);\n    }\n"
+    )
+
+# Clear the real 1bpp framebuffer, not just the old grayscale staging buffer.
+if "if (bwbuffer) memset(bwbuffer, 0xFF, EPD_BW_BUF_SIZE);" not in s:
     s = s.replace('''    // disp_drv.render_start_cb = dips_render_start_cb;
 ''', '''    disp_drv.render_start_cb = [](lv_disp_drv_t *drv) {
         (void)drv;
         if (decodebuffer) memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
+        if (bwbuffer) memset(bwbuffer, 0xFF, EPD_BW_BUF_SIZE);
     };
 ''')
 else:
-    print("[PATCH] render_start clear already installed")
+    print("[PATCH] render_start BW clear already installed")
 
 s = s.replace('''void disp_request_normal_frame(void)
 {
@@ -124,17 +190,12 @@ s = s.replace('''void disp_request_normal_frame(void)
 lut_1k_comment = 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_1K); // 1K LUT keeps renderer lookup table internal and avoids the 64K heap cliff'
 lut_1k_plain = 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_1K);'
 lut_64k = 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_64K);'
-if lut_1k_comment in s:
-    s = s.replace(lut_1k_comment, lut_64k, 1)
-elif lut_1k_plain in s:
-    s = s.replace(lut_1k_plain, lut_64k, 1)
-elif lut_64k in s:
-    print("[PATCH] EPD init already uses EPD_LUT_64K")
+if lut_64k in s:
+    s = s.replace(lut_64k, lut_1k_comment, 1)
+elif lut_1k_plain in s or lut_1k_comment in s:
+    print("[PATCH] EPD init already uses EPD_LUT_1K")
 else:
     raise RuntimeError("Could not locate EPD LUT init call")
 
-s = s.replace('epd_set_lcd_pixel_clock_MHz(17);', 'epd_set_lcd_pixel_clock_MHz(5); // keep LCD feed slow enough for PSRAM-backed 64K LUT')
-s = s.replace('Serial.println("[EPD INIT] pixel clock set before boot clear");', 'Serial.println("[EPD INIT] pixel clock set to 5 MHz before boot clear");')
-
 p.write_text(s, encoding="utf-8")
-print("[PATCH] main.cpp display lifecycle patch complete: 64K LUT + 5MHz pixel clock + direct flush")
+print("[PATCH] main.cpp display lifecycle patch complete: true 1-bit black/white path active")
