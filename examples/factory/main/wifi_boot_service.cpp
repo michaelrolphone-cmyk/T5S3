@@ -14,10 +14,6 @@
  * a linker wrapper so the service is active from boot without changing ui.cpp.
  */
 
-extern "C" void __real__Z20ui_wifi_service_loopv(void);
-extern "C" bool __real__Z18ui_wifi_get_statusv(void);
-extern "C" void __real__Z18ui_wifi_set_statusb(bool status);
-
 static WebServer boot_web_server(80);
 static DNSServer boot_dns_server;
 
@@ -34,12 +30,10 @@ static wl_status_t boot_wifi_last_status = WL_IDLE_STATUS;
 static uint32_t boot_wifi_last_sta_attempt_ms = 0;
 static uint32_t boot_wifi_last_settings_check_ms = 0;
 static uint32_t boot_wifi_last_log_ms = 0;
-static uint32_t boot_wifi_last_real_service_ms = 0;
 
 static constexpr uint32_t WIFI_STA_RETRY_MS = 30000;
 static constexpr uint32_t WIFI_SETTINGS_CHECK_MS = 3000;
 static constexpr uint32_t WIFI_STATUS_LOG_MS = 15000;
-static constexpr uint32_t WIFI_REAL_SERVICE_MS = 100;
 
 static void boot_wifi_load_settings()
 {
@@ -260,7 +254,7 @@ static void boot_wifi_status_poll()
 {
     wl_status_t status = WiFi.status();
     bool connected = (status == WL_CONNECTED);
-    __real__Z18ui_wifi_set_statusb(connected);
+    ui_wifi_set_status(connected);
 
     if (status != boot_wifi_last_status) {
         Serial.printf("[wifi boot] STA status=%d connected=%d ip=%s\n", (int)status, connected ? 1 : 0, WiFi.localIP().toString().c_str());
@@ -313,11 +307,5 @@ extern "C" void __wrap__Z20ui_wifi_service_loopv(void)
     if (boot_wifi_web_started) {
         boot_dns_server.processNextRequest();
         boot_web_server.handleClient();
-    }
-
-    uint32_t now = millis();
-    if (now - boot_wifi_last_real_service_ms >= WIFI_REAL_SERVICE_MS) {
-        boot_wifi_last_real_service_ms = now;
-        __real__Z20ui_wifi_service_loopv();
     }
 }
