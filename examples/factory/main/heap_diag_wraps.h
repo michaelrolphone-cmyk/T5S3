@@ -3,13 +3,18 @@
 /*
  * Diagnostic-only wrappers.
  *
- * This header must be included only after the library declarations for the
- * wrapped calls have already been parsed. main.h includes epdiy/lvgl/FreeRTOS
- * headers before including this file.
+ * Include the wrapped library declarations first, then define call-site macros.
+ * This prevents function declarations in later headers from being rewritten by
+ * the diagnostic macros.
  */
-#include "heap_diag.h"
+#include <epdiy.h>
+#include "lvgl.h"
+#include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
+#include "heap_diag.h"
 
 #ifndef HEAP_DIAG_DISABLE_WRAP_MACROS
 
