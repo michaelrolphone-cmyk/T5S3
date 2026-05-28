@@ -46,3 +46,59 @@
 // Center/home button is wired to PCA9535 PC12 and read via button_read().
 // GPIO38 is the PCA9535 interrupt line; do not read the button as ESP32 GPIO48.
 #define BOARD_PCA_BUTTON_ACTIVE_HIGH   (0)
+
+#ifdef __cplusplus
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <Arduino.h>
+#include <string.h>
+
+static inline BaseType_t t5s3_create_task_checked(TaskFunction_t task_fn,
+                                                  const char *task_name,
+                                                  const uint32_t stack_depth_words,
+                                                  void *task_arg,
+                                                  UBaseType_t priority,
+                                                  TaskHandle_t *task_handle)
+{
+    if (task_name && strcmp(task_name, "lora_task") == 0) {
+        // main.cpp currently creates btn_task late in boot using the historical
+        // but misleading name "lora_task". At that point internal heap can be
+        // below 2 KB, so the dynamic xTaskCreate() allocation silently fails.
+        // Use static storage for that task so button polling still starts.
+        static StaticTask_t button_task_tcb;
+        static StackType_t button_task_stack[3072 / sizeof(StackType_t)];
+        TaskHandle_t handle = xTaskCreateStatic(task_fn,
+                                                task_name,
+                                                sizeof(button_task_stack) / sizeof(button_task_stack[0]),
+                                                task_arg,
+                                                priority,
+                                                button_task_stack,
+                                                &button_task_tcb);
+        if (task_handle) {
+            *task_handle = handle;
+        }
+        Serial.printf("[BUTTON TASK] create_static name=%s handle=%p free_heap=%u\n",
+                      task_name,
+                      (void *)handle,
+                      ESP.getFreeHeap());
+        return handle ? pdPASS : errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+    }
+
+    BaseType_t rc = xTaskCreatePinnedToCore(task_fn,
+                                            task_name,
+                                            stack_depth_words,
+                                            task_arg,
+                                            priority,
+                                            task_handle,
+                                            tskNO_AFFINITY);
+    Serial.printf("[TASK] create_dynamic name=%s rc=%d handle=%p free_heap=%u\n",
+                  task_name ? task_name : "<null>",
+                  (int)rc,
+                  task_handle ? (void *)*task_handle : NULL,
+                  ESP.getFreeHeap());
+    return rc;
+}
+
+#define xTaskCreate(task_fn, task_name, stack_depth_words, task_arg, priority, task_handle) \
+    t5s3_create_task_checked((task_fn), (task_name), (stack_depth_words), (task_arg), (priority), (task_handle))
+#endif
