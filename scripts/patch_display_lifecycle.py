@@ -46,33 +46,38 @@ new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area
         return;
     }
 
-    DisplayUpdateKind requested_kind = display_next_snapshot_kind;
-    DisplayUpdateKind kind = requested_kind != DISPLAY_UPDATE_NONE ? requested_kind : DISPLAY_UPDATE_NORMAL_FRAME;
+    EpdRect render_area = {
+        .x = 0,
+        .y = 0,
+        .width = epd_rotated_display_width(),
+        .height = epd_rotated_display_height(),
+    };
 
-    if (displaybuffer) {
-        memcpy(displaybuffer, decodebuffer, EPD_IMAGE_BUF_SIZE);
-    }
+    epd_draw_rotated_image(render_area, decodebuffer, epd_hl_get_framebuffer(&hl));
     if (framebuffer_mutex) xSemaphoreGive(framebuffer_mutex);
 
-    display_commit_frame(kind, displaybuffer ? displaybuffer : decodebuffer);
+    epd_poweron();
+    if (ui_refresh_get_mode() == UI_REFRESH_MODE_FAST) {
+        checkError(epd_hl_update_area(&hl, MODE_DU, epd_ambient_temperature(), render_area));
+    } else if (ui_refresh_get_mode() == UI_REFRESH_MODE_NEAT) {
+        checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+    } else {
+        checkError(epd_hl_update_screen(&hl, MODE_GL16, epd_ambient_temperature()));
+    }
+    epd_poweroff();
 
     display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
-    if (display_reliable_pending_kind == kind) {
-        display_reliable_pending_kind = DISPLAY_UPDATE_NONE;
-    }
+    display_reliable_pending_kind = DISPLAY_UPDATE_NONE;
     disp_force_clear_next_flush = false;
     lv_disp_flush_ready(disp);
 }
 '''
 
-if "[DISPLAY DIRECT] flush lock timeout" not in s:
-    start = s.find("static void disp_flush(lv_disp_drv_t *disp")
-    end = s.find("\nvoid disp_request_full_clear(void)", start)
-    if start < 0 or end < 0:
-        raise RuntimeError("Could not locate disp_flush block")
-    s = s[:start] + new_flush + s[end:]
-else:
-    print("[PATCH] disp_flush already uses direct synchronous path")
+start = s.find("static void disp_flush(lv_disp_drv_t *disp")
+end = s.find("\nvoid disp_request_full_clear(void)", start)
+if start < 0 or end < 0:
+    raise RuntimeError("Could not locate disp_flush block")
+s = s[:start] + new_flush + s[end:]
 
 queue_setup = '''    display_q = xQueueCreate(8, sizeof(DisplayCmd));
     display_snapshot_mutex = xSemaphoreCreateMutex();
@@ -125,4 +130,4 @@ else:
     raise RuntimeError("Could not locate EPD LUT init call")
 
 p.write_text(s, encoding="utf-8")
-print("[PATCH] main.cpp display lifecycle patch complete")
+print("[PATCH] main.cpp display lifecycle patch complete: upstream-style flush path active")
