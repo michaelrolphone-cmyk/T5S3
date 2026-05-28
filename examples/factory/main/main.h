@@ -104,3 +104,9 @@ extern TouchDrvGT911 touch;
 
 // RTC
 extern SensorPCF8563 rtc;
+
+/*
+ * Diagnostic wrappers are intentionally last so declarations above are parsed
+ * before the wrapper macros rewrite call sites in implementation files.
+ */
+#include "heap_diag_wraps.h"
