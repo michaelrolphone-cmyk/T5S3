@@ -97,5 +97,6 @@ typedef struct _ui_setting
  * *******************************************************************************/
 void ui_entry(void);
 void ui_wifi_service_loop(void);
+void ui_wifi_service_init(void);
 
 #endif /* __UI_EPD47H__ */

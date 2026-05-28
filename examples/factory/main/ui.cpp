@@ -2886,6 +2886,7 @@ enum WifiCmdType : uint8_t {
     WIFI_CMD_DISCONNECT_STA,
     WIFI_CMD_BEGIN_SMARTCONFIG,
     WIFI_CMD_STOP_SMARTCONFIG,
+    WIFI_CMD_CONNECT_SAVED_STA,
 };
 
 struct WifiCmd {
@@ -2893,6 +2894,15 @@ struct WifiCmd {
 };
 
 static QueueHandle_t wifi_cmd_q = NULL;
+
+void ui_wifi_service_init(void)
+{
+    if (wifi_cmd_q) return;
+    wifi_cmd_q = xQueueCreate(12, sizeof(WifiCmd));
+    if (!wifi_cmd_q) {
+        Serial.println("[wifi cmd] queue create failed");
+    }
+}
 
 static bool wifi_queue_cmd(WifiCmdType type)
 {
@@ -2929,9 +2939,8 @@ static void wifi_save_settings(void)
     nvs_param_set_str(NVS_ID_WIFI_AP_PWD, wifi_ap_pwd.c_str());
 }
 
-static bool wifi_connect_saved_sta(const char *reason)
+static bool wifi_connect_saved_sta_impl(const char *reason)
 {
-    if (!wifi_cmd_q) wifi_cmd_q = xQueueCreate(12, sizeof(WifiCmd));
     wifi_load_saved_settings();
 
     if (wifi_sta_ssid.length() == 0) {
@@ -2955,6 +2964,12 @@ static bool wifi_connect_saved_sta(const char *reason)
 
     WiFi.begin(wifi_sta_ssid.c_str(), wifi_sta_pwd.c_str());
     return true;
+}
+
+static bool wifi_connect_saved_sta(const char *reason)
+{
+    Serial.printf("[wifi] queue connect saved STA for %s\n", reason ? reason : "");
+    return wifi_queue_cmd(WIFI_CMD_CONNECT_SAVED_STA);
 }
 
 static void wifi_send_cors_headers(void)
@@ -3612,6 +3627,9 @@ static void wifi_process_queued_commands(void)
                 break;
             case WIFI_CMD_STOP_SMARTCONFIG:
                 WiFi.stopSmartConfig();
+                break;
+            case WIFI_CMD_CONNECT_SAVED_STA:
+                wifi_connect_saved_sta_impl("queued");
                 break;
             default:
                 break;

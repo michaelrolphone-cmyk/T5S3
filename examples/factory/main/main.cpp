@@ -1187,6 +1187,7 @@ static void ensure_display_flush_task_started(void)
 
 static void ensure_wifi_service_task_started(void)
 {
+    ui_wifi_service_init();
     if (wifi_service_task_handle != NULL) {
         return;
     }
