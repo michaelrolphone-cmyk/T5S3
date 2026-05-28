@@ -2897,15 +2897,13 @@ static QueueHandle_t wifi_cmd_q = NULL;
 static bool wifi_queue_cmd(WifiCmdType type)
 {
     if (!wifi_cmd_q) {
-        Serial.printf("[wifi cmd] queue not ready type=%u
-", (unsigned)type);
+        Serial.printf("[wifi cmd] queue not ready type=%u\n", (unsigned)type);
         return false;
     }
     WifiCmd cmd{type};
     BaseType_t ok = xQueueSend(wifi_cmd_q, &cmd, 0);
     if (ok != pdTRUE) {
-        Serial.printf("[wifi cmd] queue full drop type=%u
-", (unsigned)type);
+        Serial.printf("[wifi cmd] queue full drop type=%u\n", (unsigned)type);
         return false;
     }
     return true;
