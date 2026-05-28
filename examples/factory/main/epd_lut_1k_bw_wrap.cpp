@@ -11,8 +11,8 @@
 #define EPD_BW_GRAY4_THRESHOLD 8
 #endif
 
-#ifndef EPD_BW_USE_DU_FAST_MODE
-#define EPD_BW_USE_DU_FAST_MODE 0
+#ifndef EPD_BW_FORCE_DU_FAST_MODE
+#define EPD_BW_FORCE_DU_FAST_MODE 0
 #endif
 
 extern "C" void __real_epd_init(const void *board, const void *display, int lut);
@@ -66,23 +66,21 @@ static const uint8_t *bw_threshold_4bpp_image(EpdRect image_area, const uint8_t 
 
 static enum EpdDrawMode bw_select_update_mode(enum EpdDrawMode requested)
 {
-#if EPD_BW_USE_DU_FAST_MODE
+#if EPD_BW_FORCE_DU_FAST_MODE
     if (requested == MODE_GL16 || requested == MODE_GC16) {
         return MODE_DU;
     }
-    return requested;
-#else
-    /*
-     * MODE_DU is too weak for the full-screen replacement workflow on this
-     * panel: it can leave ghosting, weak blacks, and incomplete/half-screen
-     * updates. Keep the memory-saving 1K LUT, but use the stronger full-screen
-     * GC16 waveform request for all grayscale-mode callers.
-     */
-    if (requested == MODE_GL16 || requested == MODE_GC16 || requested == MODE_DU) {
-        return MODE_GC16;
-    }
-    return requested;
 #endif
+    /*
+     * Keep the caller's selected mode by default.
+     *
+     * Forcing all updates to MODE_DU caused weak/partial full-screen draws.
+     * Forcing all updates to MODE_GC16 caused dark gray shading and black icon
+     * blocks with the 1K LUT on this panel. The stable approach is to keep the
+     * memory-saving 1K LUT and threshold image content to bilevel, but let the
+     * existing display lifecycle choose GL16/GC16/DU as it already does.
+     */
+    return requested;
 }
 
 extern "C" void __wrap_epd_init(const void *board, const void *display, int lut)
@@ -101,10 +99,10 @@ extern "C" enum EpdDrawError __wrap_epd_hl_update_screen(EpdiyHighlevelState *st
 #if EPD_USE_1K_BW_LUT
     enum EpdDrawMode selected_mode = bw_select_update_mode(mode);
     if (!bw_mode_logged || selected_mode != mode) {
-        Serial.printf("[EPD MODE] update requested=%d selected=%d lut=1K bilevel=1 du_fast=%d\n",
+        Serial.printf("[EPD MODE] update requested=%d selected=%d lut=1K bilevel=1 force_du=%d\n",
                       (int)mode,
                       (int)selected_mode,
-                      (int)EPD_BW_USE_DU_FAST_MODE);
+                      (int)EPD_BW_FORCE_DU_FAST_MODE);
         bw_mode_logged = true;
     }
     return __real_epd_hl_update_screen(state, selected_mode, temperature);
