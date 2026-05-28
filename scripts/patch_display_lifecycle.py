@@ -4,11 +4,6 @@ Import("env")
 p = Path(env["PROJECT_DIR"]) / "examples" / "factory" / "main" / "main.cpp"
 s = p.read_text(encoding="utf-8")
 
-start = s.find("static void disp_flush(lv_disp_drv_t *disp")
-end = s.find("\nvoid disp_request_full_clear(void)", start)
-if start < 0 or end < 0:
-    raise RuntimeError("Could not locate disp_flush block")
-
 new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
 {
     if (decodebuffer == NULL) {
@@ -69,7 +64,15 @@ new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area
     lv_disp_flush_ready(disp);
 }
 '''
-s = s[:start] + new_flush + s[end:]
+
+if "[DISPLAY DIRECT] flush lock timeout" not in s:
+    start = s.find("static void disp_flush(lv_disp_drv_t *disp")
+    end = s.find("\nvoid disp_request_full_clear(void)", start)
+    if start < 0 or end < 0:
+        raise RuntimeError("Could not locate disp_flush block")
+    s = s[:start] + new_flush + s[end:]
+else:
+    print("[PATCH] disp_flush already uses direct synchronous path")
 
 queue_setup = '''    display_q = xQueueCreate(8, sizeof(DisplayCmd));
     display_snapshot_mutex = xSemaphoreCreateMutex();
@@ -91,12 +94,15 @@ queue_check = '''    if (!display_q || !display_snapshot_mutex || !snapshot_pool
 '''
 s = s.replace(queue_check, '    Serial.println("[DISPLAY DIRECT] async display queue disabled; using synchronous LVGL flush path");\n')
 
-s = s.replace('''    // disp_drv.render_start_cb = dips_render_start_cb;
+if "disp_drv.render_start_cb = [](lv_disp_drv_t *drv)" not in s:
+    s = s.replace('''    // disp_drv.render_start_cb = dips_render_start_cb;
 ''', '''    disp_drv.render_start_cb = [](lv_disp_drv_t *drv) {
         (void)drv;
         if (decodebuffer) memset(decodebuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);
     };
 ''')
+else:
+    print("[PATCH] render_start clear already installed")
 
 s = s.replace('''void disp_request_normal_frame(void)
 {
@@ -113,8 +119,10 @@ old_lut = 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_64K);'
 new_lut = 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_1K); // 1K LUT keeps renderer lookup table internal and avoids the 64K heap cliff'
 if old_lut in s:
     s = s.replace(old_lut, new_lut, 1)
+elif new_lut in s or 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_1K)' in s:
+    print("[PATCH] EPD init already uses EPD_LUT_1K")
 else:
-    raise RuntimeError("Could not locate EPD_LUT_64K init call")
+    raise RuntimeError("Could not locate EPD LUT init call")
 
 p.write_text(s, encoding="utf-8")
-print("[PATCH] main.cpp display lifecycle patched: direct synchronous flush + internal 1K LUT active")
+print("[PATCH] main.cpp display lifecycle patch complete")
