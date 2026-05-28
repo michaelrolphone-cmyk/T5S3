@@ -43,9 +43,6 @@
 #define BOARD_PCA9535_INT   (38)
 #define BOARD_BOOT_BTN      (0)
 
-
-#define BOARD_IO48_BTN      (48)
-
-// IO48 is pulled up and reads LOW when pressed
-#define BOARD_IO48_BTN_ACTIVE_LOW      (1)
+// Center/home button is wired to PCA9535 PC12 and read via button_read().
+// GPIO38 is the PCA9535 interrupt line; do not read the button as ESP32 GPIO48.
 #define BOARD_PCA_BUTTON_ACTIVE_HIGH   (0)
