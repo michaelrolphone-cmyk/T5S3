@@ -53,12 +53,6 @@ new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area
         .height = epd_rotated_display_height(),
     };
 
-    Serial.println("[DISPLAY DIRECT] physical clear before content frame");
-    epd_hl_set_all_white(&hl);
-    epd_poweron();
-    checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
-    epd_poweroff();
-
     epd_hl_set_all_white(&hl);
     epd_draw_rotated_image(render_area, decodebuffer, epd_hl_get_framebuffer(&hl));
     if (framebuffer_mutex) xSemaphoreGive(framebuffer_mutex);
@@ -127,14 +121,20 @@ s = s.replace('''void disp_request_normal_frame(void)
 }
 ''')
 
-old_lut = 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_64K);'
-new_lut = 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_1K); // 1K LUT keeps renderer lookup table internal and avoids the 64K heap cliff'
-if old_lut in s:
-    s = s.replace(old_lut, new_lut, 1)
-elif new_lut in s or 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_1K)' in s:
-    print("[PATCH] EPD init already uses EPD_LUT_1K")
+lut_1k_comment = 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_1K); // 1K LUT keeps renderer lookup table internal and avoids the 64K heap cliff'
+lut_1k_plain = 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_1K);'
+lut_64k = 'epd_init(&DEMO_BOARD, &ED047TC1, EPD_LUT_64K);'
+if lut_1k_comment in s:
+    s = s.replace(lut_1k_comment, lut_64k, 1)
+elif lut_1k_plain in s:
+    s = s.replace(lut_1k_plain, lut_64k, 1)
+elif lut_64k in s:
+    print("[PATCH] EPD init already uses EPD_LUT_64K")
 else:
     raise RuntimeError("Could not locate EPD LUT init call")
 
+s = s.replace('epd_set_lcd_pixel_clock_MHz(17);', 'epd_set_lcd_pixel_clock_MHz(5); // keep LCD feed slow enough for PSRAM-backed 64K LUT')
+s = s.replace('Serial.println("[EPD INIT] pixel clock set before boot clear");', 'Serial.println("[EPD INIT] pixel clock set to 5 MHz before boot clear");')
+
 p.write_text(s, encoding="utf-8")
-print("[PATCH] main.cpp display lifecycle patch complete: physical clear + direct content frame active")
+print("[PATCH] main.cpp display lifecycle patch complete: 64K LUT + 5MHz pixel clock + direct flush")
