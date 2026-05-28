@@ -53,6 +53,13 @@ new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area
         .height = epd_rotated_display_height(),
     };
 
+    Serial.println("[DISPLAY DIRECT] physical clear before content frame");
+    epd_hl_set_all_white(&hl);
+    epd_poweron();
+    checkError(epd_hl_update_screen(&hl, MODE_GC16, epd_ambient_temperature()));
+    epd_poweroff();
+
+    epd_hl_set_all_white(&hl);
     epd_draw_rotated_image(render_area, decodebuffer, epd_hl_get_framebuffer(&hl));
     if (framebuffer_mutex) xSemaphoreGive(framebuffer_mutex);
 
@@ -130,4 +137,4 @@ else:
     raise RuntimeError("Could not locate EPD LUT init call")
 
 p.write_text(s, encoding="utf-8")
-print("[PATCH] main.cpp display lifecycle patch complete: upstream-style flush path active")
+print("[PATCH] main.cpp display lifecycle patch complete: physical clear + direct content frame active")
