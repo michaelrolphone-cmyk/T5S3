@@ -66,10 +66,28 @@ void io_extend_lora_gps_power_on(bool en)
 
 bool button_read(void)
 {
+    static bool first_log = true;
+    static uint8_t last_io_val0 = 0xFF;
+    static uint8_t last_io_val1 = 0xFF;
+    static bool last_pressed = false;
+
     uint8_t io_val0 = pca9555_read_input(BOARD_I2C_PORT, 0);
-    uint8_t io_val = pca9555_read_input(BOARD_I2C_PORT, 1);
-    // printf("io_extend : 0x%x  %d\n", io_val, (io_val & (PCA_PIN_PC12 >> 8)));
-    return !(io_val & (PCA_PIN_PC12 >> 8));
+    uint8_t io_val1 = pca9555_read_input(BOARD_I2C_PORT, 1);
+    bool pressed = !(io_val1 & (PCA_PIN_PC12 >> 8));
+
+    if (first_log || io_val0 != last_io_val0 || io_val1 != last_io_val1 || pressed != last_pressed) {
+        printf("[BUTTON PCA] port0=0x%02x port1=0x%02x pc12_bit=%d pressed=%d\n",
+               io_val0,
+               io_val1,
+               (io_val1 & (PCA_PIN_PC12 >> 8)) ? 1 : 0,
+               pressed ? 1 : 0);
+        first_log = false;
+        last_io_val0 = io_val0;
+        last_io_val1 = io_val1;
+        last_pressed = pressed;
+    }
+
+    return pressed;
 }
 
 uint8_t read_io(int io)
@@ -82,4 +100,3 @@ void set_config(i2c_port_t port, uint8_t config_value, int high_port)
 {
     pca9555_set_config(port, config_value, high_port);
 }
-
