@@ -15,8 +15,8 @@
 #define EPD_BW_FORCE_DU_FAST_MODE 0
 #endif
 
-#ifndef EPD_BW_PREWHITE_EACH_CONTENT_UPDATE
-#define EPD_BW_PREWHITE_EACH_CONTENT_UPDATE 1
+#ifndef EPD_BW_CLEAR_BEFORE_DRAWN_CONTENT
+#define EPD_BW_CLEAR_BEFORE_DRAWN_CONTENT 1
 #endif
 
 extern "C" void __real_epd_init(const void *board, const void *display, int lut);
@@ -25,51 +25,13 @@ extern "C" void __real_epd_draw_rotated_image(EpdRect image_area, const uint8_t 
 
 static uint8_t *bw_threshold_buffer = nullptr;
 static size_t bw_threshold_buffer_size = 0;
-static uint8_t *bw_frame_backup = nullptr;
-static size_t bw_frame_backup_size = 0;
 static bool bw_mode_logged = false;
-static bool bw_prewhite_logged = false;
+static bool bw_physical_clear_logged = false;
+static volatile bool bw_next_update_has_drawn_content = false;
 
 static inline uint8_t bw_threshold_nibble(uint8_t gray4)
 {
     return (gray4 < EPD_BW_GRAY4_THRESHOLD) ? 0x00 : 0x0F;
-}
-
-static size_t bw_framebuffer_size_bytes()
-{
-    const int width = epd_rotated_display_width();
-    const int height = epd_rotated_display_height();
-    if (width <= 0 || height <= 0) return 0;
-    return (((size_t)width + 1U) / 2U) * (size_t)height;
-}
-
-static bool bw_frame_is_all_white(const uint8_t *framebuffer, size_t size)
-{
-    if (!framebuffer || size == 0) return true;
-    for (size_t i = 0; i < size; ++i) {
-        if (framebuffer[i] != 0xFF) return false;
-    }
-    return true;
-}
-
-static bool bw_ensure_frame_backup(size_t size)
-{
-    if (size == 0) return false;
-    if (bw_frame_backup_size >= size && bw_frame_backup) return true;
-
-    uint8_t *new_buffer = (uint8_t *)heap_caps_realloc(
-        bw_frame_backup,
-        size,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!new_buffer) {
-        Serial.printf("[EPD BW] prewhite backup alloc failed size=%u; doing single update only\n", (unsigned)size);
-        return false;
-    }
-
-    bw_frame_backup = new_buffer;
-    bw_frame_backup_size = size;
-    Serial.printf("[EPD BW] prewhite backup ready size=%u\n", (unsigned)size);
-    return true;
 }
 
 static const uint8_t *bw_threshold_4bpp_image(EpdRect image_area, const uint8_t *image_buffer)
@@ -143,29 +105,22 @@ extern "C" enum EpdDrawError __wrap_epd_hl_update_screen(EpdiyHighlevelState *st
 #if EPD_USE_1K_BW_LUT
     enum EpdDrawMode selected_mode = bw_select_update_mode(mode);
     if (!bw_mode_logged || selected_mode != mode) {
-        Serial.printf("[EPD MODE] update requested=%d selected=%d lut=1K bilevel=1 force_du=%d prewhite=%d\n",
+        Serial.printf("[EPD MODE] update requested=%d selected=%d lut=1K bilevel=1 force_du=%d clear_drawn_content=%d\n",
                       (int)mode,
                       (int)selected_mode,
                       (int)EPD_BW_FORCE_DU_FAST_MODE,
-                      (int)EPD_BW_PREWHITE_EACH_CONTENT_UPDATE);
+                      (int)EPD_BW_CLEAR_BEFORE_DRAWN_CONTENT);
         bw_mode_logged = true;
     }
 
-#if EPD_BW_PREWHITE_EACH_CONTENT_UPDATE
-    uint8_t *framebuffer = epd_hl_get_framebuffer(state);
-    const size_t frame_size = bw_framebuffer_size_bytes();
-    if (framebuffer && frame_size > 0 && !bw_frame_is_all_white(framebuffer, frame_size) && bw_ensure_frame_backup(frame_size)) {
-        if (!bw_prewhite_logged) {
-            Serial.println("[EPD BW] prewhite erase enabled for non-white full-frame updates");
-            bw_prewhite_logged = true;
+#if EPD_BW_CLEAR_BEFORE_DRAWN_CONTENT
+    if (bw_next_update_has_drawn_content) {
+        bw_next_update_has_drawn_content = false;
+        if (!bw_physical_clear_logged) {
+            Serial.println("[EPD BW] physical epd_clear before drawn content updates");
+            bw_physical_clear_logged = true;
         }
-        memcpy(bw_frame_backup, framebuffer, frame_size);
-        epd_hl_set_all_white(state);
-        enum EpdDrawError white_rc = __real_epd_hl_update_screen(state, selected_mode, temperature);
-        memcpy(framebuffer, bw_frame_backup, frame_size);
-        if (white_rc != EPD_DRAW_SUCCESS) {
-            Serial.printf("[EPD BW] prewhite update returned %d; continuing content update\n", (int)white_rc);
-        }
+        epd_clear();
     }
 #endif
 
@@ -179,6 +134,7 @@ extern "C" void __wrap_epd_draw_rotated_image(EpdRect image_area, const uint8_t 
 {
 #if EPD_USE_1K_BW_LUT
     const uint8_t *bw_image = bw_threshold_4bpp_image(image_area, image_buffer);
+    bw_next_update_has_drawn_content = true;
     __real_epd_draw_rotated_image(image_area, bw_image, framebuffer);
 #else
     __real_epd_draw_rotated_image(image_area, image_buffer, framebuffer);
