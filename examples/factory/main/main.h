@@ -104,3 +104,9 @@ extern TouchDrvGT911 touch;
 
 // RTC
 extern SensorPCF8563 rtc;
+
+/*
+ * Keep this include at the end so it wraps startup call sites without rewriting
+ * external library declarations above.
+ */
+#include "heap_diag_wraps.h"
