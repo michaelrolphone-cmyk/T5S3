@@ -2119,12 +2119,6 @@ static void sd_file_list_child_path(const char *parent, const char *name, char *
     }
 }
 
-static bool sd_file_list_is_dir_vfs(const char *vfs_path)
-{
-    struct stat st = {};
-    return stat(vfs_path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
 static void sd_file_list_add_entry(const char *name, const char *logical_path, bool is_dir)
 {
     char display_name[64] = {0};
@@ -2165,7 +2159,15 @@ static int16_t sd_file_list_populate_entries_locked(void)
         sd_file_list_child_path(sd_curr_path, entry->d_name, logical_path, sizeof(logical_path));
         lv_snprintf(vfs_path, sizeof(vfs_path), "%s%s", sd_card_mount_point(), logical_path);
 
-        sd_file_list_add_entry(entry->d_name, logical_path, sd_file_list_is_dir_vfs(vfs_path));
+        struct stat st = {};
+        if (stat(vfs_path, &st) != 0) {
+            Serial.printf("[SD] Browser stat failed: logical=%s vfs=%s\n", logical_path, vfs_path);
+            continue;
+        }
+
+        const char *name = strrchr(logical_path, '/');
+        name = name ? name + 1 : logical_path;
+        sd_file_list_add_entry(name, logical_path, S_ISDIR(st.st_mode));
         file_index++;
     }
 
