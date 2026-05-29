@@ -2100,6 +2100,15 @@ static void sd_go_parent(void)
 }
 
 
+static void sd_file_list_add_message(const char *text)
+{
+    scr3_add_img_btn(text, strlen(text), 0);
+    lv_obj_t *obj = lv_obj_get_child(scr3_cont_file, lv_obj_get_child_cnt(scr3_cont_file) - 1);
+    lv_obj_t *lab1 = lv_obj_get_child(obj, lv_obj_get_child_cnt(obj) - 1);
+    lv_label_set_text(lab1, "");
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+}
+
 static void sd_file_list_populate(void)
 {
     uint32_t child_cnt = lv_obj_get_child_cnt(scr3_cont_file);
@@ -2123,8 +2132,18 @@ static void sd_file_list_populate(void)
         }, LV_EVENT_CLICKED, NULL);
     }
 
-    File root = SD.open(sd_curr_path);
+    if (!sd_guard_lock(2000)) {
+        Serial.printf("[SD] Directory list lock timeout: %s\n", sd_curr_path);
+        sd_file_list_add_message("SD card busy");
+        return;
+    }
+
+    File root = SD.open(sd_curr_path, FILE_READ);
     if (!root || !root.isDirectory()) {
+        Serial.printf("[SD] Directory open failed: %s\n", sd_curr_path);
+        if (root) root.close();
+        sd_guard_unlock();
+        sd_file_list_add_message("Unable to open folder");
         return;
     }
 
@@ -2157,6 +2176,11 @@ static void sd_file_list_populate(void)
         file_index++;
     }
     root.close();
+    sd_guard_unlock();
+
+    if (file_index == 0) {
+        sd_file_list_add_message("No files found");
+    }
 }
 
 static void create3(lv_obj_t *parent) {
