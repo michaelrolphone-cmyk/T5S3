@@ -13,6 +13,7 @@
 #include <HTTPClient.h>
 #include <PNGdec.h>
 #include "esp_heap_caps.h"
+#include "mbedtls/platform.h"
 
 /* clang-format off */
 
@@ -4351,12 +4352,55 @@ static lv_obj_t *web_span = NULL;
 static char web_url_buf[256] = "https://example.com";
 static lv_timer_t *web_wifi_connect_timer = NULL;
 static TaskHandle_t web_fetch_task_handle = NULL;
+static const uint32_t WEB_FETCH_TASK_STACK_DEPTH = 8192;
+static EXT_RAM_ATTR StackType_t web_fetch_task_stack[WEB_FETCH_TASK_STACK_DEPTH];
+static StaticTask_t web_fetch_task_tcb;
 static volatile bool web_fetch_in_progress = false;
 static volatile bool web_fetch_done = false;
 static String web_fetch_result;
 static uint32_t web_wifi_connect_start_ms = 0;
 static bool web_pending_fetch_after_wifi = false;
 static const uint32_t WEB_WIFI_CONNECT_TIMEOUT_MS = 20000;
+
+static void *web_tls_psram_calloc(size_t count, size_t size)
+{
+    if(size != 0 && count > ((size_t)-1) / size) return NULL;
+    return heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static void web_tls_psram_free(void *ptr)
+{
+    heap_caps_free(ptr);
+}
+
+static void web_tls_use_psram_allocator(void)
+{
+#if defined(MBEDTLS_PLATFORM_MEMORY)
+    static bool allocator_set = false;
+    if(allocator_set) return;
+
+    int rc = mbedtls_platform_set_calloc_free(web_tls_psram_calloc, web_tls_psram_free);
+    if(rc == 0) {
+        allocator_set = true;
+        Serial.printf("[web] TLS allocator redirected to PSRAM internal_free=%u internal_largest=%u psram_free=%u\n",
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    } else {
+        Serial.printf("[web] TLS PSRAM allocator setup failed rc=%d internal_free=%u internal_largest=%u psram_free=%u\n",
+                      rc,
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    }
+#else
+    static bool warned = false;
+    if(!warned) {
+        warned = true;
+        Serial.println("[web] TLS PSRAM allocator unavailable: MBEDTLS_PLATFORM_MEMORY is disabled");
+    }
+#endif
+}
 
 static void web_show_text(const char *text)
 {
@@ -4368,6 +4412,8 @@ static void web_show_text(const char *text)
 
 static void web_fetch_worker(void *param)
 {
+    web_tls_use_psram_allocator();
+
     char *in_url = (char *)param;
     char url[256] = {0};
     HTTPClient http;
@@ -4392,7 +4438,7 @@ static void web_fetch_worker(void *param)
     web_fetch_result = http.getString();
 done:
     if (http_started) http.end();
-    if (in_url) free(in_url);
+    if (in_url) heap_caps_free(in_url);
     web_fetch_done = true;
     web_fetch_in_progress = false;
     vTaskDelete(NULL);
@@ -4402,16 +4448,27 @@ static void web_fetch_and_render(const char *in_url)
 {
     if (web_fetch_in_progress) { web_show_text("Browser request in progress..."); return; }
     if(in_url == NULL || in_url[0] == '\0') { web_show_text("Empty URL."); return; }
-    char *url_copy = (char *)malloc(strlen(in_url) + 1);
-    if (!url_copy) { web_show_text("Out of memory."); return; }
+    char *url_copy = (char *)heap_caps_malloc(strlen(in_url) + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!url_copy) { web_show_text("Out of PSRAM."); return; }
     strcpy(url_copy, in_url);
     web_fetch_done = false;
     web_fetch_in_progress = true;
-    if (xTaskCreate(web_fetch_worker, "web_fetch_worker", 8192, url_copy, 1, &web_fetch_task_handle) != pdPASS) {
-        free(url_copy);
+    web_fetch_task_handle = xTaskCreateStatic(web_fetch_worker,
+                                              "web_fetch_worker",
+                                              WEB_FETCH_TASK_STACK_DEPTH,
+                                              url_copy,
+                                              1,
+                                              web_fetch_task_stack,
+                                              &web_fetch_task_tcb);
+    if (web_fetch_task_handle == NULL) {
+        heap_caps_free(url_copy);
         web_fetch_in_progress = false;
         web_show_text("Failed to start browser worker.");
     } else {
+        Serial.printf("[web] fetch worker using PSRAM stack internal_free=%u internal_largest=%u psram_free=%u\n",
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         web_show_text("Loading page...");
     }
 }
