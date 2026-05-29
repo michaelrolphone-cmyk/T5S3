@@ -114,7 +114,7 @@ new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area
         epd_ambient_temperature(),
         NULL,
         NULL,
-        WAVEFORM));
+        hl.waveform));
     epd_poweroff();
 
     display_next_snapshot_kind = DISPLAY_UPDATE_NONE;
