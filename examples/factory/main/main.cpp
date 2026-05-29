@@ -214,7 +214,11 @@ void sd_guard_init()
 
 bool sd_guard_lock(uint32_t timeout_ms)
 {
-    return sd_mutex && xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+    if (!sd_mutex || xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        return false;
+    }
+    digitalWrite(BOARD_LORA_CS, HIGH);
+    return true;
 }
 
 void sd_guard_unlock()
@@ -1415,17 +1419,18 @@ static bool display_safe_for_hard_clean(void)
     return battery_25896_get_VBAT() >= CONFIG_EPD_HARD_CLEAN_MIN_VBAT;
 }
 
-static bool sd_card_init(void)
+static bool sd_card_begin(const char *owner)
 {
+    digitalWrite(BOARD_LORA_CS, HIGH);
     if(!SD.begin(BOARD_SD_CS)){
-        Serial.println("Card Mount Failed");
+        Serial.printf("[SD] Card mount failed (%s)\n", owner ? owner : "unknown");
         return false;
     }
 
     uint8_t cardType = SD.cardType();
 
     if(cardType == CARD_NONE){
-        Serial.println("No SD card attached");
+        Serial.printf("[SD] No SD card attached (%s)\n", owner ? owner : "unknown");
         return false;
     }
 
@@ -1440,6 +1445,34 @@ static bool sd_card_init(void)
         Serial.println("UNKNOWN");
     }
     return true;
+}
+
+static bool sd_card_init(void)
+{
+    return sd_card_begin("boot");
+}
+
+bool sd_card_ensure_ready_locked(const char *owner)
+{
+    digitalWrite(BOARD_LORA_CS, HIGH);
+    if (peri_buf[E_PERI_SD_CARD] && SD.cardType() != CARD_NONE) {
+        return true;
+    }
+
+    Serial.printf("[SD] Reinitializing shared SD handler (%s)\n", owner ? owner : "unknown");
+    SD.end();
+    peri_buf[E_PERI_SD_CARD] = sd_card_begin(owner ? owner : "ensure");
+    return peri_buf[E_PERI_SD_CARD];
+}
+
+bool sd_card_ensure_ready()
+{
+    if (!sd_guard_lock(2000)) {
+        return false;
+    }
+    bool ok = sd_card_ensure_ready_locked("ensure");
+    sd_guard_unlock();
+    return ok;
 }
 
 void idf_setup() 
