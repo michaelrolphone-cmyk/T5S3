@@ -15,8 +15,9 @@ The current springboard implementation in `examples/factory/main/ui.cpp` decodes
 3. Attempted an in-place refactor, then reverted to avoid leaving a partially-broken state.
 
 ## Current state
-- No functional code changes are currently applied.
-- Repository remains on existing springboard behavior.
+- 2026-05-29 update: springboard icon `.sbi` payloads are now retained in internal SRAM after their first SD-cache read for the lifetime of the springboard screen.
+- Page transitions still unload the active LVGL canvas objects and full-size visible buffers, but returning to a previously loaded page expands the retained SRAM payload instead of reopening the SD cache file.
+- `destroy0()` releases both transient page resources and retained SRAM icon payloads.
 
 ## Root cause summary
 The memory issue is caused by retaining full-size decoded icon buffers (`150x150 lv_color_t`) for every springboard icon on both pages simultaneously, instead of caching compact icon data and loading only the visible page.
@@ -127,5 +128,7 @@ Manual runtime checks (device/serial):
 - `git checkout -- examples/factory/main/ui.cpp`
 
 ## Next immediate action
-Proceed with **Step 1** in a small compile-safe patch, then run:
-- `pio run -e T5_E_PAPER_S3_V7`
+Run hardware/serial acceptance checks on a T5 ePaper S3 with icon files on SD:
+- first springboard page visit should log `cache payload retained in sram`,
+- returning to that page should log `sram reuse` without SD cache reads for already retained icons,
+- repeated page transitions should keep click routing, aliases, fallback behavior, and heap usage stable.
