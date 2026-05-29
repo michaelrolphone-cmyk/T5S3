@@ -91,6 +91,9 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path);
 void sd_guard_init();
 bool sd_guard_lock(uint32_t timeout_ms);
 void sd_guard_unlock();
+bool sd_card_ensure_ready();
+bool sd_card_ensure_ready_locked(const char *owner = NULL);
+const char *sd_card_mount_point();
 
 void indev_touch_en();
 void indev_touch_dis();

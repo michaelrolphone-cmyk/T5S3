@@ -13,6 +13,8 @@
 #include <HTTPClient.h>
 #include <PNGdec.h>
 #include "esp_heap_caps.h"
+#include <dirent.h>
+#include <sys/stat.h>
 
 /* clang-format off */
 
@@ -2099,6 +2101,80 @@ static void sd_go_parent(void)
     }
 }
 
+static void sd_file_list_add_message(const char *text)
+{
+    scr3_add_img_btn(text, strlen(text), 0);
+    lv_obj_t *obj = lv_obj_get_child(scr3_cont_file, lv_obj_get_child_cnt(scr3_cont_file) - 1);
+    lv_obj_t *lab1 = lv_obj_get_child(obj, lv_obj_get_child_cnt(obj) - 1);
+    lv_label_set_text(lab1, "");
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+}
+
+static void sd_file_list_child_path(const char *parent, const char *name, char *out, size_t out_len)
+{
+    if (!parent || strcmp(parent, "/") == 0) {
+        lv_snprintf(out, out_len, "/%s", name);
+    } else {
+        lv_snprintf(out, out_len, "%s/%s", parent, name);
+    }
+}
+
+static void sd_file_list_add_entry(const char *name, const char *logical_path, bool is_dir)
+{
+    char display_name[64] = {0};
+    char full_path[128] = {0};
+    if (is_dir) {
+        snprintf(display_name, sizeof(display_name), "[%s]", name);
+        lv_snprintf(full_path, sizeof(full_path), "D%s", logical_path);
+    } else {
+        snprintf(display_name, sizeof(display_name), "%s", name);
+        lv_snprintf(full_path, sizeof(full_path), "FS:%s", logical_path);
+    }
+
+    scr3_add_img_btn(display_name, strlen(display_name), 0);
+    lv_obj_t *obj = lv_obj_get_child(scr3_cont_file, lv_obj_get_child_cnt(scr3_cont_file) - 1);
+    lv_obj_t *lab1 = lv_obj_get_child(obj, lv_obj_get_child_cnt(obj) - 1);
+    lv_label_set_text(lab1, full_path);
+}
+
+static int16_t sd_file_list_populate_entries_locked(void)
+{
+    char vfs_dir[160] = {0};
+    lv_snprintf(vfs_dir, sizeof(vfs_dir), "%s%s", sd_card_mount_point(), strcmp(sd_curr_path, "/") == 0 ? "" : sd_curr_path);
+
+    DIR *dir = opendir(vfs_dir);
+    if (!dir) {
+        Serial.printf("[SD] Browser opendir failed: logical=%s vfs=%s\n", sd_curr_path, vfs_dir);
+        return -1;
+    }
+
+    uint16_t file_index = 0;
+    struct dirent *entry = NULL;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        if (file_index >= 64) break;
+
+        char logical_path[128] = {0};
+        char vfs_path[192] = {0};
+        sd_file_list_child_path(sd_curr_path, entry->d_name, logical_path, sizeof(logical_path));
+        lv_snprintf(vfs_path, sizeof(vfs_path), "%s%s", sd_card_mount_point(), logical_path);
+
+        struct stat st = {};
+        if (stat(vfs_path, &st) != 0) {
+            Serial.printf("[SD] Browser stat failed: logical=%s vfs=%s\n", logical_path, vfs_path);
+            continue;
+        }
+
+        const char *name = strrchr(logical_path, '/');
+        name = name ? name + 1 : logical_path;
+        sd_file_list_add_entry(name, logical_path, S_ISDIR(st.st_mode));
+        file_index++;
+    }
+
+    closedir(dir);
+    return file_index;
+}
+
 
 static void sd_file_list_populate(void)
 {
@@ -2123,40 +2199,27 @@ static void sd_file_list_populate(void)
         }, LV_EVENT_CLICKED, NULL);
     }
 
-    File root = SD.open(sd_curr_path);
-    if (!root || !root.isDirectory()) {
+    if (!sd_guard_lock(2000)) {
+        Serial.printf("[SD] Directory list lock timeout: %s\n", sd_curr_path);
+        sd_file_list_add_message("SD card busy");
         return;
     }
 
-    File file = root.openNextFile();
-    uint16_t file_index = 0;
-    while (file)
-    {
-        if (file_index >= 64) {
-            file.close();
-            break;
-        }
-
-        char display_name[64] = {0};
-        char full_path[128] = {0};
-        if (file.isDirectory()) {
-            snprintf(display_name, sizeof(display_name), "[%s]", file.name());
-            lv_snprintf(full_path, sizeof(full_path), "D%s", file.path());
-        } else {
-            snprintf(display_name, sizeof(display_name), "%s", file.name());
-            lv_snprintf(full_path, sizeof(full_path), "FS:%s", file.path());
-        }
-
-        scr3_add_img_btn(display_name, strlen(display_name), 0);
-        lv_obj_t *obj = lv_obj_get_child(scr3_cont_file, lv_obj_get_child_cnt(scr3_cont_file) - 1);
-        lv_obj_t *lab1 = lv_obj_get_child(obj, lv_obj_get_child_cnt(obj) - 1);
-        lv_label_set_text(lab1, full_path);
-
-        file.close();
-        file = root.openNextFile();
-        file_index++;
+    if (!sd_card_ensure_ready_locked("browser")) {
+        sd_guard_unlock();
+        sd_file_list_add_message("SD unavailable");
+        return;
     }
-    root.close();
+
+    int16_t file_index = sd_file_list_populate_entries_locked();
+    sd_guard_unlock();
+
+    if (file_index < 0) {
+        sd_file_list_add_message("Unable to open folder");
+    } else if (file_index == 0) {
+        Serial.printf("[SD] Browser found no entries at logical path: %s (mount=%s)\n", sd_curr_path, sd_card_mount_point());
+        sd_file_list_add_message("No files found");
+    }
 }
 
 static void create3(lv_obj_t *parent) {
@@ -2188,7 +2251,7 @@ static void create3(lv_obj_t *parent) {
     lv_obj_t *lab1;
     int ret = 0;
     ui_test_get_sd(&ret);
-    if(ret) {
+    if(ret || sd_card_ensure_ready()) {
         ui_sd_read();
         sd_file_list_populate();
 
