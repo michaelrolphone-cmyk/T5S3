@@ -4351,6 +4351,7 @@ static lv_obj_t *web_cont = NULL;
 static lv_obj_t *web_span = NULL;
 static char web_url_buf[256] = "https://example.com";
 static lv_timer_t *web_wifi_connect_timer = NULL;
+static lv_timer_t *web_fetch_poll_timer = NULL;
 static TaskHandle_t web_fetch_task_handle = NULL;
 static const uint32_t WEB_FETCH_TASK_STACK_DEPTH = 8192;
 static EXT_RAM_ATTR StackType_t web_fetch_task_stack[WEB_FETCH_TASK_STACK_DEPTH];
@@ -4410,6 +4411,32 @@ static void web_show_text(const char *text)
     lv_obj_scroll_to_y(web_cont, 0, LV_ANIM_OFF);
 }
 
+static void web_fetch_poll_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if(!web_fetch_done) return;
+
+    web_fetch_done = false;
+    if(web_fetch_poll_timer) {
+        lv_timer_del(web_fetch_poll_timer);
+        web_fetch_poll_timer = NULL;
+    }
+
+    lv_snprintf(md_text_buf, sizeof(md_text_buf), "%s", web_fetch_result.c_str());
+    web_show_text(md_text_buf);
+}
+
+static void web_start_fetch_poll_timer(void)
+{
+    if(web_fetch_poll_timer) {
+        lv_timer_del(web_fetch_poll_timer);
+        web_fetch_poll_timer = NULL;
+    }
+
+    web_fetch_poll_timer = lv_timer_create(web_fetch_poll_timer_cb, 250, NULL);
+    lv_timer_ready(web_fetch_poll_timer);
+}
+
 static void web_fetch_worker(void *param)
 {
     web_tls_use_psram_allocator();
@@ -4446,7 +4473,11 @@ done:
 
 static void web_fetch_and_render(const char *in_url)
 {
-    if (web_fetch_in_progress) { web_show_text("Browser request in progress..."); return; }
+    if (web_fetch_in_progress) {
+        web_show_text("Browser request in progress...");
+        web_start_fetch_poll_timer();
+        return;
+    }
     if(in_url == NULL || in_url[0] == '\0') { web_show_text("Empty URL."); return; }
     char *url_copy = (char *)heap_caps_malloc(strlen(in_url) + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!url_copy) { web_show_text("Out of PSRAM."); return; }
@@ -4470,6 +4501,7 @@ static void web_fetch_and_render(const char *in_url)
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                       (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         web_show_text("Loading page...");
+        web_start_fetch_poll_timer();
     }
 }
 
@@ -4628,6 +4660,10 @@ static void exit12(void)
     if (web_wifi_connect_timer) {
         lv_timer_del(web_wifi_connect_timer);
         web_wifi_connect_timer = NULL;
+    }
+    if (web_fetch_poll_timer) {
+        lv_timer_del(web_fetch_poll_timer);
+        web_fetch_poll_timer = NULL;
     }
     web_pending_fetch_after_wifi = false;
 }
