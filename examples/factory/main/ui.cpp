@@ -8,6 +8,7 @@
 #include "nvs_param.h"
 #include "SD.h"
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <HTTPClient.h>
@@ -4444,19 +4445,30 @@ static void web_fetch_worker(void *param)
     char *in_url = (char *)param;
     char url[256] = {0};
     HTTPClient http;
+    WiFiClient plain_client;
+    WiFiClientSecure secure_client;
     bool http_started = false;
     int code = 0;
     if(strstr(in_url, "http://") == in_url || strstr(in_url, "https://") == in_url) lv_snprintf(url, sizeof(url), "%s", in_url);
     else lv_snprintf(url, sizeof(url), "http://%s", in_url);
+    bool use_https = strncasecmp(url, "https://", 8) == 0;
 
     if(WiFi.status() != WL_CONNECTED) { web_fetch_result = "Wi-Fi is not connected. Open Wi-Fi app and connect first."; goto done; }
 
-    if(!http.begin(url)) {
+    http.setTimeout(10000);
+    http.setReuse(false);
+    Serial.printf("[web] HTTP GET %s via %s client\n", url, use_https ? "HTTPS" : "HTTP");
+    if(use_https) {
+        secure_client.setInsecure();
+        if(!http.begin(secure_client, url)) {
+            web_fetch_result = "Failed to initialize HTTPS client.";
+            goto done;
+        }
+    } else if(!http.begin(plain_client, url)) {
         web_fetch_result = "Failed to initialize HTTP client.";
         goto done;
     }
     http_started = true;
-    http.setTimeout(10000);
     code = http.GET();
     if(code <= 0) {
         web_fetch_result = String("HTTP GET failed: ") + String(code);
