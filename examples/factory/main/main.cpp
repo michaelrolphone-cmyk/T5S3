@@ -378,15 +378,7 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
 void btn_task(void *param)
 {
     bool boot_btn_pressed = false;
-    bool gpio_has_btn = false;
-    bool gpio_btn_ready = false;
-    bool gpio_btn_pressed = false;
     bool pca_btn_pressed = false;
-    bool gpio_last_raw = false;
-    bool gpio_saw_edge = false;
-    uint32_t gpio_startup_inactive_ms = 0;
-    uint32_t task_start_ms = millis();
-    bool use_pca_fallback = false;
 
     while(1)
     {
@@ -401,54 +393,12 @@ void btn_task(void *param)
             boot_btn_pressed = false;
         }
 
-        bool gpio_raw = false;
-        bool gpio_pressed = false;
-#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
-        gpio_has_btn = true;
-        gpio_raw = (digitalRead(BOARD_IO48_BTN) == HIGH);
-        gpio_pressed = BOARD_IO48_BTN_ACTIVE_LOW ? !gpio_raw : gpio_raw;
-        Serial.printf("[BUTTON RAW] gpio48=%d pressed=%d ready=%d fallback=%d\n",
-                      gpio_raw, gpio_pressed, gpio_btn_ready, use_pca_fallback);
-
-        uint32_t now_ms = millis();
-        if (gpio_raw != gpio_last_raw) {
-            gpio_last_raw = gpio_raw;
-            gpio_saw_edge = true;
-        }
-
-        if (!gpio_btn_ready) {
-            if (!gpio_pressed) {
-                if (gpio_startup_inactive_ms == 0) {
-                    gpio_startup_inactive_ms = now_ms;
-                } else if ((now_ms - gpio_startup_inactive_ms) >= 300) {
-                    gpio_btn_ready = true;
-                }
-            } else {
-                gpio_startup_inactive_ms = 0;
-            }
-        } else {
-            if (gpio_pressed) {
-                gpio_btn_pressed = true;
-            } else if (gpio_btn_pressed) {
-                ui_post_event(UiEvent::TOGGLE_BACKLIGHT);
-                Serial.printf("[BUTTON] release source=GPIO48 queued_toggle gpio48=%d\n", gpio_raw);
-                gpio_btn_pressed = false;
-            }
-        }
-
-        if (!gpio_saw_edge && ((now_ms - task_start_ms) >= 7000)) {
-            use_pca_fallback = true;
-        }
-#endif
-
-        if (!gpio_has_btn || use_pca_fallback) {
-            bool pca_pressed = button_read();
-            if (pca_pressed) {
-                pca_btn_pressed = true;
-            } else if (pca_btn_pressed) {
-                ui_post_event(UiEvent::TOGGLE_BACKLIGHT);
-                pca_btn_pressed = false;
-            }
+        bool pca_pressed = button_read();
+        if (pca_pressed) {
+            pca_btn_pressed = true;
+        } else if (pca_btn_pressed) {
+            ui_post_event(UiEvent::TOGGLE_BACKLIGHT);
+            pca_btn_pressed = false;
         }
         delay(80);
     }
@@ -1474,9 +1424,6 @@ void idf_setup()
     pinMode(BOARD_BL_EN, OUTPUT);
     analogWrite(BOARD_BL_EN, 0); // Keep backlight off until user setting is applied
     pinMode(BOARD_BOOT_BTN, INPUT_PULLUP);
-#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
-    pinMode(BOARD_IO48_BTN, INPUT_PULLUP);
-#endif
 
     // Init system
     ui_nvs_set_defaulat_param();
