@@ -138,7 +138,7 @@ static uint32_t disp_lvgl_flush_count = 0;
 static uint32_t disp_physical_commit_count = 0;
 static uint32_t disp_replace_commit_count = 0;
 static TaskHandle_t disp_flush_handle = NULL;
-static constexpr uint32_t DISP_FLUSH_STACK_BYTES = 8 * 1024;
+static constexpr uint32_t DISP_FLUSH_STACK_BYTES = 4 * 1024;
 static StackType_t disp_flush_stack[DISP_FLUSH_STACK_BYTES / sizeof(StackType_t)];
 static StaticTask_t disp_flush_task_tcb;
 static volatile bool disp_flush_task_started = false;
@@ -156,6 +156,7 @@ void disp_request_recovery_clean(void);
 static void display_commit_frame(DisplayUpdateKind kind, const uint8_t *framebuffer4bpp);
 static bool display_internal_heap_ok_for_hard_clean();
 static bool display_internal_heap_critical();
+static void boot_heap_checkpoint(const char *phase);
 
 static bool publish_snapshot(DisplayUpdateKind kind, bool has_dirty_union, const lv_area_t *dirty_union);
 static bool display_cmd_is_reliable(DisplayUpdateKind kind);
@@ -703,7 +704,7 @@ static void disp_flush_task(void *param)
             Serial.printf("[DISPLAY QUEUE] commit reliable seq=%lu kind=%d\n",
                           (unsigned long)pending_reliable.seq, (int)pending_reliable.kind);
             UBaseType_t hwm_before = uxTaskGetStackHighWaterMark(NULL);
-            if (hwm_before < 256) {
+            if (hwm_before < 768) {
                 Serial.printf("[DISPLAY TASK WARN] low stack high water mark=%lu\n", (unsigned long)hwm_before);
             }
             Serial.printf("[DISPLAY TASK] before_commit stack_hwm=%lu\n", (unsigned long)hwm_before);
@@ -725,7 +726,7 @@ static void disp_flush_task(void *param)
             Serial.printf("[DISPLAY QUEUE] commit normal seq=%lu kind=%d\n",
                           (unsigned long)pending_normal.seq, (int)pending_normal.kind);
             UBaseType_t hwm_before = uxTaskGetStackHighWaterMark(NULL);
-            if (hwm_before < 256) {
+            if (hwm_before < 768) {
                 Serial.printf("[DISPLAY TASK WARN] low stack high water mark=%lu\n", (unsigned long)hwm_before);
             }
             Serial.printf("[DISPLAY TASK] before_commit stack_hwm=%lu\n", (unsigned long)hwm_before);
@@ -1392,6 +1393,18 @@ static bool sd_card_init(void)
     return true;
 }
 
+static void boot_heap_checkpoint(const char *phase)
+{
+    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    Serial.printf("[BOOT HEAP] phase=%s free_internal=%u largest_internal=%u free_psram=%u\n",
+                  phase ? phase : "unknown",
+                  (unsigned)free_internal,
+                  (unsigned)largest_internal,
+                  (unsigned)free_psram);
+}
+
 void idf_setup() 
 {
     gpio_hold_dis((gpio_num_t)BOARD_TOUCH_RST);
@@ -1416,6 +1429,7 @@ void idf_setup()
                   rr,
                   esp_sleep_get_wakeup_cause());
     SerialGPS.begin(38400, SERIAL_8N1, BOARD_GPS_RXD, BOARD_GPS_TXD);
+    boot_heap_checkpoint("serial_init");
     // // while (!Serial);
 
     SPI.begin(BOARD_SPI_SCLK, BOARD_SPI_MISO, BOARD_SPI_MOSI);
@@ -1427,6 +1441,7 @@ void idf_setup()
 
     // Init system
     ui_nvs_set_defaulat_param();
+    boot_heap_checkpoint("nvs_defaults");
 
     WiFi.persistent(false);
     WiFi.disconnect(true, true);
@@ -1435,10 +1450,13 @@ void idf_setup()
 
     peri_buf[E_PERI_BQ27220]    = bq27220_init();   // PMU --- 0x55
     peri_buf[E_PERI_BQ25896]    = bq25896_init();   // PMU --- 0x6B
+    boot_heap_checkpoint("pmu_init");
     Serial.printf("[BOOT] bq25896 init before screen_init: %d\n", peri_buf[E_PERI_BQ25896]);
 
     Serial.println("[BOOT] before screen_init()");
+    boot_heap_checkpoint("before_screen_init");
     screen_init();
+    boot_heap_checkpoint("after_screen_init");
     io_extend_lora_gps_power_on(true);
 
     int cursor_x = 100;
@@ -1475,38 +1493,50 @@ void idf_setup()
 
     ui_event_q = xQueueCreate(16, sizeof(UiEvent));
     peri_buf[E_PERI_TOUCH]      = touch_gt911_init();  // Touch --- 0x5D;
+    boot_heap_checkpoint("after_touch_init");
     cursor_x = 100;
     cursor_y = epd_rotated_display_height() / 2 - 100 + 150;
     disp_init_status("Touch (GT911) Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_TOUCH]);
 
     peri_buf[E_PERI_LORA]       = lora_sx1262_init();
+    boot_heap_checkpoint("after_lora_init");
     cursor_x = 100;
     cursor_y = epd_rotated_display_height() / 2 - 100 + 200;
     disp_init_status("LoRa (SX1262) Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_LORA]);
 
     peri_buf[E_PERI_SD_CARD]    = sd_card_init();
     sd_guard_init();
+    boot_heap_checkpoint("after_sd_init");
     cursor_x = 100;
     cursor_y = epd_rotated_display_height() / 2 - 100 + 250;
     disp_init_status("SD Card Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_SD_CARD]);
 
+    xTaskCreate(btn_task, "lora_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
+    boot_heap_checkpoint("after_lora_task");
+
+    boot_heap_checkpoint("before_maps_worker");
+    ui_maps_worker_init_early();
+    boot_heap_checkpoint("after_maps_worker");
+
     printf("LVGL Init\n");
+    boot_heap_checkpoint("before_lvgl");
     lv_port_disp_init();
     Serial.println("[BOOT] after lv_port_disp_init()");
+    boot_heap_checkpoint("after_lv_port_disp_init");
 
     printf("LVGL UI Entry\n");
     ui_task_handle = xTaskGetCurrentTaskHandle();
     ui_entry();
     Serial.printf("[EPD SAFE] screen root bg=0x%06X\n", EPD_COLOR_BG);
     Serial.println("[BOOT] after ui_entry()");
+    boot_heap_checkpoint("after_ui_entry");
 
     peri_buf[E_PERI_GPS]        = gps_init();
+    boot_heap_checkpoint("after_gps_init");
     cursor_x = 100;
     cursor_y = epd_rotated_display_height() / 2 - 100 +300;
     disp_init_status("GPS Init ...", &cursor_x, &cursor_y, peri_buf[E_PERI_GPS]);
 
-    // task
-    xTaskCreate(btn_task, "lora_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
 }
 
 bool ui_is_ui_thread()
