@@ -4097,15 +4097,34 @@ static void md_add_line_markdown_inline(const char *line, size_t len, const lv_f
     }
 }
 
+static void md_clear_spangroup(lv_obj_t *span_group)
+{
+    if(!span_group) return;
+
+    // lv_spangroup_del_span() removes one concrete span; passing NULL does
+    // not clear the existing span list, so rendered status messages would
+    // accumulate instead of replacing the previous page/status text.
+    lv_span_t *span = lv_spangroup_get_child(span_group, 0);
+    while(span) {
+        lv_spangroup_del_span(span_group, span);
+        span = lv_spangroup_get_child(span_group, 0);
+    }
+}
+
 static void md_render_to_spangroup(const char *text)
 {
+    if(!md_span) return;
+
     lv_spangroup_set_mode(md_span, LV_SPAN_MODE_BREAK);
     lv_spangroup_set_overflow(md_span, LV_SPAN_OVERFLOW_CLIP);
     lv_spangroup_set_indent(md_span, 0);
     lv_spangroup_set_align(md_span, LV_TEXT_ALIGN_LEFT);
-    lv_spangroup_del_span(md_span, NULL);
+    md_clear_spangroup(md_span);
 
-    if(text == NULL) return;
+    if(text == NULL) {
+        lv_spangroup_refr_mode(md_span);
+        return;
+    }
 
     if(md_doc_type == DOC_TYPE_CSV) {
         const char *line = text;
@@ -4123,6 +4142,7 @@ static void md_render_to_spangroup(const char *text)
             if(!line_end) break;
             line = line_end + 1;
         }
+        lv_spangroup_refr_mode(md_span);
         return;
     }
 
@@ -4166,6 +4186,7 @@ static void md_render_to_spangroup(const char *text)
             if(!txt_end) break;
             p = txt_end;
         }
+        lv_spangroup_refr_mode(md_span);
         return;
     }
 
@@ -4237,6 +4258,7 @@ next_line:
         if(!line_end) break;
         line = line_end + 1;
     }
+    lv_spangroup_refr_mode(md_span);
 }
 
 static void scr11_btn_event_cb(lv_event_t * e)
