@@ -164,7 +164,6 @@ if "if (bwbuffer) {" not in s:
         "    if (displaybuffer) {\n        memset(displaybuffer, EPD_LOGICAL_WHITE_BYTE, EPD_IMAGE_BUF_SIZE);\n    }\n    if (bwbuffer) {\n        memset(bwbuffer, 0xFF, EPD_BW_BUF_SIZE);\n    }\n"
     )
 
-# Clear the real 1bpp framebuffer, not just the old grayscale staging buffer.
 if "if (bwbuffer) memset(bwbuffer, 0xFF, EPD_BW_BUF_SIZE);" not in s:
     s = s.replace('''    // disp_drv.render_start_cb = dips_render_start_cb;
 ''', '''    disp_drv.render_start_cb = [](lv_disp_drv_t *drv) {
@@ -197,5 +196,8 @@ elif lut_1k_plain in s or lut_1k_comment in s:
 else:
     raise RuntimeError("Could not locate EPD LUT init call")
 
+s = s.replace('epd_set_lcd_pixel_clock_MHz(17);', 'epd_set_lcd_pixel_clock_MHz(5); // keep LCD feed slow enough for 1-bit monochrome updates')
+s = s.replace('Serial.println("[EPD INIT] pixel clock set before boot clear");', 'Serial.println("[EPD INIT] pixel clock set to 5 MHz before boot clear");')
+
 p.write_text(s, encoding="utf-8")
-print("[PATCH] main.cpp display lifecycle patch complete: true 1-bit black/white path active")
+print("[PATCH] main.cpp display lifecycle patch complete: 1-bit black/white path active at 5 MHz")
