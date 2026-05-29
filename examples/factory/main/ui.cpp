@@ -13,6 +13,8 @@
 #include <HTTPClient.h>
 #include <PNGdec.h>
 #include "esp_heap_caps.h"
+#include <dirent.h>
+#include <sys/stat.h>
 
 /* clang-format off */
 
@@ -2109,6 +2111,71 @@ static void sd_file_list_add_message(const char *text)
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
 }
 
+static void sd_make_child_path(const char *parent, const char *name, char *out, size_t out_len)
+{
+    if (!parent || strcmp(parent, "/") == 0) {
+        lv_snprintf(out, out_len, "/%s", name);
+    } else {
+        lv_snprintf(out, out_len, "%s/%s", parent, name);
+    }
+}
+
+static bool sd_file_list_entry_is_dir(const char *vfs_path)
+{
+    struct stat st = {};
+    return stat(vfs_path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool sd_file_list_add_entry(const char *name, const char *child_path, bool is_dir)
+{
+    char display_name[64] = {0};
+    char full_path[128] = {0};
+
+    if (is_dir) {
+        snprintf(display_name, sizeof(display_name), "[%s]", name);
+        lv_snprintf(full_path, sizeof(full_path), "D%s", child_path);
+    } else {
+        snprintf(display_name, sizeof(display_name), "%s", name);
+        lv_snprintf(full_path, sizeof(full_path), "FS:%s", child_path);
+    }
+
+    scr3_add_img_btn(display_name, strlen(display_name), 0);
+    lv_obj_t *obj = lv_obj_get_child(scr3_cont_file, lv_obj_get_child_cnt(scr3_cont_file) - 1);
+    lv_obj_t *lab1 = lv_obj_get_child(obj, lv_obj_get_child_cnt(obj) - 1);
+    lv_label_set_text(lab1, full_path);
+    return true;
+}
+
+static int16_t sd_file_list_populate_from_vfs(void)
+{
+    char vfs_dir[160] = {0};
+    lv_snprintf(vfs_dir, sizeof(vfs_dir), "/sd%s", strcmp(sd_curr_path, "/") == 0 ? "" : sd_curr_path);
+
+    DIR *dir = opendir(vfs_dir);
+    if (!dir) {
+        Serial.printf("[SD] VFS directory open failed: %s\n", vfs_dir);
+        return -1;
+    }
+
+    uint16_t file_index = 0;
+    struct dirent *entry = NULL;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        if (file_index >= 64) break;
+
+        char child_path[128] = {0};
+        char vfs_child_path[192] = {0};
+        sd_make_child_path(sd_curr_path, entry->d_name, child_path, sizeof(child_path));
+        lv_snprintf(vfs_child_path, sizeof(vfs_child_path), "/sd%s", child_path);
+
+        sd_file_list_add_entry(entry->d_name, child_path, sd_file_list_entry_is_dir(vfs_child_path));
+        file_index++;
+    }
+
+    closedir(dir);
+    return file_index;
+}
+
 static void sd_file_list_populate(void)
 {
     uint32_t child_cnt = lv_obj_get_child_cnt(scr3_cont_file);
@@ -2138,47 +2205,12 @@ static void sd_file_list_populate(void)
         return;
     }
 
-    File root = SD.open(sd_curr_path);
-    if (!root || !root.isDirectory()) {
-        Serial.printf("[SD] Directory open failed: %s\n", sd_curr_path);
-        if (root) root.close();
-        sd_guard_unlock();
-        sd_file_list_add_message("Unable to open folder");
-        return;
-    }
-
-    File file = root.openNextFile();
-    uint16_t file_index = 0;
-    while (file)
-    {
-        if (file_index >= 64) {
-            file.close();
-            break;
-        }
-
-        char display_name[64] = {0};
-        char full_path[128] = {0};
-        if (file.isDirectory()) {
-            snprintf(display_name, sizeof(display_name), "[%s]", file.name());
-            lv_snprintf(full_path, sizeof(full_path), "D%s", file.path());
-        } else {
-            snprintf(display_name, sizeof(display_name), "%s", file.name());
-            lv_snprintf(full_path, sizeof(full_path), "FS:%s", file.path());
-        }
-
-        scr3_add_img_btn(display_name, strlen(display_name), 0);
-        lv_obj_t *obj = lv_obj_get_child(scr3_cont_file, lv_obj_get_child_cnt(scr3_cont_file) - 1);
-        lv_obj_t *lab1 = lv_obj_get_child(obj, lv_obj_get_child_cnt(obj) - 1);
-        lv_label_set_text(lab1, full_path);
-
-        file.close();
-        file = root.openNextFile();
-        file_index++;
-    }
-    root.close();
+    int16_t file_index = sd_file_list_populate_from_vfs();
     sd_guard_unlock();
 
-    if (file_index == 0) {
+    if (file_index < 0) {
+        sd_file_list_add_message("Unable to open folder");
+    } else if (file_index == 0) {
         sd_file_list_add_message("No files found");
     }
 }
