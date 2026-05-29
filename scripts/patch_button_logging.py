@@ -23,7 +23,9 @@ if old in s:
     s = s.replace(old, new, 1)
     p.write_text(s, encoding="utf-8")
     print("[PATCH] disabled BUTTON RAW spam unless DEBUG_BUTTON_RAW_LOG=1")
-elif "[BUTTON RAW]" in s and "DEBUG_BUTTON_RAW_LOG" in s:
+elif "DEBUG_BUTTON_RAW_LOG" in s:
     print("[PATCH] BUTTON RAW log already gated")
+elif "[BUTTON RAW]" in s:
+    print("[PATCH] BUTTON RAW marker found but exact old block did not match; leaving source unchanged")
 else:
-    raise RuntimeError("Could not locate BUTTON RAW Serial.printf block")
+    print("[PATCH] BUTTON RAW log block not present; no button logging patch needed")
