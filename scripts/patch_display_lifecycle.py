@@ -11,10 +11,14 @@ if "uint8_t *bwbuffer = NULL;" not in s:
         "uint8_t *decodebuffer = NULL;\nuint8_t *displaybuffer = NULL;\nuint8_t *bwbuffer = NULL;\n"
     )
 
-if "#define EPD_BW_BUF_SIZE" not in s:
+old_bw_size_rotated = "#define EPD_BW_BUF_SIZE (((epd_rotated_display_width() + 7) / 8) * epd_rotated_display_height())"
+new_bw_size_physical = "#define EPD_BW_BUF_SIZE (((epd_width() + 7) / 8) * epd_height())"
+if old_bw_size_rotated in s:
+    s = s.replace(old_bw_size_rotated, new_bw_size_physical)
+elif "#define EPD_BW_BUF_SIZE" not in s:
     s = s.replace(
         "#define EPD_IMAGE_BUF_SIZE (((epd_rotated_display_width() + 1) / 2) * epd_rotated_display_height())\n",
-        "#define EPD_IMAGE_BUF_SIZE (((epd_rotated_display_width() + 1) / 2) * epd_rotated_display_height())\n#define EPD_BW_BUF_SIZE (((epd_rotated_display_width() + 7) / 8) * epd_rotated_display_height())\n"
+        "#define EPD_IMAGE_BUF_SIZE (((epd_rotated_display_width() + 1) / 2) * epd_rotated_display_height())\n" + new_bw_size_physical + "\n"
     )
 
 if "static constexpr uint8_t EPD_BW_THRESHOLD" not in s:
@@ -48,6 +52,35 @@ static inline void epd_bw_set_pixel(uint8_t *buf, int32_t width, int32_t x, int3
     }
 }
 
+static inline bool epd_rotated_to_physical_pixel(int32_t rx, int32_t ry, int32_t *px, int32_t *py)
+{
+    const int32_t physical_w = epd_width();
+    const int32_t physical_h = epd_height();
+    switch (epd_get_rotation()) {
+        case EPD_ROT_LANDSCAPE:
+            *px = rx;
+            *py = ry;
+            break;
+        case EPD_ROT_PORTRAIT:
+            *px = physical_w - ry - 1;
+            *py = rx;
+            break;
+        case EPD_ROT_INVERTED_LANDSCAPE:
+            *px = physical_w - rx - 1;
+            *py = physical_h - ry - 1;
+            break;
+        case EPD_ROT_INVERTED_PORTRAIT:
+            *px = ry;
+            *py = physical_h - rx - 1;
+            break;
+        default:
+            *px = rx;
+            *py = ry;
+            break;
+    }
+    return *px >= 0 && *px < physical_w && *py >= 0 && *py < physical_h;
+}
+
 '''
     pos = s.find(marker)
     if pos < 0:
@@ -76,6 +109,7 @@ new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area
     int32_t h = lv_area_get_height(area);
     int32_t screen_w = epd_rotated_display_width();
     int32_t screen_h = epd_rotated_display_height();
+    int32_t physical_w = epd_width();
 
     for (int32_t y = 0; y < h; y++) {
         int32_t dst_y = area->y1 + y;
@@ -83,8 +117,11 @@ new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area
         for (int32_t x = 0; x < w; x++) {
             int32_t dst_x = area->x1 + x;
             if (dst_x < 0 || dst_x >= screen_w) continue;
+            int32_t phys_x = 0;
+            int32_t phys_y = 0;
+            if (!epd_rotated_to_physical_pixel(dst_x, dst_y, &phys_x, &phys_y)) continue;
             bool white = lv_color_to_epd_bw_white(color_p[y * w + x]);
-            epd_bw_set_pixel(bwbuffer, screen_w, dst_x, dst_y, white);
+            epd_bw_set_pixel(bwbuffer, physical_w, phys_x, phys_y, white);
         }
     }
 
@@ -96,12 +133,7 @@ new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area
         return;
     }
 
-    EpdRect render_area = {
-        .x = 0,
-        .y = 0,
-        .width = epd_rotated_display_width(),
-        .height = epd_rotated_display_height(),
-    };
+    EpdRect render_area = epd_full_screen();
 
     if (framebuffer_mutex) xSemaphoreGive(framebuffer_mutex);
 
@@ -200,4 +232,4 @@ s = s.replace('epd_set_lcd_pixel_clock_MHz(17);', 'epd_set_lcd_pixel_clock_MHz(5
 s = s.replace('Serial.println("[EPD INIT] pixel clock set before boot clear");', 'Serial.println("[EPD INIT] pixel clock set to 5 MHz before boot clear");')
 
 p.write_text(s, encoding="utf-8")
-print("[PATCH] main.cpp display lifecycle patch complete: 1-bit black/white path active at 5 MHz")
+print("[PATCH] main.cpp display lifecycle patch complete: physical 1-bit black/white path active at 5 MHz")
