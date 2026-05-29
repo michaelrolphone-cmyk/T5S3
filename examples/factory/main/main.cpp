@@ -1419,21 +1419,26 @@ static bool display_safe_for_hard_clean(void)
     return battery_25896_get_VBAT() >= CONFIG_EPD_HARD_CLEAN_MIN_VBAT;
 }
 
+static const char *SD_CARD_MOUNT_POINT = "/sd";
+static const uint32_t SD_CARD_SPI_FREQUENCY = 4000000;
+static const uint8_t SD_CARD_MAX_OPEN_FILES = 16;
+
 static bool sd_card_begin(const char *owner)
 {
     digitalWrite(BOARD_LORA_CS, HIGH);
-    if(!SD.begin(BOARD_SD_CS)){
-        Serial.printf("[SD] Card mount failed (%s)\n", owner ? owner : "unknown");
+    if(!SD.begin(BOARD_SD_CS, SPI, SD_CARD_SPI_FREQUENCY, SD_CARD_MOUNT_POINT, SD_CARD_MAX_OPEN_FILES)){
+        Serial.printf("[SD] Card mount failed (%s, mount=%s)\n", owner ? owner : "unknown", SD_CARD_MOUNT_POINT);
         return false;
     }
 
     uint8_t cardType = SD.cardType();
 
     if(cardType == CARD_NONE){
-        Serial.printf("[SD] No SD card attached (%s)\n", owner ? owner : "unknown");
+        Serial.printf("[SD] No SD card attached (%s, mount=%s)\n", owner ? owner : "unknown", SD_CARD_MOUNT_POINT);
         return false;
     }
 
+    Serial.printf("[SD] Mounted %s with logical root / (%s)\n", SD_CARD_MOUNT_POINT, owner ? owner : "unknown");
     Serial.print("SD Card Type: ");
     if(cardType == CARD_MMC){
         Serial.println("MMC");

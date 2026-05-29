@@ -2186,6 +2186,7 @@ static void sd_file_list_populate(void)
     sd_guard_unlock();
 
     if (file_index == 0) {
+        Serial.printf("[SD] Browser found no entries at logical path: %s\n", sd_curr_path);
         sd_file_list_add_message("No files found");
     }
 }
