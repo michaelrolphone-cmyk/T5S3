@@ -214,7 +214,11 @@ void sd_guard_init()
 
 bool sd_guard_lock(uint32_t timeout_ms)
 {
-    return sd_mutex && xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+    if (!sd_mutex || xSemaphoreTake(sd_mutex, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        return false;
+    }
+    digitalWrite(BOARD_LORA_CS, HIGH);
+    return true;
 }
 
 void sd_guard_unlock()
@@ -378,15 +382,7 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
 void btn_task(void *param)
 {
     bool boot_btn_pressed = false;
-    bool gpio_has_btn = false;
-    bool gpio_btn_ready = false;
-    bool gpio_btn_pressed = false;
     bool pca_btn_pressed = false;
-    bool gpio_last_raw = false;
-    bool gpio_saw_edge = false;
-    uint32_t gpio_startup_inactive_ms = 0;
-    uint32_t task_start_ms = millis();
-    bool use_pca_fallback = false;
 
     while(1)
     {
@@ -401,54 +397,12 @@ void btn_task(void *param)
             boot_btn_pressed = false;
         }
 
-        bool gpio_raw = false;
-        bool gpio_pressed = false;
-#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
-        gpio_has_btn = true;
-        gpio_raw = (digitalRead(BOARD_IO48_BTN) == HIGH);
-        gpio_pressed = BOARD_IO48_BTN_ACTIVE_LOW ? !gpio_raw : gpio_raw;
-        Serial.printf("[BUTTON RAW] gpio48=%d pressed=%d ready=%d fallback=%d\n",
-                      gpio_raw, gpio_pressed, gpio_btn_ready, use_pca_fallback);
-
-        uint32_t now_ms = millis();
-        if (gpio_raw != gpio_last_raw) {
-            gpio_last_raw = gpio_raw;
-            gpio_saw_edge = true;
-        }
-
-        if (!gpio_btn_ready) {
-            if (!gpio_pressed) {
-                if (gpio_startup_inactive_ms == 0) {
-                    gpio_startup_inactive_ms = now_ms;
-                } else if ((now_ms - gpio_startup_inactive_ms) >= 300) {
-                    gpio_btn_ready = true;
-                }
-            } else {
-                gpio_startup_inactive_ms = 0;
-            }
-        } else {
-            if (gpio_pressed) {
-                gpio_btn_pressed = true;
-            } else if (gpio_btn_pressed) {
-                ui_post_event(UiEvent::TOGGLE_BACKLIGHT);
-                Serial.printf("[BUTTON] release source=GPIO48 queued_toggle gpio48=%d\n", gpio_raw);
-                gpio_btn_pressed = false;
-            }
-        }
-
-        if (!gpio_saw_edge && ((now_ms - task_start_ms) >= 7000)) {
-            use_pca_fallback = true;
-        }
-#endif
-
-        if (!gpio_has_btn || use_pca_fallback) {
-            bool pca_pressed = button_read();
-            if (pca_pressed) {
-                pca_btn_pressed = true;
-            } else if (pca_btn_pressed) {
-                ui_post_event(UiEvent::TOGGLE_BACKLIGHT);
-                pca_btn_pressed = false;
-            }
+        bool pca_pressed = button_read();
+        if (pca_pressed) {
+            pca_btn_pressed = true;
+        } else if (pca_btn_pressed) {
+            ui_post_event(UiEvent::TOGGLE_BACKLIGHT);
+            pca_btn_pressed = false;
         }
         delay(80);
     }
@@ -1415,20 +1369,31 @@ static bool display_safe_for_hard_clean(void)
     return battery_25896_get_VBAT() >= CONFIG_EPD_HARD_CLEAN_MIN_VBAT;
 }
 
-static bool sd_card_init(void)
+static const char *SD_CARD_MOUNT_POINT = "/sd";
+static const uint32_t SD_CARD_SPI_FREQUENCY = 4000000;
+static const uint8_t SD_CARD_MAX_OPEN_FILES = 16;
+
+const char *sd_card_mount_point()
 {
-    if(!SD.begin(BOARD_SD_CS)){
-        Serial.println("Card Mount Failed");
+    return SD_CARD_MOUNT_POINT;
+}
+
+static bool sd_card_begin(const char *owner)
+{
+    digitalWrite(BOARD_LORA_CS, HIGH);
+    if(!SD.begin(BOARD_SD_CS, SPI, SD_CARD_SPI_FREQUENCY, SD_CARD_MOUNT_POINT, SD_CARD_MAX_OPEN_FILES)){
+        Serial.printf("[SD] Card mount failed (%s, mount=%s)\n", owner ? owner : "unknown", SD_CARD_MOUNT_POINT);
         return false;
     }
 
     uint8_t cardType = SD.cardType();
 
     if(cardType == CARD_NONE){
-        Serial.println("No SD card attached");
+        Serial.printf("[SD] No SD card attached (%s, mount=%s)\n", owner ? owner : "unknown", SD_CARD_MOUNT_POINT);
         return false;
     }
 
+    Serial.printf("[SD] Mounted %s with logical root / (%s)\n", SD_CARD_MOUNT_POINT, owner ? owner : "unknown");
     Serial.print("SD Card Type: ");
     if(cardType == CARD_MMC){
         Serial.println("MMC");
@@ -1440,6 +1405,34 @@ static bool sd_card_init(void)
         Serial.println("UNKNOWN");
     }
     return true;
+}
+
+static bool sd_card_init(void)
+{
+    return sd_card_begin("boot");
+}
+
+bool sd_card_ensure_ready_locked(const char *owner)
+{
+    digitalWrite(BOARD_LORA_CS, HIGH);
+    if (peri_buf[E_PERI_SD_CARD] && SD.cardType() != CARD_NONE) {
+        return true;
+    }
+
+    Serial.printf("[SD] Reinitializing shared SD handler (%s)\n", owner ? owner : "unknown");
+    SD.end();
+    peri_buf[E_PERI_SD_CARD] = sd_card_begin(owner ? owner : "ensure");
+    return peri_buf[E_PERI_SD_CARD];
+}
+
+bool sd_card_ensure_ready()
+{
+    if (!sd_guard_lock(2000)) {
+        return false;
+    }
+    bool ok = sd_card_ensure_ready_locked("ensure");
+    sd_guard_unlock();
+    return ok;
 }
 
 void idf_setup() 
@@ -1474,9 +1467,6 @@ void idf_setup()
     pinMode(BOARD_BL_EN, OUTPUT);
     analogWrite(BOARD_BL_EN, 0); // Keep backlight off until user setting is applied
     pinMode(BOARD_BOOT_BTN, INPUT_PULLUP);
-#if defined(BOARD_IO48_BTN) && (BOARD_IO48_BTN >= 0)
-    pinMode(BOARD_IO48_BTN, INPUT_PULLUP);
-#endif
 
     // Init system
     ui_nvs_set_defaulat_param();
