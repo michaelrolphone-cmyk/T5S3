@@ -2138,7 +2138,7 @@ static void sd_file_list_populate(void)
         return;
     }
 
-    File root = SD.open(sd_curr_path, FILE_READ);
+    File root = SD.open(sd_curr_path);
     if (!root || !root.isDirectory()) {
         Serial.printf("[SD] Directory open failed: %s\n", sd_curr_path);
         if (root) root.close();
