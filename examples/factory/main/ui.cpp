@@ -376,7 +376,10 @@ struct springboard_runtime_icon {
     lv_obj_t *slot;
     lv_obj_t *img_or_canvas;
     lv_color_t *visible_buf;
+    uint8_t *sram_payload;
+    uint32_t sram_payload_size;
     bool loaded_cache;
+    bool sram_payload_ready;
     int16_t pos_x;
     int16_t pos_y;
     char source_path[96];
@@ -688,10 +691,38 @@ static bool springboard_build_icon_cache_from_png(const char *png_path, const ch
     return ok;
 }
 
-static bool springboard_load_cached_icon_to_lvgl_buffer(const char *cache_path, lv_color_t **out_buf, char *reason, size_t reason_len)
+static bool springboard_expand_payload_to_lvgl_buffer(const uint8_t *payload, uint32_t payload_size, lv_color_t **out_buf, char *reason, size_t reason_len)
 {
-    if (!cache_path || !out_buf) { lv_snprintf(reason, reason_len, "invalid_argument"); return false; }
+    if (!payload || !out_buf) { lv_snprintf(reason, reason_len, "invalid_argument"); return false; }
     *out_buf = NULL;
+    if (payload_size != springboard_cache_payload_size()) { lv_snprintf(reason, reason_len, "payload_size_invalid"); return false; }
+
+    lv_color_t *buf = (lv_color_t *)ps_malloc(SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t));
+    if (!buf) { lv_snprintf(reason, reason_len, "buf_alloc_failed"); return false; }
+
+    int row_bytes = (SPRINGBOARD_ICON_W + 7) / 8;
+    for (int y = 0; y < SPRINGBOARD_ICON_H; ++y) {
+        for (int x = 0; x < SPRINGBOARD_ICON_W; ++x) {
+            bool black = (payload[y * row_bytes + (x >> 3)] & (0x80 >> (x & 7))) != 0;
+            buf[y * SPRINGBOARD_ICON_W + x] = black ? lv_color_black() : lv_color_white();
+        }
+    }
+
+    *out_buf = buf;
+    lv_snprintf(reason, reason_len, "ok");
+    return true;
+}
+
+static bool springboard_load_cached_icon_to_sram_payload(const char *cache_path, springboard_runtime_icon *icon, char *reason, size_t reason_len)
+{
+    if (!cache_path || !icon) { lv_snprintf(reason, reason_len, "invalid_argument"); return false; }
+    if (icon->sram_payload_ready &&
+        icon->sram_payload &&
+        icon->sram_payload_size == springboard_cache_payload_size()) {
+        lv_snprintf(reason, reason_len, "ok:sram");
+        return true;
+    }
+
     if (!sd_guard_lock(1000)) { lv_snprintf(reason, reason_len, "sd_lock_timeout"); return false; }
     File in = SD.open(cache_path, FILE_READ);
     if (!in) { sd_guard_unlock(); lv_snprintf(reason, reason_len, "open_failed"); return false; }
@@ -710,24 +741,18 @@ static bool springboard_load_cached_icon_to_lvgl_buffer(const char *cache_path, 
         return false;
     }
 
-    uint8_t *payload = (uint8_t *)ps_malloc(h.payload_size);
-    if (!payload) { in.close(); sd_guard_unlock(); lv_snprintf(reason, reason_len, "payload_alloc_failed"); return false; }
+    uint8_t *payload = (uint8_t *)heap_caps_malloc(h.payload_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!payload) { in.close(); sd_guard_unlock(); lv_snprintf(reason, reason_len, "sram_payload_alloc_failed"); return false; }
     size_t n = in.read(payload, h.payload_size);
     in.close();
     sd_guard_unlock();
     if (n != h.payload_size) { free(payload); lv_snprintf(reason, reason_len, "payload_read_failed"); return false; }
-    lv_color_t *buf = (lv_color_t *)ps_malloc(SPRINGBOARD_ICON_W * SPRINGBOARD_ICON_H * sizeof(lv_color_t));
-    if (!buf) { free(payload); lv_snprintf(reason, reason_len, "buf_alloc_failed"); return false; }
-    int row_bytes = (SPRINGBOARD_ICON_W + 7) / 8;
-    for (int y = 0; y < SPRINGBOARD_ICON_H; ++y) {
-        for (int x = 0; x < SPRINGBOARD_ICON_W; ++x) {
-            bool black = (payload[y * row_bytes + (x >> 3)] & (0x80 >> (x & 7))) != 0;
-            buf[y * SPRINGBOARD_ICON_W + x] = black ? lv_color_black() : lv_color_white();
-        }
-    }
-    free(payload);
-    *out_buf = buf;
-    lv_snprintf(reason, reason_len, "ok");
+
+    if (icon->sram_payload) free(icon->sram_payload);
+    icon->sram_payload = payload;
+    icon->sram_payload_size = h.payload_size;
+    icon->sram_payload_ready = true;
+    lv_snprintf(reason, reason_len, "ok:sd_cache");
     return true;
 }
 
@@ -759,7 +784,7 @@ static void springboard_create_page_icons(lv_obj_t *page, const menu_icon *icons
     (void)global_index_base;
 }
 
-static void springboard_unload_page_icons(int page)
+static void springboard_unload_page_icons(int page, bool release_sram_payloads)
 {
     springboard_runtime_icon *icons = (page == 0) ? springboard_icons_page1 : springboard_icons_page2;
     int count = (page == 0) ? (int)ARRAY_LEN(icon_buf) : (int)ARRAY_LEN(icon_buf2);
@@ -773,10 +798,18 @@ static void springboard_unload_page_icons(int page)
             icons[i].visible_buf = NULL;
         }
         icons[i].loaded_cache = false;
-        icons[i].source_path[0] = '\0';
-        icons[i].cache_path[0] = '\0';
+        if (release_sram_payloads) {
+            if (icons[i].sram_payload) {
+                free(icons[i].sram_payload);
+                icons[i].sram_payload = NULL;
+            }
+            icons[i].sram_payload_size = 0;
+            icons[i].sram_payload_ready = false;
+            icons[i].source_path[0] = '\0';
+            icons[i].cache_path[0] = '\0';
+        }
     }
-    springboard_log_heap("after_unload_page");
+    springboard_log_heap(release_sram_payloads ? "after_destroy_page_icons" : "after_unload_page");
 }
 
 static void springboard_load_page_icons(int page)
@@ -795,46 +828,62 @@ static void springboard_load_page_icons(int page)
             runtime[i].visible_buf = NULL;
         }
         runtime[i].loaded_cache = false;
-        runtime[i].source_path[0] = '\0';
-        runtime[i].cache_path[0] = '\0';
 
         const char *path_used = NULL;
         bool alias_used = false;
-        if (springboard_icon_png_exists(src_icons[i].png_path)) path_used = src_icons[i].png_path;
-        else if (springboard_icon_png_exists(src_icons[i].png_alias_path)) { path_used = src_icons[i].png_alias_path; alias_used = true; }
-
         lv_obj_t *child = NULL;
-        if (path_used) {
-            lv_snprintf(runtime[i].source_path, sizeof(runtime[i].source_path), "%s", path_used);
-            springboard_make_cache_path(path_used, runtime[i].cache_path, sizeof(runtime[i].cache_path));
-            if (springboard_icon_cache_valid(path_used, runtime[i].cache_path)) {
-                Serial.printf("[ICON] cache hit %s\n", path_used);
-            } else {
-                Serial.printf("[ICON] cache miss %s\n", path_used);
-                char build_reason[64] = {0};
-                if (springboard_build_icon_cache_from_png(path_used, runtime[i].cache_path, build_reason, sizeof(build_reason))) {
-                    Serial.printf("[ICON] cache build ok %s\n", path_used);
-                } else {
-                    Serial.printf("[ICON] cache build failed %s: %s\n", path_used, build_reason);
-                }
-            }
 
-            char read_reason[64] = {0};
-            if (springboard_load_cached_icon_to_lvgl_buffer(runtime[i].cache_path, &runtime[i].visible_buf, read_reason, sizeof(read_reason))) {
-                lv_obj_t *canvas = lv_canvas_create(runtime[i].slot);
-                lv_canvas_set_buffer(canvas, runtime[i].visible_buf, SPRINGBOARD_ICON_W, SPRINGBOARD_ICON_H, LV_IMG_CF_TRUE_COLOR);
-                lv_obj_set_style_bg_opa(canvas, LV_OPA_TRANSP, LV_PART_MAIN);
-                lv_obj_set_style_border_width(canvas, 0, LV_PART_MAIN);
-                lv_obj_add_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
-                lv_obj_add_event_cb(canvas, menu_btn_event, LV_EVENT_CLICKED, (void *)((page == 0 ? 0 : ARRAY_LEN(icon_buf)) + i));
-                child = canvas;
-                runtime[i].loaded_cache = true;
-                if (alias_used) Serial.printf("[ICON] alias loaded from cache %s\n", path_used);
+        if (runtime[i].sram_payload_ready && runtime[i].sram_payload) {
+            char expand_reason[64] = {0};
+            if (springboard_expand_payload_to_lvgl_buffer(runtime[i].sram_payload, runtime[i].sram_payload_size, &runtime[i].visible_buf, expand_reason, sizeof(expand_reason))) {
+                Serial.printf("[ICON] sram reuse %s\n", runtime[i].source_path[0] ? runtime[i].source_path : src_icons[i].png_path);
             } else {
-                Serial.printf("[ICON] cache read failed %s: %s\n", runtime[i].cache_path, read_reason);
+                Serial.printf("[ICON] sram expand failed %s: %s\n", runtime[i].source_path[0] ? runtime[i].source_path : src_icons[i].png_path, expand_reason);
+                runtime[i].sram_payload_ready = false;
             }
-        } else {
-            Serial.printf("[ICON] missing %s\n", src_icons[i].png_path);
+        }
+
+        if (!runtime[i].visible_buf) {
+            if (springboard_icon_png_exists(src_icons[i].png_path)) path_used = src_icons[i].png_path;
+            else if (springboard_icon_png_exists(src_icons[i].png_alias_path)) { path_used = src_icons[i].png_alias_path; alias_used = true; }
+
+            if (path_used) {
+                lv_snprintf(runtime[i].source_path, sizeof(runtime[i].source_path), "%s", path_used);
+                springboard_make_cache_path(path_used, runtime[i].cache_path, sizeof(runtime[i].cache_path));
+                if (springboard_icon_cache_valid(path_used, runtime[i].cache_path)) {
+                    Serial.printf("[ICON] cache hit %s\n", path_used);
+                } else {
+                    Serial.printf("[ICON] cache miss %s\n", path_used);
+                    char build_reason[64] = {0};
+                    if (springboard_build_icon_cache_from_png(path_used, runtime[i].cache_path, build_reason, sizeof(build_reason))) {
+                        Serial.printf("[ICON] cache build ok %s\n", path_used);
+                    } else {
+                        Serial.printf("[ICON] cache build failed %s: %s\n", path_used, build_reason);
+                    }
+                }
+
+                char read_reason[64] = {0};
+                if (springboard_load_cached_icon_to_sram_payload(runtime[i].cache_path, &runtime[i], read_reason, sizeof(read_reason)) &&
+                    springboard_expand_payload_to_lvgl_buffer(runtime[i].sram_payload, runtime[i].sram_payload_size, &runtime[i].visible_buf, read_reason, sizeof(read_reason))) {
+                    if (alias_used) Serial.printf("[ICON] alias loaded from cache %s\n", path_used);
+                    Serial.printf("[ICON] cache payload retained in sram %s (%u bytes)\n", path_used, (unsigned)runtime[i].sram_payload_size);
+                } else {
+                    Serial.printf("[ICON] cache read failed %s: %s\n", runtime[i].cache_path, read_reason);
+                }
+            } else {
+                Serial.printf("[ICON] missing %s\n", src_icons[i].png_path);
+            }
+        }
+
+        if (runtime[i].visible_buf) {
+            lv_obj_t *canvas = lv_canvas_create(runtime[i].slot);
+            lv_canvas_set_buffer(canvas, runtime[i].visible_buf, SPRINGBOARD_ICON_W, SPRINGBOARD_ICON_H, LV_IMG_CF_TRUE_COLOR);
+            lv_obj_set_style_bg_opa(canvas, LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_border_width(canvas, 0, LV_PART_MAIN);
+            lv_obj_add_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(canvas, menu_btn_event, LV_EVENT_CLICKED, (void *)((page == 0 ? 0 : ARRAY_LEN(icon_buf)) + i));
+            child = canvas;
+            runtime[i].loaded_cache = true;
         }
 
         if (!child) {
@@ -889,7 +938,7 @@ static void menu_get_gesture_dir(int dir)
     }   
 
     Serial.printf("[gesture] curr=%d, sum=%d, dir=%d\n", page_curr, page_num, dir);
-    springboard_unload_page_icons(prev_page);
+    springboard_unload_page_icons(prev_page, false);
     springboard_show_page(page_curr);
     springboard_load_page_icons(page_curr);
 }
@@ -1134,8 +1183,8 @@ static void exit0(void) {
 }
 static void destroy0(void) 
 {
-    springboard_unload_page_icons(0);
-    springboard_unload_page_icons(1);
+    springboard_unload_page_icons(0, true);
+    springboard_unload_page_icons(1, true);
 }
 
 static scr_lifecycle_t screen0 = {
