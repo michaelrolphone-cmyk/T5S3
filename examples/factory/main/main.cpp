@@ -1423,6 +1423,11 @@ static const char *SD_CARD_MOUNT_POINT = "/sd";
 static const uint32_t SD_CARD_SPI_FREQUENCY = 4000000;
 static const uint8_t SD_CARD_MAX_OPEN_FILES = 16;
 
+const char *sd_card_mount_point()
+{
+    return SD_CARD_MOUNT_POINT;
+}
+
 static bool sd_card_begin(const char *owner)
 {
     digitalWrite(BOARD_LORA_CS, HIGH);
