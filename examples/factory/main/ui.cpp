@@ -4655,10 +4655,10 @@ static bool maps_build_tile_url(char *url, size_t url_len, MapsTileProvider prov
             }
             return true;
         case MAPS_PROVIDER_CARTO_LIGHT:
-            lv_snprintf(url, url_len, "https://a.basemaps.cartocdn.com/light_all/%d/%d/%d.png", z, x, y);
+            lv_snprintf(url, url_len, "http://a.basemaps.cartocdn.com/light_all/%d/%d/%d.png", z, x, y);
             return true;
         case MAPS_PROVIDER_OSM_STANDARD:
-            lv_snprintf(url, url_len, "https://tile.openstreetmap.org/%d/%d/%d.png", z, x, y);
+            lv_snprintf(url, url_len, "http://tile.openstreetmap.org/%d/%d/%d.png", z, x, y);
             return true;
         default:
             return false;
@@ -4672,10 +4672,10 @@ static void maps_build_tile_url_redacted(char *url, size_t url_len, MapsTileProv
             lv_snprintf(url, url_len, "https://tiles.stadiamaps.com/tiles/stamen_toner/%d/%d/%d.png", z, x, y);
             break;
         case MAPS_PROVIDER_CARTO_LIGHT:
-            lv_snprintf(url, url_len, "https://a.basemaps.cartocdn.com/light_all/%d/%d/%d.png", z, x, y);
+            lv_snprintf(url, url_len, "http://a.basemaps.cartocdn.com/light_all/%d/%d/%d.png", z, x, y);
             break;
         case MAPS_PROVIDER_OSM_STANDARD:
-            lv_snprintf(url, url_len, "https://tile.openstreetmap.org/%d/%d/%d.png", z, x, y);
+            lv_snprintf(url, url_len, "http://tile.openstreetmap.org/%d/%d/%d.png", z, x, y);
             break;
         default:
             lv_snprintf(url, url_len, "unknown");
