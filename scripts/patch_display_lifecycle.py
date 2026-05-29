@@ -109,8 +109,8 @@ new_flush = '''static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area
     checkError(epd_draw_base(
         render_area,
         bwbuffer,
-        (EpdRect){.x = 0, .y = 0, .width = 0, .height = 0},
-        (EpdDrawMode)(MODE_DU | MODE_EPDIY_MONOCHROME | MODE_PACKING_8PPB | PREVIOUSLY_WHITE),
+        render_area,
+        (EpdDrawMode)(MODE_EPDIY_MONOCHROME | MODE_PACKING_8PPB | PREVIOUSLY_WHITE),
         epd_ambient_temperature(),
         NULL,
         NULL,
