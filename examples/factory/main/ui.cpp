@@ -2944,6 +2944,7 @@ static String wifi_ap_pwd  = "12345678";
 static WebServer wifi_web_server(80);
 static DNSServer wifi_dns_server;
 static bool wifi_web_started = false;
+static bool wifi_boot_init_pending = false;
 
 static void wifi_load_saved_settings(void)
 {
@@ -3326,7 +3327,7 @@ static void wifi_start_web_services(void)
     wifi_web_started = true;
 }
 
-static void wifi_enable_apsta(void)
+static void wifi_enable_apsta(bool start_services = true)
 {
     WiFi.mode(WIFI_AP_STA);
 
@@ -3339,7 +3340,9 @@ static void wifi_enable_apsta(void)
     }
 
     Serial.printf("[wifi] AP started: %s IP=%s\n", wifi_ap_ssid.c_str(), WiFi.softAPIP().toString().c_str());
-    wifi_start_web_services();
+    if (start_services) {
+        wifi_start_web_services();
+    }
 }
 
 static void wifi_info_label_create(lv_obj_t *parent)
@@ -3401,7 +3404,7 @@ static void wifi_config_event_handler(lv_event_t *e)
         smartConfigStart = false;
         return;
     }
-    wifi_enable_apsta();
+    wifi_enable_apsta(true);
     WiFi.disconnect();
     smartConfigStart = true;
     WiFi.beginSmartConfig();
@@ -3530,7 +3533,7 @@ static void create6(lv_obj_t *parent)
     lv_obj_align(wifi_st_lab, LV_ALIGN_BOTTOM_RIGHT, -0, -190);
 
     wifi_load_saved_settings();
-    wifi_enable_apsta();
+    wifi_enable_apsta(true);
 
     if(ui_wifi_get_status()) {
         wifi_info_label_create(parent);
@@ -3631,6 +3634,13 @@ static void destroy6(void)
 
 void ui_wifi_service_loop(void)
 {
+    if (wifi_boot_init_pending) {
+        wifi_boot_init_pending = false;
+        wifi_load_saved_settings();
+        wifi_enable_apsta(false);
+        wifi_connect_saved_sta("startup");
+    }
+
     if (!wifi_web_started) return;
     wifi_dns_server.processNextRequest();
     wifi_web_server.handleClient();
@@ -5736,6 +5746,9 @@ void ui_entry(void)
     scr_mgr_register(SCREEN12_ID,  &screen12);  // web browser
     scr_mgr_register(SCREEN13_ID,  &screen13);  // maps
     scr_mgr_register(SCREEN14_ID,  &screen14);  // image preview
+
+    // Defer Wi-Fi bring-up until service loop is running to avoid boot-time stalls.
+    wifi_boot_init_pending = true;
 
     scr_mgr_switch(SCREEN0_ID, false); // set root screen
     disp_request_boot_replace();
