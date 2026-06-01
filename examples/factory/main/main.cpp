@@ -93,6 +93,11 @@ static lv_indev_t *touch_indev = NULL;
 static QueueHandle_t ui_event_q = NULL;
 static TaskHandle_t ui_task_handle = NULL;
 
+static constexpr BaseType_t CORE_NET = 0;
+static constexpr BaseType_t CORE_UI = 1;
+// Keep LVGL/UI scheduling on CORE_UI while serialized e-paper commits run via the display queue on CORE_DISPLAY.
+static constexpr BaseType_t CORE_DISPLAY = CORE_NET;
+
 enum class UiEvent : uint8_t {
     BOOT_SLEEP,
     TOGGLE_BACKLIGHT,
@@ -138,6 +143,8 @@ static uint32_t disp_lvgl_flush_count = 0;
 static uint32_t disp_physical_commit_count = 0;
 static uint32_t disp_replace_commit_count = 0;
 static TaskHandle_t disp_flush_handle = NULL;
+static TaskHandle_t wifi_service_task_handle = NULL;
+
 static constexpr uint32_t DISP_FLUSH_STACK_BYTES = 8 * 1024;
 static StackType_t disp_flush_stack[DISP_FLUSH_STACK_BYTES / sizeof(StackType_t)];
 static StaticTask_t disp_flush_task_tcb;
@@ -163,6 +170,8 @@ static void release_snapshot(uint32_t seq, uint8_t *snapshot);
 static inline int display_update_kind_priority(DisplayUpdateKind kind);
 static void display_set_next_snapshot_kind(DisplayUpdateKind kind);
 static void ensure_display_flush_task_started(void);
+static void wifi_service_task(void *param);
+static void ensure_wifi_service_task_started(void);
 bool disp_show_sleep_png_from_sd(const char *preferred_path);
 static inline void epd_image_set_pixel_4bpp(uint8_t *buf, int32_t width, int32_t x, int32_t y, uint8_t gray4);
 
@@ -1104,13 +1113,14 @@ static void ensure_display_flush_task_started(void)
     size_t free_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     size_t largest_before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     size_t free_psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    Serial.printf("[CORE] display task target core=%d\n", CORE_DISPLAY);
     Serial.printf("[DISPLAY TASK] create precheck free_internal=%u largest_internal=%u free_psram=%u\n",
                   (unsigned)free_before, (unsigned)largest_before, (unsigned)free_psram_before);
 
     BaseType_t rc = pdFAIL;
     disp_flush_handle = xTaskCreateStaticPinnedToCore(disp_flush_task, "disp_flush_task",
                                                        DISP_FLUSH_STACK_BYTES / sizeof(StackType_t),
-                                                       NULL, 2, disp_flush_stack, &disp_flush_task_tcb, 0);
+                                                       NULL, 2, disp_flush_stack, &disp_flush_task_tcb, CORE_DISPLAY);
     if (disp_flush_handle != NULL) {
         rc = pdPASS;
         Serial.printf("[DISPLAY TASK] static create ok stack_bytes=%u\n", (unsigned)DISP_FLUSH_STACK_BYTES);
@@ -1125,6 +1135,39 @@ static void ensure_display_flush_task_started(void)
         disp_flush_task_create_failed = true;
         Serial.printf("[DISPLAY TASK ERROR] create failed rc=%ld handle=%p free_internal=%u largest_internal=%u\n",
                       (long)rc, (void *)disp_flush_handle, (unsigned)free_after, (unsigned)largest_after);
+    }
+}
+
+
+static void ensure_wifi_service_task_started(void)
+{
+    ui_wifi_service_init();
+    if (wifi_service_task_handle != NULL) {
+        return;
+    }
+
+    BaseType_t rc = xTaskCreatePinnedToCore(
+        wifi_service_task,
+        "wifi_service",
+        4096,
+        NULL,
+        1,
+        &wifi_service_task_handle,
+        CORE_NET);
+    if (rc != pdPASS) {
+        Serial.printf("[WIFI TASK ERROR] create failed rc=%ld\n", (long)rc);
+    }
+}
+
+static void wifi_service_task(void *param)
+{
+    (void)param;
+    Serial.printf("[WIFI TASK] started core=%d stack_hwm=%lu\n",
+                  xPortGetCoreID(),
+                  (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+    while (true) {
+        ui_wifi_service_loop();
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
 
@@ -1458,6 +1501,9 @@ void idf_setup()
     Serial.printf("[BOOT] reset_reason=%d wakeup_cause=%d\n",
                   rr,
                   esp_sleep_get_wakeup_cause());
+    Serial.printf("[CORE] setup/idf_loop core=%d\n", xPortGetCoreID());
+    Serial.printf("[CORE] ui loop target core=%d\n", CORE_UI);
+    Serial.printf("[CORE] wifi service task target core=%d\n", CORE_NET);
     SerialGPS.begin(38400, SERIAL_8N1, BOARD_GPS_RXD, BOARD_GPS_TXD);
     // // while (!Serial);
 
@@ -1550,6 +1596,7 @@ void idf_setup()
 
     // task
     xTaskCreate(btn_task, "lora_task", 1024 * 3, NULL, INFARED_PRIORITY, &btn_handle);
+    ensure_wifi_service_task_started();
 }
 
 bool ui_is_ui_thread()
@@ -1636,7 +1683,6 @@ void idf_loop()
     }
 
     gps_service_loop();
-    ui_wifi_service_loop();
     delay(1);
 }
 static bool publish_snapshot(DisplayUpdateKind kind, bool has_dirty_union, const lv_area_t *dirty_union)

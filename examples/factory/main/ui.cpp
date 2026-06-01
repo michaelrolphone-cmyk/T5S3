@@ -2945,6 +2945,46 @@ static WebServer wifi_web_server(80);
 static DNSServer wifi_dns_server;
 static bool wifi_web_started = false;
 
+enum WifiCmdType : uint8_t {
+    WIFI_CMD_ENABLE_APSTA = 0,
+    WIFI_CMD_RECONFIG_AP,
+    WIFI_CMD_DISCONNECT_STA,
+    WIFI_CMD_BEGIN_SMARTCONFIG,
+    WIFI_CMD_STOP_SMARTCONFIG,
+    WIFI_CMD_CONNECT_SAVED_STA,
+};
+
+struct WifiCmd {
+    WifiCmdType type;
+};
+
+static QueueHandle_t wifi_cmd_q = NULL;
+
+void ui_wifi_service_init(void)
+{
+    if (wifi_cmd_q) return;
+    wifi_cmd_q = xQueueCreate(12, sizeof(WifiCmd));
+    if (!wifi_cmd_q) {
+        Serial.println("[wifi cmd] queue create failed");
+    }
+}
+
+static bool wifi_queue_cmd(WifiCmdType type)
+{
+    if (!wifi_cmd_q) {
+        Serial.printf("[wifi cmd] queue not ready type=%u\n", (unsigned)type);
+        return false;
+    }
+    WifiCmd cmd{type};
+    BaseType_t ok = xQueueSend(wifi_cmd_q, &cmd, 0);
+    if (ok != pdTRUE) {
+        Serial.printf("[wifi cmd] queue full drop type=%u\n", (unsigned)type);
+        return false;
+    }
+    return true;
+}
+
+
 static void wifi_load_saved_settings(void)
 {
     wifi_sta_ssid = nvs_param_get_str(NVS_ID_WIFI_STA_SSID);
@@ -2964,7 +3004,7 @@ static void wifi_save_settings(void)
     nvs_param_set_str(NVS_ID_WIFI_AP_PWD, wifi_ap_pwd.c_str());
 }
 
-static bool wifi_connect_saved_sta(const char *reason)
+static bool wifi_connect_saved_sta_impl(const char *reason)
 {
     wifi_load_saved_settings();
 
@@ -2989,6 +3029,12 @@ static bool wifi_connect_saved_sta(const char *reason)
 
     WiFi.begin(wifi_sta_ssid.c_str(), wifi_sta_pwd.c_str());
     return true;
+}
+
+static bool wifi_connect_saved_sta(const char *reason)
+{
+    Serial.printf("[wifi] queue connect saved STA for %s\n", reason ? reason : "");
+    return wifi_queue_cmd(WIFI_CMD_CONNECT_SAVED_STA);
 }
 
 static void wifi_send_cors_headers(void)
@@ -3155,10 +3201,7 @@ static void wifi_handle_settings_post(void)
                   (unsigned)wifi_sta_pwd.length(),
                   wifi_ap_ssid.c_str());
     if (ap_config_changed) {
-        WiFi.softAPdisconnect(true);
-        if (!WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str())) {
-            Serial.println("[wifi] softAP reconfigure failed");
-        }
+        wifi_queue_cmd(WIFI_CMD_RECONFIG_AP);
     }
 
     wifi_handle_settings_get();
@@ -3396,15 +3439,15 @@ static void wifi_config_event_handler(lv_event_t *e)
             lv_timer_del(wifi_timer);
             wifi_timer = NULL;
         }
-        WiFi.stopSmartConfig();
+        wifi_queue_cmd(WIFI_CMD_STOP_SMARTCONFIG);
         Serial.println("return smart Config has Start;");
         smartConfigStart = false;
         return;
     }
-    wifi_enable_apsta();
-    WiFi.disconnect();
+    wifi_queue_cmd(WIFI_CMD_ENABLE_APSTA);
+    wifi_queue_cmd(WIFI_CMD_DISCONNECT_STA);
     smartConfigStart = true;
-    WiFi.beginSmartConfig();
+    wifi_queue_cmd(WIFI_CMD_BEGIN_SMARTCONFIG);
     Serial.println("[wifi config] Config Start");
     lv_label_set_text(wifi_st_lab, "Wifi Config ...");
     
@@ -3459,7 +3502,7 @@ static void wifi_config_event_handler(lv_event_t *e)
             wifi_info_label_create(scr6_root);
         }
         if (destory) {
-            WiFi.stopSmartConfig();
+            wifi_queue_cmd(WIFI_CMD_STOP_SMARTCONFIG);
             smartConfigStart = false;
             lv_timer_del(wifi_timer);
             wifi_timer         = NULL;
@@ -3498,10 +3541,7 @@ static void wifi_apply_settings_event_handler(lv_event_t *e)
                   wifi_ap_ssid.c_str());
 
     if (wifi_ap_ssid.length() > 0 && wifi_ap_pwd.length() >= 8) {
-        WiFi.softAPdisconnect(true);
-        if (!WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str())) {
-            Serial.println("[wifi] softAP reconfigure failed");
-        }
+        wifi_queue_cmd(WIFI_CMD_RECONFIG_AP);
     }
 
     lv_label_set_text(wifi_st_lab, "Wifi Settings Applied");
@@ -3530,7 +3570,7 @@ static void create6(lv_obj_t *parent)
     lv_obj_align(wifi_st_lab, LV_ALIGN_BOTTOM_RIGHT, -0, -190);
 
     wifi_load_saved_settings();
-    wifi_enable_apsta();
+    wifi_queue_cmd(WIFI_CMD_ENABLE_APSTA);
 
     if(ui_wifi_get_status()) {
         wifi_info_label_create(parent);
@@ -3613,7 +3653,7 @@ static void exit6(void)
         lv_timer_del(wifi_timer);
         wifi_timer = NULL;
 
-        WiFi.stopSmartConfig();
+        wifi_queue_cmd(WIFI_CMD_STOP_SMARTCONFIG);
         smartConfigStart = false;
         wifi_timer         = NULL;
         wifi_timer_counter = 0;
@@ -3629,8 +3669,42 @@ static void destroy6(void)
     ui_set_rotation(LV_DISP_ROT_NONE);
 }
 
+static void wifi_process_queued_commands(void)
+{
+    if (!wifi_cmd_q) return;
+    WifiCmd cmd;
+    while (xQueueReceive(wifi_cmd_q, &cmd, 0) == pdTRUE) {
+        switch (cmd.type) {
+            case WIFI_CMD_ENABLE_APSTA:
+                wifi_enable_apsta();
+                break;
+            case WIFI_CMD_RECONFIG_AP:
+                WiFi.softAPdisconnect(true);
+                if (!WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_pwd.c_str())) {
+                    Serial.println("[wifi] softAP reconfigure failed");
+                }
+                break;
+            case WIFI_CMD_DISCONNECT_STA:
+                WiFi.disconnect();
+                break;
+            case WIFI_CMD_BEGIN_SMARTCONFIG:
+                WiFi.beginSmartConfig();
+                break;
+            case WIFI_CMD_STOP_SMARTCONFIG:
+                WiFi.stopSmartConfig();
+                break;
+            case WIFI_CMD_CONNECT_SAVED_STA:
+                wifi_connect_saved_sta_impl("queued");
+                break;
+            default:
+                break;
+        }
+    }
+}
+
 void ui_wifi_service_loop(void)
 {
+    wifi_process_queued_commands();
     if (!wifi_web_started) return;
     wifi_dns_server.processNextRequest();
     wifi_web_server.handleClient();
