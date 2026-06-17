@@ -245,23 +245,30 @@ bool disp_show_sleep_png_from_sd(const char *preferred_path)
         return false;
     }
 
-    File f;
     const char *path = NULL;
     for (const char *candidate : candidates) {
         if (!candidate || !candidate[0]) continue;
         if (path && strcmp(path, candidate) == 0) continue;
         File try_f = SD.open(candidate, FILE_READ);
         if (try_f && !try_f.isDirectory()) {
-            f = try_f;
             path = candidate;
+            try_f.close();
             break;
         }
         if (try_f) try_f.close();
     }
 
-    if (!f || f.isDirectory() || !path) {
+    if (!path) {
         sd_guard_unlock();
         Serial.printf("[SLEEP IMG] open failed preferred=%s\n", preferred);
+        return false;
+    }
+
+    File f = SD.open(path, FILE_READ);
+    if (!f || f.isDirectory()) {
+        if (f) f.close();
+        sd_guard_unlock();
+        Serial.printf("[SLEEP IMG] open retry failed path=%s\n", path);
         return false;
     }
 
