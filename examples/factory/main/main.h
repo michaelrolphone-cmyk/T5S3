@@ -28,6 +28,10 @@
 #define GLOBAL_BUF_LEN 48
 extern char global_buf[GLOBAL_BUF_LEN];
 
+#define SYSTEM_SLEEP_IMAGE_PATH "/system/display/sleep.png"
+#define LEGACY_SLEEP_IMAGE_PATH "/sleep.png"
+#define FALLBACK_SLEEP_ICON_PATH "/icons/apps/sleep.png"
+
 // io_extend
 extern "C" {
     void io_extend_lora_gps_power_on(bool en);
@@ -88,6 +92,9 @@ void disp_request_screen_replace(void);
 void disp_request_boot_replace(void);
 void disp_request_full_clear(void);
 bool disp_show_sleep_png_from_sd(const char *preferred_path);
+bool display_begin_shutdown_sequence(uint32_t timeout_ms);
+void display_cancel_pending_updates_for_shutdown(void);
+bool display_show_shutdown_image_from_sd(const char *path);
 void sd_guard_init();
 bool sd_guard_lock(uint32_t timeout_ms);
 void sd_guard_unlock();
